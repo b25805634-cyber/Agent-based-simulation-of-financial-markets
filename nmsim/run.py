@@ -134,7 +134,7 @@ def _managed_llm(cfg: Config, manager: RunManager, replay_from: str | None):
             replay_from,
             model_config=expected_config,
             event_logger=manager.events,
-            compatibility_metadata=manager.scientific_compatibility,
+            compatibility_metadata=manager.replay_compatibility,
         )
         tracker = CostTracker()
         manager.register_llm_runtime(
@@ -158,7 +158,7 @@ def _managed_llm(cfg: Config, manager: RunManager, replay_from: str | None):
         manager.run_dir,
         model_config=model_config,
         event_logger=manager.events,
-        compatibility_metadata=manager.scientific_compatibility,
+        compatibility_metadata=manager.replay_compatibility,
     )
     manager.register_llm_runtime(
         llm=llm,

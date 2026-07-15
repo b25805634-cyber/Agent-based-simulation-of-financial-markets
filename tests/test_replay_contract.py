@@ -17,6 +17,7 @@ import unittest
 from unittest import mock
 
 from nmsim.config import Config
+from nmsim.config_contract import build_effective_config_contract
 from nmsim.fingerprint import (
     SCIENTIFIC_COMPONENT_FILES,
     STRICT_COMPATIBILITY_FIELDS,
@@ -91,10 +92,24 @@ class ReplayContractTests(unittest.TestCase):
         self.source_dir = self.root / "recording"
         self.source_dir.mkdir()
         self.provider = _CountingProvider()
-        self.compatibility = scientific_compatibility_metadata(
+        science = scientific_compatibility_metadata(
             REPO_ROOT,
             git_state={"commit": "a" * 40, "dirty": False},
         )
+        cfg = Config(
+            provider="mock",
+            model="offline-contract-fixture",
+            temperature=0.0,
+            max_tokens=64,
+            cache_enabled=False,
+            out_dir=str(self.source_dir),
+        )
+        config_contract = build_effective_config_contract(
+            cfg,
+            base_dir=self.root,
+            execution_context={"test_boundary": "replay-contract"},
+        )
+        self.compatibility = {**science, **config_contract}
         recorder = RecordingLLM(
             self.provider,
             self.source_dir,
@@ -234,7 +249,7 @@ class ReplayContractTests(unittest.TestCase):
             out_dir=str(self.root / "managed"),
         )
         manager = RunManager.create(cfg, run_id="cross-commit-contract")
-        source_contract = dict(manager.scientific_compatibility)
+        source_contract = dict(manager.replay_compatibility)
         current_commit = source_contract.get("git_commit")
         source_commit = "0" * 40 if current_commit != "0" * 40 else "1" * 40
 
@@ -256,7 +271,7 @@ class ReplayContractTests(unittest.TestCase):
             cross_source,
             model_config=self.model_config,
             event_logger=manager.events,
-            compatibility_metadata=manager.scientific_compatibility,
+            compatibility_metadata=manager.replay_compatibility,
         )
         self.assertTrue(replay.cross_commit_same_scientific_fingerprint)
         replay.set_batch_context(4, self.context)

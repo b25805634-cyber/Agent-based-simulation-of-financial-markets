@@ -131,7 +131,7 @@ def _live(args, cfg, manager):
         model_config = runtime_model_config(cfg, recorded=source_config)
         llm = ReplayLLM(args.replay_from, model_config=model_config,
                         event_logger=manager.events,
-                        compatibility_metadata=manager.scientific_compatibility)
+                        compatibility_metadata=manager.replay_compatibility)
         tracker = CostTracker()
         manager.register_llm_runtime(
             llm=llm, provider=model_config.get("resolved_provider"),
@@ -146,7 +146,7 @@ def _live(args, cfg, manager):
         model_config = runtime_model_config(cfg, llm=inner)
         llm = RecordingLLM(inner, manager.run_dir, model_config=model_config,
                            event_logger=manager.events,
-                           compatibility_metadata=manager.scientific_compatibility)
+                           compatibility_metadata=manager.replay_compatibility)
         manager.register_llm_runtime(
             llm=llm, provider=model_config.get("resolved_provider"),
             model=model_config.get("model"), mode="record",

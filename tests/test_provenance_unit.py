@@ -132,6 +132,25 @@ class RunProvenanceTests(unittest.TestCase):
         self.assertEqual(manifest["execution"]["worker_count"], 3)
         self.assertEqual(manifest["execution"]["batching"]["max_batch_size"], 6)
 
+    def test_manifest_redacts_endpoint_userinfo_query_and_fragment_credentials(self) -> None:
+        userinfo_secret = "endpoint-userinfo-secret"
+        query_secret = "endpoint-query-api-key"
+        fragment_secret = "access_token=endpoint-fragment-secret"
+        self.cfg.openai_base_url = (
+            "https://user:{}@example.invalid/v1?api_key={}#{}".format(
+                userinfo_secret,
+                query_secret,
+                fragment_secret,
+            )
+        )
+        manager = self._manager("endpoint-redaction")
+        manifest_text = manager.manifest_path.read_text(encoding="utf-8")
+        for secret in (userinfo_secret, query_secret, fragment_secret):
+            self.assertNotIn(secret, manifest_text)
+        endpoint = _read_json(manager.manifest_path)["config"]["openai_base_url"]
+        self.assertIn("<redacted>@example.invalid", endpoint)
+        self.assertNotIn("user:", endpoint)
+
     def test_finish_writes_honest_n_results_and_finished_event(self) -> None:
         manager = self._manager("finished-run")
         result = manager.run_dir / "price_path.csv"

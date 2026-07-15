@@ -2,13 +2,14 @@
 
 本文描述 2026-07-15 工作区中的实际实现，不描述理想架构。核心入口是 `python3 -m nmsim.run`；`narrative_market_sim.py` 是已经分叉的旧 Phase-1 脚本。
 
-> Phase 1/1.1A 更新：核心回合顺序和科学语义未变；managed CLI/`run_seed` 现已在 Provider 外层加入 immutable run manifest、公共/私有事件、严格 LLM Record/Replay 以及科学组件指纹。Phase 1.1A 另新增不继续市场的离线 reparse audit。详细 schema 与命令见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md) 和 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)。下文关于市场、观察和随机性的描述仍是 compatibility baseline；原“raw response 不持久化”的缺口已由私有 sidecar 补上。
+> Phase 1/1.1A/1.1A.1 更新：核心回合顺序和科学语义未变；managed CLI/`run_seed` 现已在 Provider 外层加入 immutable run manifest、公共/私有事件、严格 LLM Record/Replay 以及科学组件指纹。Phase 1.1A 另新增不继续市场的离线 reparse audit；Phase 1.1A.1 将最终有效 `Config` 的分类摘要与 hash 绑定到 strict replay preflight。详细 schema 与命令见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md) 和 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)。下文关于市场、观察和随机性的描述仍是 compatibility baseline；原“raw response 不持久化”的缺口已由私有 sidecar 补上。
 
 ## 模块责任
 
 | 模块 | 当前责任 | 不负责的内容 |
 |---|---|---|
 | `nmsim/config.py` | 单一 `Config` dataclass、JSON 序列化和宽松 `from_dict` | 没有独立 Scenario、运行时校验、schema version 或 secret redaction |
+| `nmsim/config_contract.py` | 对最终有效 `Config` 逐字段 fail-closed 分类，生成稳定、脱敏的 scientific/model-request/execution 摘要与 hash | 不修改 Config 值；不替代 source fingerprint 或实际 resolved model config |
 | `nmsim/types.py` | `Order`、`Statement` TypedDict 和 `Side` | 没有 `Decision`、fill、portfolio 或 event 类型 |
 | `nmsim/prompts.py` | 六类 persona、real system/user prompt | 不执行 persona 数值 policy；不含数值 fundamental/social gain |
 | `nmsim/agents.py` | Agent 状态、NoiseAgent、本地 Mock 参数、prompt 路由、response ingest、statement | 不做资金/库存风控；不保存 raw response |
@@ -20,12 +21,12 @@
 | `nmsim/validation.py` | returns、stylized facts、reaction、reference loader、RMSE、DTW | 不提供统计置信区间、多事件设计或失败样本处理 |
 | `nmsim/events.py` | versioned 公共/私有 JSONL envelope、隐私键拦截 | 不改变 simulation 或推导反事实 |
 | `nmsim/fingerprint.py` | 稳定计算 parser、Prompt、Persona、simulation core 的 schema/hash 与总科学指纹 | 不用整仓 commit 代替科学兼容性；不纳入文档、运行产物或私有日志 |
-| `nmsim/recording.py` | logical LLM call Record/Replay；严格校验请求身份、model config、schema/hash 和科学指纹 | 不捕获 SDK 内部 retry 的中间 response；错配时不回退 Provider；不生成反事实回答 |
+| `nmsim/recording.py` | logical LLM call Record/Replay；记录有效配置契约，并严格校验请求身份、model config、schema/hash、运行时科学配置和科学源指纹 | 不捕获 SDK 内部 retry 的中间 response；错配时不回退 Provider；不生成反事实回答 |
 | `nmsim/reparse_audit.py` | 离线读取历史 raw response，用当前 `parse_order` 重新解析并逐字段对比 | 不构造 Provider、不继续仿真、不生成新价格轨迹 |
-| `nmsim/provenance.py` | 唯一 run directory、原子 manifest、hash、环境、honest-N、安全兼容链接 | 无 `.git` 时不能凭空恢复 commit |
+| `nmsim/provenance.py` | 唯一 run directory、原子 manifest、环境、honest-N、安全兼容链接；在 Provider 边界前计算并持久化 source/config 契约 | 无 `.git` 时不能凭空恢复 commit |
 | `nmsim/run.py` | CLI、Config 覆盖、managed record/replay、六类兼容输出和终端摘要 | 不暴露全部 Config；不改变旧 market/social/risk 语义 |
 | `experiments/run_seed.py` | 单个实验、Meta 对齐、health、compact orders、统一 provenance/record/replay | CSV reuse 不产生新的 LLM events；旧根 JSON只作兼容投影 |
-| `experiments/*driver*.py` | 子进程/线程批量、endpoint wait、retry、部分 health gate | 被拒 run 常被删除；workers/retry 不进入单 run JSON |
+| `experiments/*driver*.py` | 子进程/线程批量、endpoint wait、retry、部分 health gate；driver/worker 身份传入 managed manifest | retry 细节仍不进入旧的单 run 结果 JSON |
 | `experiments/*analyze*.py` | 读取历史 JSON/trace 并计算表/图 | 多个 analyzer 的过滤、配对和 CI 口径不一致 |
 
 ## Scientific Component Fingerprint
@@ -52,20 +53,53 @@
 
 `README`、`docs/`、测试、实验 driver、`nmsim/run.py`、`nmsim/events.py` 及 fingerprint/provenance/recording/reparse instrumentation、run directories、results 和 private logs 均不进入科学文件集。Event/recording 变化由独立 schema 版本管理；fingerprint 算法本身变化必须同步提升 `fingerprint_schema_version`。因此单纯文档变化不应拒绝 replay。但这是保守集合：上述科学源文件按原始字节计算，即使只改其中的普通注释，也会使 core hash 改变并触发 strict replay 拒绝。`git_commit`/`git_dirty` 依然记录于 manifest 和 recording，但 commit 本身不是唯一兼容键。
 
+## Effective Config 契约
+
+Scientific Component Fingerprint 回答“执行的科学源码是否兼容”；`nmsim/config_contract.py` 另行回答“这次运行实际使用的配置是否兼容”。它对 CLI/实验脚本已合并到 `Config` 的最终值做稳定规范化，不改写任何配置或市场状态。`nmsim.run.run` 中原有的 `news_round > n_rounds` clamp 发生在 `RunManager.create` 之前，所以该入口 hash 的是 clamp 后的真实有效值；Phase 1.1A.1 没有为其他入口新增 clamp 或改变默认值。
+
+38 个 `Config` 字段必须在显式 registry 中有 category 和 rationale，没有默认落入 execution 的分支。若 dataclass 新增字段而 registry 未同步，或 registry 残留已删除字段，`validate_config_classification` 立即抛出错误。当前分类边界是：
+
+| 类别 | 典型字段/运行项 | hash 与 Strict Replay 行为 |
+|---|---|---|
+| scientific | seed/round/news、人口与 noise、价格与 kappa、social/network/digest、leverage/margin、`reference_path` 数据身份 | 进入 `scientific_config_hash`；任一差异在 preflight 拒绝 |
+| model_request | requested provider/model/cheap-model、endpoint identity、temperature、max tokens、cache policy | 进入 `model_request_config_hash`；差异在 preflight 拒绝；resolved Provider/model 另由原有 secret-free `model_config` 逐键严格校验 |
+| execution | `out_dir`、脱敏 credential 状态，以及 run ID、scenario label、output root、worker、声明的 batching 和 input locator 等运行上下文 | 进入 `execution_config_hash`；差异写入 replay manifest 但允许继续 |
+
+每个 managed run 的 manifest 同时保存：
+
+- `config_hash_schema_version` 和分类 mapping 的 `config_classification_hash`；
+- 所有 Config 字段的 secret-free `effective_config_summary` 与 `full_effective_config_hash`；
+- 三个 category 的字段列表、规范化摘要和 category hash。
+
+`full_effective_config_hash` 对所有规范化后的 Config 字段做整体身份，因其中也有 execution 字段，它不被当成单一的阻断键。Strict Replay 分别使用 scientific/model-request hash 阻断科学或请求差异，并单独记录 execution 差异。规范化使用排序字段/键、tagged float hex、排序 set 和显式 Enum/tuple 表示；不支持的对象拒绝使用可含内存地址的 `repr` 充数。`reference_path` 存文件字节 SHA-256 与 size，不存绝对科学输入路径；endpoint 和 output/runtime path 只存脱敏 identity hash；API key 只有“已配置/未配置”与固定 redaction sentinel。
+
+`population` 是一个必须保留当前语义的特例：原始 counts 按 key 排序用于审计，同时显式保存按当前 dict insertion order 产生的 `effective_cast`。该 cast 会影响 Agent、batch、社交图和 leverage cohort 顺序，因此不能为追求表面上的 dict 无序性而丢掉。
+
 ## 从公开入口到价格更新
 
 ```mermaid
 flowchart TD
     CLI[python -m nmsim.run / experiment driver] --> CFG[Config]
-    CFG --> FACTORY[build_llm]
+    CFG --> RM[RunManager.create]
+    RM --> CONTRACT[effective Config summaries + hashes]
+    CONTRACT --> MANIFEST[running manifest + RunStarted]
+    CFG --> MODE{record or replay}
+    MODE -->|record| FACTORY[build_llm]
     FACTORY --> MOCK[MockLLM]
     FACTORY --> ANT[AnthropicLLM]
     FACTORY --> OAI[OpenAILLM]
     MOCK --> CACHE[CachingLLM]
     ANT --> CACHE
     OAI --> CACHE
-    CFG --> SIM[run_sim]
-    CACHE --> SIM
+    CACHE --> REC[RecordingLLM]
+    CONTRACT --> REC
+    MODE -->|replay| SOURCE[llm_records.jsonl]
+    SOURCE --> PREFLIGHT[ReplayLLM constructor preflight]
+    CONTRACT --> PREFLIGHT
+    PREFLIGHT -->|mismatch| FAILED[failed manifest + RunFailed; no RoundStarted]
+    PREFLIGHT -->|pass| SIM[run_sim]
+    REC --> SIM
+    CFG --> SIM
 
     SIM --> CAST[make_agents + init_leverage]
     CAST --> GRAPH[network + seed subset]
@@ -209,8 +243,9 @@ Agent.build_prompt
 Managed Provider 边界：
 
 ```text
-build_llm -> existing CachingLLM -> RecordingLLM -> run_sim
-record file -> ReplayLLM (no inner provider) -> run_sim
+RunManager -> source fingerprint + effective Config contract
+build_llm -> existing CachingLLM -> RecordingLLM(contract metadata) -> run_sim
+record file + current contract -> ReplayLLM constructor preflight (no inner provider) -> run_sim
 ```
 
 Recording 位于 cache 外侧，保存每个 logical Agent response；manifest 另记真实 Provider calls/cache hits。Provider 细节：
@@ -224,15 +259,26 @@ Recording 位于 cache 外侧，保存每个 logical Agent response；manifest �
 
 ### Strict Replay 兼容契约
 
-Strict replay 是 managed replay 的默认且唯一成功路径。`ReplayLLM` 完全不持有 inner Provider；构造阶段先加载并验证 recording，再消费响应。兼容检查分为三层：
+Strict replay 是 managed replay 的默认且唯一成功路径。`ReplayLLM` 完全不持有 inner Provider；`RunManager` 已在它构造前创建 running manifest、标记 `network_access=false`/`provider_calls=0` 并计算当前 source/config 契约。`ReplayLLM.__init__` 随后在调用 `run_sim`、发出第一个 `RoundStarted` 或消费第一条历史 response 之前完成 preflight。实际检查层次是：
 
-1. **科学与 schema 身份**：`fingerprint_schema_version`、`decision_parser_schema_version`、`decision_parser_source_hash`、`event_schema_version`、`recording_schema_version`、`prompt_source_hash`、`persona_source_hash`、`simulation_core_source_hash` 和 `scientific_component_fingerprint` 必须逐字段一致。同一 recording 内所有记录也必须声明同一身份。
-2. **模型逻辑配置**：Provider（requested/resolved）、模型名、temperature、max tokens、cache/use-cheap-model 状态和终点身份 hash 逐键比较；credential 不进入序列化配置。
-3. **每次 logical request**：Agent identity、Persona identity、round、全局调用序号、batch 序号/索引/大小与长度前缀的组合 Prompt hash 必须与下一条记录完全对应。加载 recording 时还会从保存的 system/user 正文重算两个单项 hash 和组合 hash，用于发现 recording 损坏。
+1. **Recording envelope 与完整性**：JSON、连续 call sequence、record type、Prompt/response hash 和单一 recording schema 先被验证。真正的 schema 1.0 recording 立即以 `legacy_recording_missing_replay_contract` 拒绝；不从当前默认值猜测或回填缺失契约。
+2. **Effective-config 契约完整性**：当前 recording schema 1.1 每条记录必须有 config hash schema、classification hash、三类 hash/字段列表/规范化摘要以及 full hash。Phase 1.1A 期间、在该扩展前产生的 schema 1.1 recording 虽有 source fingerprint，但缺少运行时配置契约，因而以 `recording_missing_runtime_config_contract` fail closed。
+3. **运行时科学/模型请求配置**：`config_hash_schema_version` 和 `config_classification_hash` 必须一致；`scientific_config_hash` 或 `model_request_config_hash` 不一致时，按规范化摘要列出具体差异字段，只显示该字段安全值 hash 和 category hash 缩写，随即拒绝。`execution_config_hash` 不作阻断键；其字段级差异写入 manifest 的 `replay_compatibility` 并显式标记 allowed。
+4. **科学源与 schema 身份**：`fingerprint_schema_version`、`decision_parser_schema_version`、`decision_parser_source_hash`、`event_schema_version`、`recording_schema_version`、`prompt_source_hash`、`persona_source_hash`、`simulation_core_source_hash` 和 `scientific_component_fingerprint` 必须逐字段一致。同一 recording 内所有记录必须声明同一 source/config 身份。
+5. **Resolved 模型逻辑配置**：Provider（requested/resolved）、最终模型名、temperature、max tokens、cache/use-cheap-model 状态和 endpoint identity hash 在原有 secret-free `model_config` 中逐键比较；credential 不进入该序列化对象。
+6. **每次 logical request**：只有 constructor preflight 全部通过后，仿真才会开始。每轮的 Agent identity、Persona identity、round、全局调用序号、batch 序号/索引/大小与长度前缀的组合 Prompt hash 必须与下一条记录完全对应。整批全部匹配后 cursor 才推进，结束时还必须消费全部 recording。
 
-任一字段不一致均立即抛出 `ReplayMismatchError`；报错指明具体字段，hash 只显示缩写，不回显完整 Prompt 或 private rationale。managed 运行会保留 failed manifest 和 `RunFailed` 事件，不生成看似成功的 canonical 结果；也没有网络路径或 Provider fallback。
+`RecordingLLM` 在每条 schema 1.1 logical-call record 中保存 `RunManager.replay_compatibility`，即 source fingerprint/schema、Git identity 和全部 effective-config 契约；不仅依赖 manifest sidecar。任一阻断字段不一致均立即抛出 `ReplayMismatchError`。managed 运行会捕获该错误，在已创建的 run directory 保留 failed manifest 和 `RunFailed` 事件，且不生成看似成功的 canonical 结果。constructor preflight 错配时第一轮尚未开始、honest-N 为 0；若是 preflight 通过后的逐请求错配，manifest 则保留已完成的真实数量。错误不回显完整 Prompt、private rationale、API key 或 Authorization 内容；此路径没有网络访问或 Provider fallback。
 
-`git_commit` 和 `git_dirty` 用于 provenance，不代替上述精确契约。若来源 commit 和当前 commit 不同，但所有 strict 字段（尤其科学指纹）都相同，replay 可成功，manifest 明确写入 `cross_commit_same_scientific_fingerprint=true` 并保留 source/current commit。单纯 README/普通文档变化属于这一情形。反之，即使 commit 相同，dirty worktree 中的科学源文件变化也会更改具体 hash/总指纹并被拒绝。
+schema 1.0 和 pre-extension schema 1.1 的上述拒绝只表示它们不满足当前 Strict Replay 证据契约，不表示历史运行无效或 raw response 损坏。两者均仍可进入不继续市场的离线 Reparse Audit。
+
+worker/batch/cache 在这个边界中的分工是显式的：
+
+- driver `worker_count` 只并行独立 run，归入 execution runtime summary；可与原运行不同，但差异必须记录。它可影响真实 Provider 服务端的并发采样，因此这一放宽只对已固定 raw response 的离线 replay 安全，不构成真实 Provider 统计确定性保证。
+- 当前没有用户可配的 per-run batch size；simulation 固定每轮提交一个包含全部 LLM Agents 的 logical batch。manifest 中声明的 driver/batching 描述属 execution，但实际 batch sequence/index/size 仍在 logical request 层逐条严格校验；population 及其 `effective_cast` 则属 scientific preflight。
+- `cache_enabled` 会改变响应是否复用及 Provider miss-batch/采样路径，归入 model_request，同时受 category hash 和 resolved `model_config` 严格约束，不允许在 Strict Replay 中静默改变。Recording 位于 cache 外层，仍只保存 logical batch，未单独保存 Provider 实际 miss-batch 的详细组成。
+
+`git_commit` 和 `git_dirty` 用于 provenance，不代替上述精确契约。若来源 commit 和当前 commit 不同，但 source fingerprint、scientific/model-request config 与其他 strict 字段都相同，replay 可成功，manifest 明确写入 `cross_commit_same_scientific_fingerprint=true` 并保留 source/current commit。单纯 README/普通文档变化可属于这一情形。反之，即使 commit 相同，dirty worktree 中的科学源文件或运行时科学配置变化也会更改具体 hash 并被拒绝。
 
 这一路径是“在已记录请求契约和市场状态下返回同一 LLM 字符串”，不会为已改变的市场状态生成反事实 Agent 回答，也不等同于真实 Provider 的统计可复现性。
 
@@ -254,7 +300,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 
 ### `Config`
 
-38 个字段，完整实效表见 [CODEX_HANDOFF_AUDIT.md](CODEX_HANDOFF_AUDIT.md)。它同时混合 timeline、population、provider、social、leverage、validation 和 output concern，没有独立 Scenario/Policy/Engine 配置。
+38 个字段，完整实效表见 [CODEX_HANDOFF_AUDIT.md](CODEX_HANDOFF_AUDIT.md)。它同时混合 timeline、population、provider、social、leverage、validation 和 output concern，没有独立 Scenario/Policy/Engine 配置。Phase 1.1A.1 没有拆分或改写该 dataclass，只在边界将其 27 个 scientific、9 个 model-request 和 2 个 execution 字段逐一登记到 `CONFIG_FIELD_RULES`；任一未分类新字段都使契约构建 fail closed。
 
 ### `Order` (`TypedDict`)
 
@@ -307,7 +353,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 | parsed traces | `sim.run_sim` | 是，LLM-only CSV |
 | propagation metrics | `PropagationMetrics.record` | 聚合 CSV；per-agent snapshots 否 |
 | validation facts | `run.run` | 是，JSON |
-| Config | `run.run` | 是，但含 API key 且不是 resolved runtime manifest |
+| Config 与兼容契约 | `RunManager` / `run.run` | 是；manifest 保存脱敏 Config、分类摘要/hash 和 resolved LLM 身份，legacy `config.json` 也会拒绝持久化显式 secret |
 | tracker cost | provider/tracker | 只打印；experiment JSON 写部分 |
 | liquidation events | `sim.run_sim` | 主 CLI 否；`run_seed` 是 |
 
@@ -322,7 +368,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 | NoiseAgent | `Random((base_seed*1000003) XOR (idx*9176+round))` | 固定 seed/index/round 可复现 |
 | Leverage | 无 RNG | cohort 和 ratio 取决于稳定 agent 顺序 |
 | Real LLM | provider/server sampling | 不发送 seed；temperature=0 不保证位级确定 |
-| Thread/process scheduling | driver `workers`、provider batching | gather 保持返回索引，但服务端 batch 浮点/采样可能受并发影响；未记录 |
+| Thread/process scheduling | driver `workers`、provider batching | manifest 记录 driver workers、声明的 batching 和实际 logical batch sizes；gather 保持返回索引，但 SDK 内部调度与服务端 batch 浮点/采样仍可能受并发影响 |
 
 ## 输出边界
 
@@ -335,7 +381,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 5. `config.json`
 6. `sim_overview.png`（matplotlib 可用时）
 
-并新增 `run_manifest.json`、`events.jsonl`、`private_events.jsonl`、`llm_records.jsonl`。manifest 与每条 LLM recording 保存 parser/event/recording/fingerprint schema 版本、Prompt/Persona/parser/core 哈希、总科学指纹以及 Git 身份；replay 运行的 manifest 还保存 strict 检查结果和 cross-commit 标志。事件现记录 observation hash/public feed、LLM logical calls、所有提交订单、真实 Agent fill、逐轮 portfolio 变更、margin/liquidation、metrics、batch 与 run status。
+并新增 `run_manifest.json`、`events.jsonl`、`private_events.jsonl`、`llm_records.jsonl`。manifest 与每条 LLM recording 保存 parser/event/recording/fingerprint schema 版本、Prompt/Persona/parser/core 哈希、总科学指纹、Git 身份，以及版本化的 effective-config 分类、脱敏摘要和 full/scientific/model-request/execution hashes；replay 运行的 manifest 还保存 strict 检查结果、execution 差异与 cross-commit 标志。事件现记录 observation hash/public feed、LLM logical calls、所有提交订单、真实 Agent fill、逐轮 portfolio 变更、margin/liquidation、metrics、batch 与 run status。
 
 Reparse audit 不写入 managed run directory，而是在单独 audit 目录写出 public results、0600 private rationale sidecar 和 summary；该目录不包含价格轨迹或仿真 canonical 输出。
 

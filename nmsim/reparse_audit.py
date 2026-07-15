@@ -56,6 +56,14 @@ _CONTRACT_REPORT_FIELDS = (
     "git_commit",
     "git_dirty",
 )
+_RUNTIME_CONFIG_REPORT_FIELDS = (
+    "config_hash_schema_version",
+    "config_classification_hash",
+    "full_effective_config_hash",
+    "scientific_config_hash",
+    "model_request_config_hash",
+    "execution_config_hash",
+)
 
 
 def _utc_now() -> str:
@@ -304,6 +312,13 @@ def _recorded_contract(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         for field in STRICT_COMPATIBILITY_FIELDS
         if fields.get(field) is None
     ]
+    runtime_config_fields = {
+        field: records[0].get(field) if records else None
+        for field in _RUNTIME_CONFIG_REPORT_FIELDS
+    }
+    runtime_config_missing = [
+        field for field, value in runtime_config_fields.items() if value is None
+    ]
     return {
         "status": (
             "available" if not compatibility_missing else "legacy_contract_unavailable"
@@ -311,6 +326,15 @@ def _recorded_contract(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         "missing_fields": missing,
         "compatibility_missing_fields": compatibility_missing,
         "fields": fields,
+        "runtime_config_contract": {
+            "status": (
+                "available"
+                if not runtime_config_missing
+                else "runtime_config_contract_unavailable"
+            ),
+            "missing_fields": runtime_config_missing,
+            "fields": runtime_config_fields,
+        },
     }
 
 

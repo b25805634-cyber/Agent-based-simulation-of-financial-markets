@@ -22,6 +22,14 @@ import threading
 from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
+from .config_contract import (
+    CONFIG_CONTRACT_RECORD_FIELDS,
+    EXECUTION,
+    MODEL_REQUEST,
+    SCIENTIFIC,
+    category_field_differences,
+    normalised_value_digest,
+)
 from .events import EventLogger, json_safe
 from .fingerprint import (
     RECORDING_SCHEMA_VERSION,
@@ -88,13 +96,113 @@ def _compatibility_mismatch(field: str, expected: Any, actual: Any) -> ReplayMis
 def _compatibility_from_record(record: Mapping[str, Any]) -> dict[str, Any]:
     values = {
         field: record.get(field)
-        for field in (*STRICT_COMPATIBILITY_FIELDS, "git_commit", "git_dirty")
+        for field in (
+            *STRICT_COMPATIBILITY_FIELDS,
+            *CONFIG_CONTRACT_RECORD_FIELDS,
+            "git_commit",
+            "git_dirty",
+        )
     }
     # Phase 1 records predate the explicit field but their envelope was 1.0.
     # This makes the strict rejection diagnostic concrete rather than "missing".
     if values.get("recording_schema_version") is None:
         values["recording_schema_version"] = record.get("schema_version")
     return values
+
+
+def _missing_contract_fields(
+    metadata: Mapping[str, Any], fields: Sequence[str]
+) -> list[str]:
+    return [field for field in fields if metadata.get(field) is None]
+
+
+def _legacy_recording_error(
+    record: Mapping[str, Any], current: Mapping[str, Any]
+) -> ReplayMismatchError:
+    required = tuple(
+        dict.fromkeys((*STRICT_COMPATIBILITY_FIELDS, *CONFIG_CONTRACT_RECORD_FIELDS))
+    )
+    source = _compatibility_from_record(record)
+    missing = _missing_contract_fields(source, required)
+    # recording_schema_version is represented by the 1.0 envelope for the
+    # purpose of the diagnostic; it is incompatible rather than absent.
+    if record.get("schema_version") == "1.0":
+        missing = [field for field in missing if field != "recording_schema_version"]
+    return ReplayMismatchError(
+        "legacy_recording_missing_replay_contract: recording schema 1.0 cannot "
+        "be used for strict replay; missing_fields={}; expected_current_schema={}; "
+        "the historical run is not invalid and remains eligible for offline "
+        "Reparse Audit, but missing compatibility data will not be guessed or "
+        "backfilled".format(
+            missing,
+            _display_mismatch_value(current.get("recording_schema_version")),
+        )
+    )
+
+
+def _missing_runtime_config_contract_error(
+    *, source: bool, missing: Sequence[str], recording_schema: Any = None
+) -> ReplayMismatchError:
+    side = "recording" if source else "current run"
+    code = (
+        "recording_missing_runtime_config_contract"
+        if source
+        else "current_runtime_config_contract_missing"
+    )
+    schema_note = (
+        " schema={}".format(_display_mismatch_value(recording_schema))
+        if source and recording_schema is not None
+        else ""
+    )
+    return ReplayMismatchError(
+        "{}: {}{} lacks required effective-config fields={}; strict replay will "
+        "not infer them from current defaults. The recording remains valid "
+        "historical evidence and can be used for offline Reparse Audit.".format(
+            code, side, schema_note, list(missing)
+        )
+    )
+
+
+def _config_category_mismatch(
+    category: str,
+    expected: Mapping[str, Any],
+    actual: Mapping[str, Any],
+) -> ReplayMismatchError:
+    hash_field = {
+        SCIENTIFIC: "scientific_config_hash",
+        MODEL_REQUEST: "model_request_config_hash",
+    }[category]
+    summary_field = {
+        SCIENTIFIC: "scientific_config_summary",
+        MODEL_REQUEST: "model_request_config_summary",
+    }[category]
+    fields = category_field_differences(expected, actual, category)
+    if not fields:
+        fields = ["<hash-only-or-summary-unavailable>"]
+    left = expected.get(summary_field)
+    right = actual.get(summary_field)
+    left = left if isinstance(left, Mapping) else {}
+    right = right if isinstance(right, Mapping) else {}
+    field_details = []
+    for field in fields:
+        field_details.append(
+            "{}(expected=sha256:{} actual=sha256:{})".format(
+                field,
+                normalised_value_digest(left.get(field))[:12],
+                normalised_value_digest(right.get(field))[:12],
+            )
+        )
+    return ReplayMismatchError(
+        "strict replay config mismatch category={}; fields=[{}]; "
+        "expected_{}={} actual_{}={}".format(
+            category,
+            ", ".join(field_details),
+            hash_field,
+            _display_mismatch_value(expected.get(hash_field)),
+            hash_field,
+            _display_mismatch_value(actual.get(hash_field)),
+        )
+    )
 
 
 def _prompt_hash(system: str, user: str) -> str:
@@ -400,6 +508,12 @@ class RecordingLLM(_ContextMixin):
             "scientific_component_fingerprint": self.compatibility_metadata.get(
                 "scientific_component_fingerprint"
             ),
+            "scientific_config_hash": self.compatibility_metadata.get(
+                "scientific_config_hash"
+            ),
+            "model_request_config_hash": self.compatibility_metadata.get(
+                "model_request_config_hash"
+            ),
         }
 
     def __getattr__(self, name: str) -> Any:
@@ -425,6 +539,9 @@ class RecordingLLM(_ContextMixin):
             "model_config": self.model_config,
             "scientific_component_fingerprint": self.compatibility_metadata.get(
                 "scientific_component_fingerprint"
+            ),
+            "scientific_config_hash": self.compatibility_metadata.get(
+                "scientific_config_hash"
             ),
         }
         self.event_logger.emit(
@@ -637,6 +754,23 @@ class ReplayLLM(_ContextMixin):
                     "record file contains multiple model configurations"
                 )
 
+        current_compatibility = scientific_compatibility_metadata()
+        if compatibility_metadata is not None:
+            current_compatibility.update(dict(compatibility_metadata))
+        self.compatibility_metadata = _canonical_compatibility(current_compatibility)
+
+        schemas = {record.get("schema_version") for record in self._records}
+        if len(schemas) > 1:
+            raise ReplayMismatchError(
+                "record file contains multiple recording schema versions: {}".format(
+                    sorted(str(schema) for schema in schemas)
+                )
+            )
+        if schemas == {"1.0"}:
+            raise _legacy_recording_error(
+                self._records[0], self.compatibility_metadata
+            )
+
         self.source_compatibility_metadata = (
             _compatibility_from_record(self._records[0])
             if self._records else {}
@@ -648,16 +782,57 @@ class ReplayLLM(_ContextMixin):
                     "record file contains multiple scientific compatibility identities"
                 )
 
-        current_compatibility = scientific_compatibility_metadata()
-        if compatibility_metadata is not None:
-            current_compatibility.update(dict(compatibility_metadata))
-        self.compatibility_metadata = _canonical_compatibility(current_compatibility)
         if self._records:
+            source_missing = _missing_contract_fields(
+                self.source_compatibility_metadata,
+                CONFIG_CONTRACT_RECORD_FIELDS,
+            )
+            if source_missing:
+                raise _missing_runtime_config_contract_error(
+                    source=True,
+                    missing=source_missing,
+                    recording_schema=self._records[0].get("schema_version"),
+                )
+            current_missing = _missing_contract_fields(
+                self.compatibility_metadata,
+                CONFIG_CONTRACT_RECORD_FIELDS,
+            )
+            if current_missing:
+                raise _missing_runtime_config_contract_error(
+                    source=False, missing=current_missing
+                )
+
+            for field in (
+                "config_hash_schema_version",
+                "config_classification_hash",
+            ):
+                expected = self.source_compatibility_metadata.get(field)
+                actual = self.compatibility_metadata.get(field)
+                if expected != actual:
+                    raise _compatibility_mismatch(field, expected, actual)
+
+            for category in (SCIENTIFIC, MODEL_REQUEST):
+                hash_field = "{}_config_hash".format(category)
+                expected = self.source_compatibility_metadata.get(hash_field)
+                actual = self.compatibility_metadata.get(hash_field)
+                if expected != actual:
+                    raise _config_category_mismatch(
+                        category,
+                        self.source_compatibility_metadata,
+                        self.compatibility_metadata,
+                    )
+
             for field in STRICT_COMPATIBILITY_FIELDS:
                 expected = self.source_compatibility_metadata.get(field)
                 actual = self.compatibility_metadata.get(field)
                 if expected != actual:
                     raise _compatibility_mismatch(field, expected, actual)
+
+        self.execution_config_differences = category_field_differences(
+            self.source_compatibility_metadata,
+            self.compatibility_metadata,
+            EXECUTION,
+        ) if self._records else []
 
         self.source_git_commit = self.source_compatibility_metadata.get("git_commit")
         self.current_git_commit = self.compatibility_metadata.get("git_commit")
@@ -727,6 +902,9 @@ class ReplayLLM(_ContextMixin):
             "batch_sizes": list(self.batch_sizes),
             "cross_commit_same_scientific_fingerprint": (
                 self.cross_commit_same_scientific_fingerprint
+            ),
+            "execution_config_differences": list(
+                self.execution_config_differences
             ),
         }
 

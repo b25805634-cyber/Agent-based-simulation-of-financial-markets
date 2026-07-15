@@ -7,6 +7,8 @@ import pathlib
 import tempfile
 import unittest
 
+from nmsim.config import Config
+from nmsim.config_contract import build_effective_config_contract
 from nmsim.events import EventLogger
 from nmsim.recording import RecordingLLM, ReplayLLM, ReplayMismatchError
 
@@ -70,12 +72,26 @@ class RecordingReplayTests(unittest.TestCase):
             "max_tokens": 64,
             "cache_enabled": False,
         }
+        cfg = Config(
+            provider="mock",
+            model="fake-model-v1",
+            temperature=0.0,
+            max_tokens=64,
+            cache_enabled=False,
+            out_dir=str(self.record_dir),
+        )
+        self.compatibility = build_effective_config_contract(
+            cfg,
+            base_dir=self.root,
+            execution_context={"test_boundary": "recording-unit"},
+        )
         self.logger = EventLogger("record-run", self.record_dir)
         self.recorder = RecordingLLM(
             self.provider,
             self.record_dir,
             self.model_config,
             self.logger,
+            compatibility_metadata=self.compatibility,
         )
         self.first_prompts = [
             ("SYSTEM_PRIVATE_CONTENT_A", "USER_PRIVATE_CONTENT_A"),
@@ -106,6 +122,7 @@ class RecordingReplayTests(unittest.TestCase):
             self.record_dir,
             self.model_config,
             EventLogger("replay-run", replay_dir),
+            compatibility_metadata=self.compatibility,
         )
 
     def test_record_then_replay_is_offline_and_returns_identical_responses(self):
@@ -205,7 +222,11 @@ class RecordingReplayTests(unittest.TestCase):
                 with self.assertRaisesRegex(
                     ReplayMismatchError, "model configuration mismatch"
                 ):
-                    ReplayLLM(self.record_dir, changed)
+                    ReplayLLM(
+                        self.record_dir,
+                        changed,
+                        compatibility_metadata=self.compatibility,
+                    )
 
     def test_private_files_are_restricted_and_public_events_are_sanitized(self):
         self._record_two_batches()

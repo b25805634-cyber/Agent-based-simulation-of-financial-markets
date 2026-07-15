@@ -25,9 +25,10 @@ import subprocess
 import sys
 import threading
 from typing import Any, Iterable, Mapping, Optional
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 import uuid
 
+from .config_contract import build_effective_config_contract
 from .fingerprint import scientific_compatibility_metadata
 
 
@@ -35,6 +36,10 @@ MANIFEST_SCHEMA_VERSION = "1.0"
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
 _SECRET_FIELD_RE = re.compile(
     r"(?:^|_)(?:api_?key|access_?token|auth_?token|secret|password|passwd)(?:$|_)",
+    re.IGNORECASE,
+)
+_SECRET_QUERY_RE = re.compile(
+    r"(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|password|secret|token)",
     re.IGNORECASE,
 )
 _DEPENDENCIES = ("numpy", "matplotlib", "anthropic", "openai", "httpx")
@@ -80,16 +85,33 @@ def _jsonable(value: Any) -> Any:
 
 
 def _redact_url_credentials(value: str) -> str:
-    """Remove RFC-style userinfo without changing ordinary URLs."""
+    """Remove URL userinfo and credential-shaped query values."""
     try:
         parsed = urlsplit(value)
     except ValueError:
         return value
-    if not parsed.scheme or not parsed.netloc or "@" not in parsed.netloc:
+    if not parsed.scheme or not parsed.netloc:
         return value
-    host = parsed.netloc.rsplit("@", 1)[1]
-    return urlunsplit((parsed.scheme, f"<redacted>@{host}", parsed.path,
-                       parsed.query, parsed.fragment))
+    host = parsed.netloc.rsplit("@", 1)[-1]
+    netloc = "<redacted>@{}".format(host) if "@" in parsed.netloc else host
+    query = urlencode(
+        [
+            (
+                key,
+                "<redacted>"
+                if _SECRET_QUERY_RE.search(key)
+                or item.strip().lower().startswith("bearer ")
+                else item,
+            )
+            for key, item in parse_qsl(parsed.query, keep_blank_values=True)
+        ]
+    )
+    fragment = (
+        "<redacted>"
+        if _SECRET_QUERY_RE.search(parsed.fragment)
+        else parsed.fragment
+    )
+    return urlunsplit((parsed.scheme, netloc, parsed.path, query, fragment))
 
 
 def redact_secrets(value: Any, field_name: str = "") -> Any:
@@ -449,6 +471,26 @@ class RunManager:
                 requested_worker_count = 1
         requested_provider = os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", None)
         requested_model = os.environ.get("LLM_MODEL") or getattr(cfg, "model", None) or None
+        effective_batching = _jsonable(batching) if batching is not None else {
+            "strategy": "provider complete_batch; simulation submits one LLM-agent batch per round"
+        }
+        config_contract = build_effective_config_contract(
+            cfg,
+            base_dir=Path.cwd(),
+            execution_context={
+                "run_id": self.run_id,
+                "scenario_id": scenario["id"],
+                "out_root": self.out_root,
+                "worker_count": max(1, int(requested_worker_count)),
+                "batching": effective_batching,
+                "input_paths": {label: path for label, path in inputs},
+            },
+        )
+        self.config_contract = config_contract
+        self.replay_compatibility = {
+            **scientific_compatibility,
+            **config_contract,
+        }
 
         initial = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -460,8 +502,9 @@ class RunManager:
             "status": "running",
             "failure_reason": None,
             "git": git_state,
-            **scientific_compatibility,
+            **self.replay_compatibility,
             "scientific_compatibility": scientific_compatibility,
+            "config_contract": config_contract,
             "cross_commit_same_scientific_fingerprint": None,
             "config": config,
             "config_sha256": _stable_json_hash(config),
@@ -482,9 +525,7 @@ class RunManager:
             },
             "execution": {
                 "worker_count": max(1, int(requested_worker_count)),
-                "batching": _jsonable(batching) if batching is not None else {
-                    "strategy": "provider complete_batch; simulation submits one LLM-agent batch per round"
-                },
+                "batching": effective_batching,
                 "batch_sizes": [],
                 "batch_count": 0,
             },
@@ -603,6 +644,37 @@ class RunManager:
                         ).get("scientific_component_fingerprint"),
                         "strict_compatibility_passed": True,
                         "cross_commit_same_scientific_fingerprint": cross_commit,
+                        "source_full_effective_config_hash": getattr(
+                            llm, "source_compatibility_metadata", {}
+                        ).get("full_effective_config_hash"),
+                        "current_full_effective_config_hash": getattr(
+                            llm, "compatibility_metadata", {}
+                        ).get("full_effective_config_hash"),
+                        "source_scientific_config_hash": getattr(
+                            llm, "source_compatibility_metadata", {}
+                        ).get("scientific_config_hash"),
+                        "current_scientific_config_hash": getattr(
+                            llm, "compatibility_metadata", {}
+                        ).get("scientific_config_hash"),
+                        "source_model_request_config_hash": getattr(
+                            llm, "source_compatibility_metadata", {}
+                        ).get("model_request_config_hash"),
+                        "current_model_request_config_hash": getattr(
+                            llm, "compatibility_metadata", {}
+                        ).get("model_request_config_hash"),
+                        "source_execution_config_hash": getattr(
+                            llm, "source_compatibility_metadata", {}
+                        ).get("execution_config_hash"),
+                        "current_execution_config_hash": getattr(
+                            llm, "compatibility_metadata", {}
+                        ).get("execution_config_hash"),
+                        "execution_config_differences": list(
+                            getattr(llm, "execution_config_differences", [])
+                        ),
+                        "execution_config_differences_detected": bool(
+                            getattr(llm, "execution_config_differences", [])
+                        ),
+                        "execution_config_differences_allowed": True,
                     }
             if provider is not None:
                 self.manifest["llm"]["resolved_provider"] = str(provider)
