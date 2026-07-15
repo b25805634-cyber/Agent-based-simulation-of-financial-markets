@@ -22,6 +22,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from nmsim.run_context import ManagedRunContext
+from nmsim.result_reuse import inspect_legacy_analysis_inputs
 
 DELTA = 0.18          # 2x2 baseline ON-OFF drop effect, the size we must resolve
 N_MIN, N_MAX = 8, 12
@@ -106,6 +107,12 @@ def main(argv=None):
         run_id=args.run_id,
         input_paths=inputs,
     )
+    managed.manifest["analysis_input_provenance"] = (
+        inspect_legacy_analysis_inputs(inputs).as_manifest_payload()
+    )
+    for descriptor in managed.manifest.get("inputs", []):
+        descriptor["provenance_class"] = "legacy_unverified_input"
+    managed.manifest.write_atomic()
     with managed:
         managed.set_stage("result_export")
         analysis = {

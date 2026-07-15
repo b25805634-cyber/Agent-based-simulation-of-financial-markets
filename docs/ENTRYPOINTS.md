@@ -1,7 +1,7 @@
 # Entrypoint inventory and management policy
 
-This document records the executable surfaces found in the Phase 1.1A codebase
-and their Phase 1.1B lifecycle policy. The machine-readable source is
+This document records the executable surfaces found through Phase 1.2A and
+their current lifecycle and result-reuse policy. The machine-readable source is
 [nmsim/entrypoints.py](../nmsim/entrypoints.py). Importing that registry has no
 provider, Git, network, or filesystem side effect.
 
@@ -40,15 +40,17 @@ Management policies are more precise than a managed/unmanaged boolean:
 |---|---|---|---|---|---|
 | python3 -m nmsim.run (nmsim/run.py) | argparse → cfg_from_args → run → RunManager.create → record/replay wrapper → run_sim → export | Managed, but lifecycle logic is embedded in run | Run directory, manifest/events, six canonical files and compatible flat links | Direct record or offline replay | Yes, direct_managed |
 | nmsim.run.run(config, ...) | validated Config → same path as CLI | Managed high-level Python API with filesystem effects | Same as CLI | Direct record or offline replay | Yes, direct_managed; this is not the low-level library API |
-| python3 -m experiments.run_seed | argparse → Config assembly → RunManager.create → _live → run_sim, or provider-free CSV reuse → export | Managed, but duplicates lifecycle/provider/export logic | Canonical result, recording/manifest/events and non-overwriting legacy flat JSON | Direct, replay, or none in CSV reuse | Yes, direct_managed |
+| python3 -m experiments.run_seed | argparse → Config assembly → ManagedRunContext → live `run_sim`, strict replay, or provider-free `--price-csv` historical analysis → export | Managed, but previously duplicated lifecycle/provider/export logic | Canonical result, recording/manifest/events and non-overwriting legacy flat JSON | Direct, replay, or none in historical CSV analysis | Yes, direct_managed; `--price-csv` uses `run_kind=analysis` and is not child-run reuse |
 | python3 -m experiments.capture_traces | argparse → Config → build_llm → bare run_sim → JSON | Unmanaged | Ordinary trace JSON containing private reasoning | Direct | Yes only after direct_managed; rationale must be a 0600 private artifact |
+| python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Phase 1.2A Provider guard → ManagedRunContext → 48 cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Direct interface, but Phase 1.2A permits only Mock/Fake; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
 
 Evidence in the Phase 1.1A source:
 
 - nmsim/run.py:225-238 creates RunManager and calls run_sim; lines 264-288
   write and finalize canonical outputs.
-- experiments/run_seed.py:341-360 creates RunManager and executes live or
-  CSV-reuse mode; lines 372-404 write canonical/legacy results and finish.
+- experiments/run_seed.py creates a managed attempt and executes live/replay or
+  explicit provider-free historical CSV analysis; the latter records input
+  hashes and is not accepted as a resumed child simulation.
 - experiments/capture_traces.py:41-58 builds a provider, directly calls run_sim,
   and writes reasoning into an unmanaged JSON.
 
@@ -78,6 +80,19 @@ managed. The current parent lifecycle now writes `driver_summary.json`,
 unitized per-cell/total completion, and a 0600 private failure-detail file;
 each simulation remains a separately managed child.
 
+Phase 1.2A also routes every resume candidate through the centralized
+`nmsim.result_reuse` policy. A path or healthy-looking flat JSON is not
+completion evidence: only a finished, identity-matching managed child whose
+registered artifacts re-hash correctly may increment `reused_runs`,
+`completed_runs`, or `honest_n_runs`. Summaries now report `planned_runs`,
+`started_runs`, `executed_runs`, `reused_runs`,
+`reuse_candidates_examined`, `reuse_candidates_rejected`, `completed_runs`,
+`failed_runs`, and `honest_n_runs`, plus rejection counts by stable reason
+code. A rejected candidate is audited but not counted; the driver launches a
+new immutable child attempt rather than overwriting or relabeling the old
+result. A Git commit difference alone is allowed when every scientific,
+runtime-config, model-request and artifact identity still matches.
+
 ### Derived research outputs
 
 These commands do not call a Provider or run a market. They nevertheless
@@ -99,6 +114,33 @@ For analysis attempts, simulation/round/decision/request planned counts are zero
 or null as appropriate. Input-run counts require an explicit unit and must not
 be confused with independent statistical N.
 
+Phase 1.2A makes a second boundary explicit. `experiments.run_seed
+--price-csv` and the six managed analyzers may read explicitly selected
+historical flat files, but record each path, size and SHA-256 with
+`provenance_class=legacy_unverified_input` and readable/failed/unverified
+counts. Those files are analysis inputs, not resumed child runs: they never
+increase `executed_runs`, `reused_runs`, or `honest_n_runs`, and no synthetic
+child manifest is created. Diagnostic analyzers remain non-provenance-complete
+historical inspection paths.
+
+## Model qualification entrypoint
+
+`python3 -m experiments.model_qualification` is an official managed research
+entrypoint with `run_kind=model_qualification`. The version-controlled protocol
+combines six existing Personas with eight frozen Observation fixtures, yielding
+48 stable case identities. It records engineering metrics and relative
+behavioral diagnostics; it does not prescribe one correct trading action,
+clear a market, create a price path, or contribute a simulation replicate.
+
+Phase 1.2A accepts only `provider=mock` and the in-process
+`fake_test_provider`. `--dry-run` validates and hashes all 48 cases without
+constructing a Provider; Provider calls remain zero and network access is
+false. External Provider ids are rejected before construction. Real-model
+qualification is intentionally deferred, and the capability registry is a
+descriptive adapter contract rather than a model-quality score. See
+[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md) and
+[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md).
+
 ## Test and diagnostic entrypoints
 
 | Entrypoint | Actual purpose | Writes files | Provider | Formal research allowed |
@@ -115,7 +157,7 @@ be confused with independent statistical N.
 | experiments.additive_test | load result JSON → print regressions and CI | No | No | No |
 | python3 -m unittest discover -s tests -v | test discovery and helpers/low-level APIs | Temporary files only | No real Provider | No |
 
-The eleven test files that also have standalone unittest.main guards are:
+The fifteen test files that also have standalone unittest.main guards are:
 
 - tests/test_phase1_integration.py
 - tests/test_privacy_invariant.py
@@ -128,6 +170,10 @@ The eleven test files that also have standalone unittest.main guards are:
 - tests/test_managed_run_context.py
 - tests/test_managed_entrypoints.py
 - tests/test_managed_analysis_entrypoints.py
+- tests/test_driver_result_reuse_accounting.py
+- tests/test_result_reuse.py
+- tests/test_provider_capabilities.py
+- tests/test_model_qualification.py
 
 They share the test-suite registry policy; individual execution does not create
 a formal research run.
@@ -193,10 +239,12 @@ must not be the only enforcement mechanism.
 
 Important remaining risks:
 
-- A flat result currently called cached by a driver is accepted by filename and
-  health fraction, not by manifest/schema/fingerprint identity.
-- archive_rejected_result moves flat compatibility files; canonical managed run
-  directories must never be moved or overwritten.
+- Pre-Phase-1.2A flat results without a verifiable managed child manifest are
+  intentionally ineligible for formal resume, even when scientifically useful
+  as explicitly marked historical-analysis inputs.
+- Result-reuse policy authenticates identities and registered bytes; it does
+  not establish the causal validity of an experiment or make a real Provider
+  deterministic.
 - Driver retries are attempts, while accepted child simulations are runs; both
   need separate counters.
 - Partial files and plots do not make a failed analysis or simulation a
@@ -206,3 +254,7 @@ Important remaining risks:
   retroactively rewritten.
 - Managed provenance records what calculation ran; it does not cure known
   inferential limitations of legacy analyzers.
+- The qualification protocol is frozen before any real-model call, but the
+  current real User Prompt does not expose the fixture's fundamental-value
+  field. That visibility boundary must be reviewed and versioned before the
+  corresponding real-provider diagnostic is interpreted.

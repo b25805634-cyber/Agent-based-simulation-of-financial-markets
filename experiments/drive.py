@@ -1,5 +1,8 @@
-"""Drive many (gain, seed) runs with a concurrency cap. Resumable: skips any
-(gain, seed) whose result JSON already exists, so a re-launch only fills gaps.
+"""Drive many (gain, seed) runs with a concurrency cap.
+
+Resume is identity-gated: a prior managed child is reused only after its
+manifest, scientific/model identity, completion, and artifact hashes pass the
+central result-reuse policy.  A same-named flat file alone never counts.
 
 Each run is a separate subprocess (isolated asyncio loop / failure domain).
 
@@ -24,7 +27,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from experiments.driver_utils import (
-    archive_rejected_result,
+    assess_run_seed_reuse,
     run_managed_driver_jobs,
     set_driver_provenance,
 )
@@ -57,10 +60,6 @@ def _wait_for_endpoint(max_wait=180):
     return True
 
 
-def _exists(out, gain, seed):
-    return os.path.exists(os.path.join(out, f"g{gain}_s{seed}.json"))
-
-
 def _bad_frac(out, gain, seed):
     try:
         with open(os.path.join(out, f"g{gain}_s{seed}.json")) as fh:
@@ -69,22 +68,16 @@ def _bad_frac(out, gain, seed):
         return 1.0
 
 
-def _healthy(out, gain, seed):
-    return _exists(out, gain, seed) and _bad_frac(out, gain, seed) <= BAD_THRESHOLD
+def _command(gain, seed, provider, out):
+    return [sys.executable, "-m", "experiments.run_seed",
+            "--gain", str(gain), "--seed", str(seed),
+            "--provider", provider, "--out", out, "--label", f"g{gain}"]
 
 
-def _run(gain, seed, provider, out):
+def _run(gain, seed, provider, out, on_child_launch=None):
     """Run one seed; retry if the endpoint corrupted it (high bad-order rate)."""
     tag = f"g{gain} s{seed}"
-    path = os.path.join(out, f"g{gain}_s{seed}.json")
-    if os.path.exists(path):
-        bad = _bad_frac(out, gain, seed)
-        if bad <= BAD_THRESHOLD:
-            return (tag, True, "cached")
-        archive_rejected_result(path, f"pre-existing bad_frac={bad} > {BAD_THRESHOLD}")
-    cmd = [sys.executable, "-m", "experiments.run_seed",
-           "--gain", str(gain), "--seed", str(seed),
-           "--provider", provider, "--out", out, "--label", f"g{gain}"]
+    cmd = _command(gain, seed, provider, out)
     # Pin PYTHONHASHSEED so every subprocess is identical (defense-in-depth on top
     # of the seed-derived RNGs; the sim is already hash-independent — see repro_check).
     env = {**os.environ, "PYTHONHASHSEED": "0"}
@@ -94,20 +87,19 @@ def _run(gain, seed, provider, out):
         if provider == "openai" and not _wait_for_endpoint():
             last = "endpoint unreachable (VPN down >180s)"
             continue
+        if on_child_launch is not None:
+            on_child_launch()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(
-                path,
-                f"subprocess exit {p.returncode}; details are in the managed driver private log",
-            )
             continue
         bad = _bad_frac(out, gain, seed)
         if bad <= BAD_THRESHOLD:
             return (tag, True, f"{p.stdout.strip()} (attempt {attempt})")
         # corrupted -> drop it and retry
         last = f"bad_frac={bad} > {BAD_THRESHOLD}, retrying"
-        archive_rejected_result(path, last)
+        # Keep the immutable managed child and its compatibility projection.
+        # A later attempt may publish a new managed link; history is not moved.
     return (tag, False, f"gave up after {MAX_RETRIES} attempts: {last}")
 
 
@@ -127,7 +119,7 @@ def main(argv=None):
         raise SystemExit(2)
 
     ap = RaisingArgumentParser(allow_abbrev=False)
-    ap.add_argument("--version", action="version", version="experiments.drive phase-1.1b")
+    ap.add_argument("--version", action="version", version="experiments.drive phase-1.2a")
     ap.add_argument("--gains", type=float, nargs="+", required=True)
     ap.add_argument("--seeds", type=int, nargs="+", required=True)
     ap.add_argument("--provider", default="openai")
@@ -140,7 +132,18 @@ def main(argv=None):
 
     set_driver_provenance(args.workers, "experiments.drive")
     all_jobs = [(g, s) for g in args.gains for s in args.seeds]
-    todo = [job for job in all_jobs if not _healthy(args.out, *job)]
+    reuse_checks = {}
+    def assess(job):
+        if job not in reuse_checks:
+            path = os.path.join(args.out, f"g{job[0]}_s{job[1]}.json")
+            reuse_checks[job] = assess_run_seed_reuse(
+                candidate_path=path,
+                allowed_result_root=args.out,
+                child_command=_command(job[0], job[1], args.provider, args.out),
+                max_bad_frac=BAD_THRESHOLD,
+            )
+        return reuse_checks[job]
+    todo = [job for job in all_jobs if assess(job) is None or not assess(job).reusable]
     print(f"jobs: {len(todo)} to run, {len(all_jobs) - len(todo)} already done "
           f"(workers={args.workers})", flush=True)
     failures, summary = run_managed_driver_jobs(
@@ -150,8 +153,10 @@ def main(argv=None):
         workers=args.workers,
         cell_name=lambda job: f"g{job[0]}",
         seed_identity=lambda job: job[1],
-        is_healthy=lambda job: _healthy(args.out, *job),
-        run_job=lambda job: _run(job[0], job[1], args.provider, args.out),
+        assess_reuse=assess,
+        run_job=lambda job, on_child_launch: _run(
+            job[0], job[1], args.provider, args.out, on_child_launch
+        ),
     )
     print(f"ALL DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)
 

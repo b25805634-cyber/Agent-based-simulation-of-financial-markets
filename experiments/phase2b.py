@@ -29,7 +29,7 @@ from nmsim.managed_cli import (
 )
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
 from experiments.driver_utils import (
-    archive_rejected_result,
+    assess_run_seed_reuse,
     run_managed_driver_jobs,
     set_driver_provenance,
 )
@@ -46,14 +46,7 @@ def _bad(p):
         return 1.0
 
 
-def _run(out, m, social, lev, seed, provider, total, model, lr, lspread, maint, lfrac):
-    path = _path(out, m, social, lev, seed)
-    tag = os.path.basename(path)[:-5]
-    if os.path.exists(path):
-        bad = _bad(path)
-        if bad <= BAD_THRESHOLD:
-            return (tag, True, "cached")
-        archive_rejected_result(path, f"pre-existing bad_frac={bad} > {BAD_THRESHOLD}")
+def _command(out, m, social, lev, seed, provider, total, model, lr, lspread, maint, lfrac):
     cmd = [sys.executable, "-m", "experiments.run_seed", "--seed", str(seed),
            "--provider", provider, "--out", out, "--social", social,
            "--m", str(m), "--total", str(total), "--temp", "0"]
@@ -65,23 +58,33 @@ def _run(out, m, social, lev, seed, provider, total, model, lr, lspread, maint, 
         if lfrac is not None:   cmd += ["--lev-fraction", str(lfrac)]
     if model:
         cmd += ["--model", model]
+    return cmd
+
+
+def _run(
+    out, m, social, lev, seed, provider, total, model, lr, lspread, maint,
+    lfrac, on_child_launch=None,
+):
+    path = _path(out, m, social, lev, seed)
+    tag = os.path.basename(path)[:-5]
+    cmd = _command(
+        out, m, social, lev, seed, provider, total, model,
+        lr, lspread, maint, lfrac,
+    )
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     last = ""
     for attempt in range(1, MAX_RETRIES + 1):
         if provider == "openai" and not _wait_for_endpoint():
             last = "endpoint unreachable (VPN down >180s)"; continue
+        if on_child_launch is not None:
+            on_child_launch()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(
-                path,
-                f"subprocess exit {p.returncode}; details are in the managed driver private log",
-            )
             continue
         if _bad(path) <= BAD_THRESHOLD:
             return (tag, True, f"{p.stdout.strip()} (attempt {attempt})")
         last = f"bad_frac>{BAD_THRESHOLD}"
-        archive_rejected_result(path, last)
     return (tag, False, f"gave up: {last}")
 
 
@@ -101,7 +104,7 @@ def main(argv=None):
         raise SystemExit(2)
 
     ap = RaisingArgumentParser(allow_abbrev=False)
-    ap.add_argument("--version", action="version", version="experiments.phase2b phase-1.1b")
+    ap.add_argument("--version", action="version", version="experiments.phase2b phase-1.2a")
     ap.add_argument("--m", type=float, default=0.7)
     ap.add_argument("--cells", choices=["levoff", "levon", "both"], default="both")
     ap.add_argument("--socials", nargs="+", default=["off", "on"])
@@ -127,6 +130,21 @@ def main(argv=None):
           f"(workers={args.workers}, lev L={args.leverage_ratio}±{args.leverage_spread} "
           f"maint={args.maint} frac={args.lev_fraction})", flush=True)
 
+    reuse_checks = {}
+    def assess(job):
+        if job not in reuse_checks:
+            reuse_checks[job] = assess_run_seed_reuse(
+                candidate_path=_path(args.out, args.m, job[2], job[1], job[0]),
+                allowed_result_root=args.out,
+                child_command=_command(
+                    args.out, args.m, job[2], job[1], job[0], args.provider,
+                    args.total, args.model, args.leverage_ratio,
+                    args.leverage_spread, args.maint, args.lev_fraction,
+                ),
+                max_bad_frac=BAD_THRESHOLD,
+            )
+        return reuse_checks[job]
+
     failures, summary = run_managed_driver_jobs(
         out_root=args.out,
         command_identity="experiments.phase2b",
@@ -134,12 +152,8 @@ def main(argv=None):
         workers=args.workers,
         cell_name=lambda job: f"{job[2]}_{'lev' if job[1] else 'cash'}",
         seed_identity=lambda job: job[0],
-        is_healthy=lambda job: (
-            os.path.exists(_path(args.out, args.m, job[2], job[1], job[0]))
-            and _bad(_path(args.out, args.m, job[2], job[1], job[0]))
-            <= BAD_THRESHOLD
-        ),
-        run_job=lambda job: _run(
+        assess_reuse=assess,
+        run_job=lambda job, on_child_launch: _run(
             args.out,
             args.m,
             job[2],
@@ -152,6 +166,7 @@ def main(argv=None):
             args.leverage_spread,
             args.maint,
             args.lev_fraction,
+            on_child_launch,
         ),
     )
     print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)

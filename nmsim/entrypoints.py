@@ -118,6 +118,26 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         PROVIDER_DIRECT, True,
         "Private rationale belongs only in a 0600 private artifact, never a public summary.",
     ),
+    _spec(
+        "experiments.model_qualification", "experiments/model_qualification.py",
+        "python3 -m experiments.model_qualification",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        (
+            "bootstrap",
+            "frozen fixture/rubric validation",
+            "Phase 1.2A provider guard",
+            "ManagedRunContext",
+            "48 qualification cases or dry-run",
+            "public/private export",
+        ),
+        (
+            "managed qualification run directory",
+            "public case results and aggregate diagnostics",
+            "0600 private case records",
+        ),
+        PROVIDER_DIRECT, True,
+        "Not a market simulation. Phase 1.2A permits only Mock/Fake and rejects external providers before construction.",
+    ),
 
     # Experiment-level drivers.  Their run-count lifecycle is managed at the
     # driver level; every simulation remains a separate managed run_seed child.

@@ -21,6 +21,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from nmsim.run_context import ManagedRunContext
+from nmsim.result_reuse import inspect_legacy_analysis_inputs
 
 _T95 = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,
         9:2.262,10:2.228,11:2.201,12:2.179,13:2.160,14:2.145,15:2.131}
@@ -169,6 +170,12 @@ def main(argv=None):
         run_id=args.run_id,
         input_paths=inputs,
     )
+    managed.manifest["analysis_input_provenance"] = (
+        inspect_legacy_analysis_inputs(inputs).as_manifest_payload()
+    )
+    for descriptor in managed.manifest.get("inputs", []):
+        descriptor["provenance_class"] = "legacy_unverified_input"
+    managed.manifest.write_atomic()
     with managed:
         managed.set_stage("result_export")
         analysis = {

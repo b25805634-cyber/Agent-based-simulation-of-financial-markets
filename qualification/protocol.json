@@ -1,0 +1,56 @@
+{
+  "case_identity_schema_version": "1.0",
+  "fixture_set_schema_version": "1.0",
+  "protocol_version": "1.0",
+  "run_kind": "model_qualification",
+  "persona_ids": [
+    "retail_crowd",
+    "fomo_momentum",
+    "value_institution",
+    "quant_arb",
+    "influencer_amplifier",
+    "contrarian_fund"
+  ],
+  "fixture_ids": [
+    "negative_news_price_unchanged",
+    "price_crash_no_news",
+    "unanimous_neighbor_panic",
+    "conflicting_neighbor_views",
+    "neutral_placebo_news",
+    "insufficient_cash",
+    "insufficient_inventory",
+    "deep_discount_to_fundamental"
+  ],
+  "expected_case_count": 48,
+  "provider_gate": {
+    "allowed_provider_ids": [
+      "fake_test_provider",
+      "mock"
+    ],
+    "external_provider_policy": "reject_before_provider_construction",
+    "phase": "1.2A"
+  },
+  "prompt_policy": {
+    "fake_test_provider": "existing_real_agent_prompt",
+    "mock": "existing_mock_agent_prompt",
+    "private_prompt_in_public_output": false
+  },
+  "privacy": {
+    "private_case_file_mode": "0600",
+    "private_rationale_publication": "forbidden",
+    "public_fields": [
+      "sentiment",
+      "public_take",
+      "action",
+      "quantity",
+      "limit_price",
+      "diagnostic_flags"
+    ]
+  },
+  "interpretation": {
+    "counterfactual_market_run": false,
+    "single_correct_action_test": false,
+    "statistical_replicate_unit": "qualification_cases",
+    "purpose": "pre-provider engineering qualification and relative persona diagnostics"
+  }
+}

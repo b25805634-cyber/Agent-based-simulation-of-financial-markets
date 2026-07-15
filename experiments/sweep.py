@@ -6,8 +6,9 @@ Modes:
   sweep      m-levels x paired seeds, social on/off per pair, real Meta news
 
 Sequential by default (each 30-agent run already fires 30 concurrent calls per
-round; the vLLM endpoint hangs above ~70 sustained concurrent). Resumable
-(skips existing JSONs), VPN-wait, health gate, honest failures.log.
+round; the vLLM endpoint hangs above ~70 sustained concurrent). Resume uses
+the central managed-child identity and artifact gate rather than file
+existence; the existing VPN wait, health gate, and honest failures.log remain.
 
 Usage:
   python -m experiments.sweep calibrate --m 0.5 --seed 1 --reps 5 --out results_sweep
@@ -29,7 +30,7 @@ from nmsim.managed_cli import (
 )
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
 from experiments.driver_utils import (
-    archive_rejected_result,
+    assess_run_seed_reuse,
     run_managed_driver_jobs,
     set_driver_provenance,
 )
@@ -48,14 +49,7 @@ def _fname(out, m, social, seed, rep):
     return os.path.join(out, f"m{m:g}_real_{social}_s{seed}{sfx}.json")
 
 
-def _run_one(out, m, social, seed, rep, provider, temp, total, rounds, model=None):
-    path = _fname(out, m, social, seed, rep)
-    tag = os.path.basename(path)[:-5]
-    if os.path.exists(path):
-        bad = _bad_frac(path)
-        if bad <= BAD_THRESHOLD:
-            return (tag, True, "cached")
-        archive_rejected_result(path, f"pre-existing bad_frac={bad} > {BAD_THRESHOLD}")
+def _command(out, m, social, seed, rep, provider, temp, total, rounds, model=None):
     cmd = [sys.executable, "-m", "experiments.run_seed",
            "--seed", str(seed), "--provider", provider, "--out", out,
            "--news", "real", "--social", social,
@@ -66,25 +60,32 @@ def _run_one(out, m, social, seed, rep, provider, temp, total, rounds, model=Non
         cmd += ["--rep", str(rep)]
     if rounds is not None:
         cmd += ["--rounds", str(rounds)]
+    return cmd
+
+
+def _run_one(
+    out, m, social, seed, rep, provider, temp, total, rounds, model=None,
+    on_child_launch=None,
+):
+    path = _fname(out, m, social, seed, rep)
+    tag = os.path.basename(path)[:-5]
+    cmd = _command(out, m, social, seed, rep, provider, temp, total, rounds, model)
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     last = ""
     for attempt in range(1, MAX_RETRIES + 1):
         if provider == "openai" and not _wait_for_endpoint():
             last = "endpoint unreachable (VPN down >180s)"
             continue
+        if on_child_launch is not None:
+            on_child_launch()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(
-                path,
-                f"subprocess exit {p.returncode}; details are in the managed driver private log",
-            )
             continue
         bad = _bad_frac(path)
         if bad <= BAD_THRESHOLD:
             return (tag, True, f"{p.stdout.strip()} (attempt {attempt})")
         last = f"bad_frac={bad} > {BAD_THRESHOLD}, retrying"
-        archive_rejected_result(path, last)
     return (tag, False, f"gave up after {MAX_RETRIES} attempts: {last}")
 
 
@@ -104,7 +105,7 @@ def main(argv=None):
         raise SystemExit(2)
 
     ap = RaisingArgumentParser(allow_abbrev=False)
-    ap.add_argument("--version", action="version", version="experiments.sweep phase-1.1b")
+    ap.add_argument("--version", action="version", version="experiments.sweep phase-1.2a")
     ap.add_argument("mode", choices=["calibrate", "sweep"])
     ap.add_argument("--m", type=float, default=0.5, help="calibrate: fuel ratio")
     ap.add_argument("--seed", type=int, default=1, help="calibrate: the fixed seed")
@@ -135,9 +136,20 @@ def main(argv=None):
         jobs = [(m, soc, s, None)
                 for m in args.m_levels for s in args.seeds for soc in ("on", "off")]
 
-    todo = [j for j in jobs
-            if not (os.path.exists(_fname(args.out, j[0], j[1], j[2], j[3]))
-                    and _bad_frac(_fname(args.out, j[0], j[1], j[2], j[3])) <= BAD_THRESHOLD)]
+    reuse_checks = {}
+    def assess(job):
+        if job not in reuse_checks:
+            reuse_checks[job] = assess_run_seed_reuse(
+                candidate_path=_fname(args.out, job[0], job[1], job[2], job[3]),
+                allowed_result_root=args.out,
+                child_command=_command(
+                    args.out, job[0], job[1], job[2], job[3], args.provider,
+                    args.temp, args.total, args.rounds, args.model,
+                ),
+                max_bad_frac=BAD_THRESHOLD,
+            )
+        return reuse_checks[job]
+    todo = [j for j in jobs if assess(j) is None or not assess(j).reusable]
     print(f"{args.mode}: {len(jobs)} runs total, {len(todo)} to do "
           f"(total={args.total} agents, temp={args.temp}, rounds={args.rounds or 24})",
           flush=True)
@@ -149,12 +161,8 @@ def main(argv=None):
         workers=args.workers,
         cell_name=lambda job: f"m{job[0]:g}_{job[1]}",
         seed_identity=lambda job: job[2],
-        is_healthy=lambda job: (
-            os.path.exists(_fname(args.out, job[0], job[1], job[2], job[3]))
-            and _bad_frac(_fname(args.out, job[0], job[1], job[2], job[3]))
-            <= BAD_THRESHOLD
-        ),
-        run_job=lambda job: _run_one(
+        assess_reuse=assess,
+        run_job=lambda job, on_child_launch: _run_one(
             args.out,
             job[0],
             job[1],
@@ -165,6 +173,7 @@ def main(argv=None):
             args.total,
             args.rounds,
             args.model,
+            on_child_launch,
         ),
     )
     print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)

@@ -26,6 +26,8 @@ refactored into the typed `nmsim/` package and extended through Tasks 1–3.
 | `run_context.py` | formal `ManagedRunContext` lifecycle, Record/Replay wiring, completion accounting, idempotent finalization, plus the explicit no-provenance `NullRunContext`. |
 | `managed_cli.py` | two-stage CLI bootstrap and safe failed-attempt provenance. |
 | `entrypoints.py` | auditable registry of official, diagnostic, library and unsupported execution surfaces. |
+| `result_reuse.py` | versioned child-run identity and artifact-integrity gate for formal experiment resume. |
+| `provider_capabilities.py` | conservative, secret-free capability descriptions for reviewed Provider adapters; it does not construct a Provider or score model quality. |
 | `sim.py` | the round loop tying it all together. |
 | `run.py` | CLI entry point → CSVs, plots, cost print. |
 
@@ -53,6 +55,15 @@ python -m nmsim.run --reference examples/reference_episode.csv
 # exact offline replay of an existing recorded run (use the same scientific config):
 python -m nmsim.run --provider mock --rounds 4 --news-round 2 \
   --replay-from /tmp/nmsim-record/runs/<run-id> --out /tmp/nmsim-replay
+
+# Phase 1.2A model-qualification plan: 6 Personas × 8 fixtures = 48 cases;
+# dry-run constructs no Provider and performs no network access:
+python -m experiments.model_qualification --provider mock --dry-run \
+  --out /tmp/nmsim-qualification-dry
+
+# execute the same frozen 48-case protocol with the in-process Mock only:
+python -m experiments.model_qualification --provider mock \
+  --out /tmp/nmsim-qualification-mock
 ```
 
 `provider=auto` (the default) uses Anthropic when `ANTHROPIC_API_KEY` is set and
@@ -81,11 +92,33 @@ decisions, logical requests, response sources, Provider-interface calls and
 parsing. Legacy top-level `honest_n` means completed Agent decisions and is
 deprecated; experiment summaries use run-level `honest_n_runs`.
 
+Formal experiment resume is stricter than file existence. Result-reuse policy
+`1.0` accepts an old child only when its managed lifecycle, scientific source
+and runtime Config, Provider/model request identity, Scenario/input, seed,
+population, safe paths, and every registered artifact hash all match. Driver
+summaries distinguish `executed_runs`, validated `reused_runs`, candidates
+examined/rejected, completed/failed runs, and `honest_n_runs`. A rejected or
+manifest-free flat result is preserved and does not count as completion.
+Historical flat files may still be used by an explicitly managed analysis as
+hashed `legacy_unverified_input`; that is analysis input, not child-run reuse.
+
+`experiments.model_qualification` is a managed non-market entrypoint with
+`run_kind=model_qualification`. It freezes engineering checks and relative
+behavioral diagnostics before any real-model sampling; it is not a
+single-correct-action test, creates no price trajectory, and contributes zero
+simulation `honest_n_runs`. Phase 1.2A permits only Mock and the internal Fake
+test double and rejects external Providers before construction. Provider
+capability snapshots describe adapter behavior and network/auth boundaries;
+they do not establish model quality, realism, or deterministic responses.
+
 See [`docs/RUN_PROVENANCE.md`](docs/RUN_PROVENANCE.md) for schemas and replay,
 [`docs/MANAGED_RUN_LIFECYCLE.md`](docs/MANAGED_RUN_LIFECYCLE.md) for startup and
 failure handling, [`docs/ENTRYPOINTS.md`](docs/ENTRYPOINTS.md) for the supported
 execution surfaces, and [`docs/COMPLETION_ACCOUNTING.md`](docs/COMPLETION_ACCOUNTING.md)
-for units and honest-N.
+for units and honest-N. Phase 1.2A's exact boundaries are in
+[`docs/RESULT_REUSE_POLICY.md`](docs/RESULT_REUSE_POLICY.md),
+[`docs/PROVIDER_CAPABILITIES.md`](docs/PROVIDER_CAPABILITIES.md), and
+[`docs/MODEL_QUALIFICATION_PROTOCOL.md`](docs/MODEL_QUALIFICATION_PROTOCOL.md).
 
 `nmsim.sim.run_sim` remains a low-level in-memory library API. Tests and
 diagnostics may explicitly use `NullRunContext`, but those results are not

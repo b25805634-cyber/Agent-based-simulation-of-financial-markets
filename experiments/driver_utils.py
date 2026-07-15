@@ -3,7 +3,7 @@ from __future__ import annotations
 
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import json
 import os
 from pathlib import Path
@@ -13,6 +13,14 @@ from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from nmsim.run_context import ManagedRunContext
+from nmsim.result_reuse import (
+    ExpectedRunIdentity,
+    HEALTH_GATE_REJECTED,
+    RESULT_REUSE_POLICY_VERSION,
+    ReusableRunCandidate,
+    ReuseDecision,
+    validate_child_run_reuse,
+)
 
 
 DRIVER_SUMMARY_SCHEMA_VERSION = "1.0"
@@ -88,15 +96,20 @@ class ManagedDriverCompletion:
         self._finished = False
         self._private_failures: list[dict[str, Any]] = []
         self._failure_codes: Counter[str] = Counter()
+        self._reuse_rejection_codes: Counter[str] = Counter()
+        self._reuse_audit: list[dict[str, Any]] = []
         self._cells: dict[str, dict[str, int | str]] = {
             cell: {
                 "unit": "runs",
                 "planned_runs": int(planned),
                 "started_runs": 0,
+                "executed_runs": 0,
                 "completed_runs": 0,
                 "failed_runs": 0,
                 "honest_n_runs": 0,
                 "reused_runs": 0,
+                "reuse_candidates_examined": 0,
+                "reuse_candidates_rejected": 0,
             }
             for cell, planned in sorted(cell_plans.items())
         }
@@ -131,10 +144,13 @@ class ManagedDriverCompletion:
             for key in (
                 "planned_runs",
                 "started_runs",
+                "executed_runs",
                 "completed_runs",
                 "failed_runs",
                 "honest_n_runs",
                 "reused_runs",
+                "reuse_candidates_examined",
+                "reuse_candidates_rejected",
             )
         }
 
@@ -153,6 +169,37 @@ class ManagedDriverCompletion:
             cells=self.cells,
         )
 
+    def record_reuse_candidate(
+        self,
+        cell_name: str,
+        *,
+        tag: str,
+        seed: int,
+        decision: ReuseDecision,
+    ) -> None:
+        """Record a public-safe reuse decision without counting it as a run."""
+
+        with self._lock:
+            cell = self._cell(cell_name)
+            cell["reuse_candidates_examined"] = (
+                int(cell["reuse_candidates_examined"]) + 1
+            )
+            if not decision.reusable:
+                cell["reuse_candidates_rejected"] = (
+                    int(cell["reuse_candidates_rejected"]) + 1
+                )
+                for code in decision.reason_codes:
+                    self._reuse_rejection_codes[str(code)] += 1
+            self._reuse_audit.append(
+                {
+                    "cell": str(cell_name),
+                    "tag": str(tag),
+                    "seed": int(seed),
+                    **decision.public_summary(),
+                }
+            )
+            self._sync()
+
     def record_reused(self, cell_name: str, count: int = 1) -> None:
         """Count accepted pre-existing child results without pretending to run them."""
 
@@ -165,13 +212,26 @@ class ManagedDriverCompletion:
             self._sync()
 
     def record_started(self, cell_name: str) -> None:
-        """Count a child job when its worker actually begins execution."""
+        """Count a planned replicate slot when its worker begins execution."""
 
         with self._lock:
             cell = self._cell(cell_name)
             cell["started_runs"] = int(cell["started_runs"]) + 1
             if int(cell["started_runs"]) > int(cell["planned_runs"]):
                 raise RuntimeError("driver started_runs exceeds planned child runs")
+            self._sync()
+
+    def record_child_run_launched(self, cell_name: str) -> None:
+        """Count one newly launched managed child attempt.
+
+        Retries are distinct immutable managed child attempts, so this count
+        may exceed ``planned_runs`` while completed/honest-N remains bounded by
+        the number of planned replicate slots.
+        """
+
+        with self._lock:
+            cell = self._cell(cell_name)
+            cell["executed_runs"] = int(cell["executed_runs"]) + 1
             self._sync()
 
     def record_completed(self, cell_name: str, *, reused: bool = False) -> None:
@@ -211,18 +271,26 @@ class ManagedDriverCompletion:
         totals = self._totals()
         return {
             "schema_version": DRIVER_SUMMARY_SCHEMA_VERSION,
+            "result_reuse_policy_version": RESULT_REUSE_POLICY_VERSION,
             "run_id": self.context.manifest["run_id"],
             "driver": self.command_identity,
             "unit": "runs",
             "worker_count": self.worker_count,
             "planned_runs": totals["planned_runs"],
             "started_runs": totals["started_runs"],
+            "executed_runs": totals["executed_runs"],
             "completed_runs": totals["completed_runs"],
             "failed_runs": totals["failed_runs"],
             "honest_n_runs": totals["honest_n_runs"],
             "reused_runs": totals["reused_runs"],
+            "reuse_candidates_examined": totals["reuse_candidates_examined"],
+            "reuse_candidates_rejected": totals["reuse_candidates_rejected"],
             "cells": self.cells,
             "failure_codes": dict(sorted(self._failure_codes.items())),
+            "reuse_rejection_codes": dict(
+                sorted(self._reuse_rejection_codes.items())
+            ),
+            "reuse_audit": list(self._reuse_audit),
             "private_failure_details": self.PRIVATE_FAILURES_NAME,
             "legacy_failures_log": legacy_failures_log,
         }
@@ -278,15 +346,15 @@ def run_managed_driver_jobs(
     workers: int,
     cell_name: Callable[[Any], str],
     seed_identity: Callable[[Any], int],
-    is_healthy: Callable[[Any], bool],
-    run_job: Callable[[Any], tuple[str, bool, str]],
+    assess_reuse: Callable[[Any], Optional[ReuseDecision]],
+    run_job: Callable[[Any, Callable[[], None]], tuple[str, bool, str]],
 ) -> tuple[list[DriverJobResult], Path]:
-    """Execute a legacy child-job driver inside one run-unit lifecycle.
+    """Execute child jobs inside one run-unit lifecycle.
 
-    Existing healthy child results count as completed/reused runs but not as
-    newly started work.  Captured legacy messages stay in the mode-0600 driver
-    failure artifact; the public failure log contains controlled reason codes.
-    The helper changes no child command, retry rule, health gate, or statistic.
+    A pre-existing child counts as reused only after ``assess_reuse`` applies
+    the centralized identity and artifact gate.  Rejected candidates are
+    audited and then scheduled as fresh immutable child attempts; the old file
+    is never counted merely because its name and health field look plausible.
     """
 
     plans = Counter(cell_name(job) for job in jobs)
@@ -296,15 +364,26 @@ def run_managed_driver_jobs(
         cell_plans=plans,
         worker_count=workers,
     )
-    todo = [job for job in jobs if not is_healthy(job)]
+    assessments = [assess_reuse(job) for job in jobs]
+    todo = [
+        job for job, decision in zip(jobs, assessments)
+        if decision is None or not decision.reusable
+    ]
     failures: list[DriverJobResult] = []
 
     def execute(job: Any) -> DriverJobResult:
         cell = cell_name(job)
         seed = int(seed_identity(job))
         managed.record_started(cell)
+        launched = 0
+
+        def child_launched() -> None:
+            nonlocal launched
+            managed.record_child_run_launched(cell)
+            launched += 1
+
         try:
-            tag, ok, message = run_job(job)
+            tag, ok, message = run_job(job, child_launched)
         except BaseException as error:
             if isinstance(error, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -329,15 +408,25 @@ def run_managed_driver_jobs(
             seed=seed,
             ok=bool(ok),
             source="executed" if ok else "failed",
-            attempts=1,
+            attempts=launched,
             reason_code=None if ok else "child_run_failed",
             private_details=() if ok else ({"legacy_message": str(message)},),
         )
 
     with managed:
-        for job in jobs:
-            if is_healthy(job):
-                managed.record_reused(cell_name(job))
+        for job, decision in zip(jobs, assessments):
+            if decision is None:
+                continue
+            cell = cell_name(job)
+            seed = int(seed_identity(job))
+            managed.record_reuse_candidate(
+                cell,
+                tag="{} seed {}".format(cell, seed),
+                seed=seed,
+                decision=decision,
+            )
+            if decision.reusable:
+                managed.record_reused(cell)
 
         if workers > 1:
             with ThreadPoolExecutor(max_workers=workers) as executor:
@@ -379,6 +468,75 @@ def set_driver_provenance(workers: int, driver: str) -> None:
     """Expose driver-level concurrency to each run_seed subprocess."""
     os.environ["NMSIM_DRIVER_WORKERS"] = str(workers)
     os.environ["NMSIM_DRIVER"] = driver
+
+
+def expected_run_seed_identity(command: Sequence[str]) -> ExpectedRunIdentity:
+    """Derive the exact child identity from run_seed CLI arguments, offline.
+
+    Parsing applies every run_seed default before the Config hashes are built.
+    The helper never constructs an LLM Provider and never accesses a network.
+    """
+
+    tokens = [str(item) for item in command]
+    try:
+        module_index = tokens.index("experiments.run_seed")
+    except ValueError as error:
+        raise ValueError("child command is not experiments.run_seed") from error
+    from experiments.run_seed import build_argparser, config_from_args
+
+    args = build_argparser().parse_args(tokens[module_index + 1 :])
+    cfg = config_from_args(args)
+    rep_suffix = "_r{}".format(args.rep) if args.rep is not None else ""
+    basename = "{}_s{}{}.json".format(args.label, args.seed, rep_suffix)
+    input_paths: dict[str, str] = {}
+    for label, attribute in (
+        ("price_csv", "price_csv"),
+        ("traces_csv", "traces_csv"),
+        ("propagation_csv", "propagation_csv"),
+    ):
+        value = getattr(args, attribute, None)
+        if value:
+            input_paths[label] = str(value)
+    return ExpectedRunIdentity.from_effective_config(
+        cfg,
+        command_identity="python -m experiments.run_seed",
+        run_kind="simulation",
+        input_paths=input_paths or None,
+        required_artifacts=("experiment_result.json", basename),
+    )
+
+
+def assess_run_seed_reuse(
+    *,
+    candidate_path: os.PathLike[str] | str,
+    allowed_result_root: os.PathLike[str] | str,
+    child_command: Sequence[str],
+    max_bad_frac: Optional[float] = None,
+) -> Optional[ReuseDecision]:
+    """Return ``None`` for no candidate, otherwise a fail-closed decision."""
+
+    candidate = Path(candidate_path)
+    if not os.path.lexists(str(candidate)):
+        return None
+    expected = expected_run_seed_identity(child_command)
+    decision = validate_child_run_reuse(
+        ReusableRunCandidate(candidate, Path(allowed_result_root)), expected
+    )
+    if not decision.reusable or max_bad_frac is None:
+        return decision
+    try:
+        with candidate.open(encoding="utf-8") as stream:
+            bad_frac = float(json.load(stream)["health"]["bad_frac"])
+    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
+        bad_frac = float("inf")
+    if bad_frac > float(max_bad_frac):
+        return replace(
+            decision,
+            reusable=False,
+            reason_codes=(HEALTH_GATE_REJECTED,),
+            cross_commit_same_scientific_fingerprint=False,
+        )
+    return decision
 
 
 def archive_rejected_result(path: str, reason: str) -> str | None:

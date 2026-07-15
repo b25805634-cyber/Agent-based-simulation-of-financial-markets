@@ -25,6 +25,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from nmsim.run_context import ManagedRunContext
+from nmsim.result_reuse import inspect_legacy_analysis_inputs
 
 META = "nmsim/meta_feb2022_reference.csv"
 
@@ -178,6 +179,16 @@ def main(argv=None):
         run_id=args.run_id,
         input_paths=inputs,
     )
+    managed.manifest["analysis_input_provenance"] = (
+        inspect_legacy_analysis_inputs(inputs[1:]).as_manifest_payload()
+    )
+    for index, descriptor in enumerate(managed.manifest.get("inputs", [])):
+        descriptor["provenance_class"] = (
+            "scientific_reference_input"
+            if index == 0
+            else "legacy_unverified_input"
+        )
+    managed.manifest.write_atomic()
     names = (f"summary_g{args.gain}.json", f"envelope_g{args.gain}.png")
     with managed:
         managed.set_stage("result_export")

@@ -1,0 +1,79 @@
+{
+  "rubric_schema_version": "1.0",
+  "rubric_version": "1.0",
+  "protocol_version": "1.0",
+  "frozen_before_external_provider_calls": true,
+  "principles": [
+    "No fixture has one mandatory trading action.",
+    "Engineering validity and privacy are reported separately from behavioral diagnostics.",
+    "Behavioral diagnostics use distributions, ranges, relative comparisons, or not_scored.",
+    "A future rubric change requires a new rubric version and hash."
+  ],
+  "engineering_metrics": {
+    "schema_success_rate": "fraction of raw responses containing a JSON object with the required decision fields",
+    "parse_success_rate": "fraction accepted by the current Decision parser without its parse-failed fallback",
+    "validation_failure_rate": "fraction with an invalid action, quantity, sentiment, limit price, or missing public_take",
+    "fallback_rate": "fraction using a parser/provider fallback Decision",
+    "public_private_leakage_count": "exact non-empty private text duplicated into public_take",
+    "invalid_action_count": "raw action is outside buy/sell/hold",
+    "invalid_quantity_count": "raw quantity is not a non-negative integer",
+    "constraint_violation_count": "parsed buy exceeds visible cash or parsed sell exceeds visible shares",
+    "missing_public_take_count": "raw response has no non-empty explicit public_take",
+    "response_source": "count of final responses by Provider, cache, or replay source",
+    "latency": "case-level elapsed milliseconds when measurable; not a deterministic identity",
+    "token_usage": "Provider-reported usage when available, otherwise null rather than guessed",
+    "provider_failure_count": "qualification cases for which the selected Provider raised before a response",
+    "honest_n_cases": "completed qualification cases; never a simulation replicate count"
+  },
+  "behavioral_diagnostics": {
+    "sentiment_action_consistency": {
+      "mode": "range_diagnostic",
+      "rule": "buy sentiment >= 0, sell sentiment <= 0, hold absolute sentiment <= 0.25",
+      "mandatory_action": false
+    },
+    "persona_tendency_score": {
+      "mode": "distribution",
+      "range": [-1.0, 1.0],
+      "rule": "mean of sell=-1, hold=0, buy=1 by persona"
+    },
+    "social_response_score": {
+      "mode": "distribution",
+      "fixtures": ["unanimous_neighbor_panic", "conflicting_neighbor_views"]
+    },
+    "news_response_score": {
+      "mode": "distribution",
+      "fixtures": ["negative_news_price_unchanged", "neutral_placebo_news"]
+    },
+    "price_response_score": {
+      "mode": "distribution",
+      "fixtures": ["price_crash_no_news", "deep_discount_to_fundamental"]
+    },
+    "contrarian_response_score": {
+      "mode": "relative_diagnostic",
+      "fixture": "unanimous_neighbor_panic",
+      "comparison": "contrarian_fund versus fomo_momentum",
+      "mandatory_action": false
+    },
+    "fundamental_anchor_score": {
+      "mode": "relative_diagnostic",
+      "fixture": "deep_discount_to_fundamental",
+      "comparison": "value_institution versus retail_crowd",
+      "mandatory_action": false
+    },
+    "persona_distinctiveness": {
+      "mode": "distribution",
+      "rule": "report each persona action vector and action distribution before any aggregate"
+    },
+    "same_model_persona_collapse": {
+      "mode": "indicator",
+      "rule": "true only when all six persona action vectors are identical"
+    }
+  },
+  "relative_hypotheses": [
+    "quant_arb should exhibit lower direct sensitivity to pure social text than crowd-oriented personas",
+    "value_institution should show a stronger buy tendency than retail_crowd at a deep discount to unchanged fundamental value",
+    "contrarian_fund should be more likely than fomo_momentum to lean against unanimous panic",
+    "neutral placebo news should not induce a uniform extreme directional response across all personas"
+  ],
+  "not_scored_policy": "Missing evidence, ties, and ambiguous relative comparisons are reported as not_scored rather than coerced to pass or fail."
+}

@@ -24,6 +24,7 @@ It is not a live brokerage or real-money trading system.
 - Prefer small compatible changes over rewrites.
 - Keep simulation orchestration separate from Agent, market, information, and risk logic.
 - Keep every official user-facing research entrypoint in the central entrypoint registry and route it through `ManagedRunContext`; diagnostics and pure tests must explicitly use the `NullRunContext`/unmanaged policy and must never bypass the formal boundary while claiming provenance-complete results.
+- Never treat file existence or an unverified legacy flat result as a reusable experiment child; formal resume must pass the centralized versioned child-run identity and artifact-integrity policy, while historical flat files may enter only as explicitly hashed and labeled analysis inputs.
 - Do not add production dependencies without justification.
 - Preserve existing CLI and result schemas or provide an explicit migration.
 - Add tests for numerical and accounting invariants.

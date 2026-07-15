@@ -1,6 +1,6 @@
 # Run provenance、事件日志与 LLM Record/Replay
 
-本文描述 Phase 1–1.1B 的当前可执行接口。目标是审计一次已发生的运行，并在明确的源码、运行时配置和记录契约内重放；它不改变 Agent、Prompt、压力定价、社交传播、杠杆或统计公式。Phase 1.1B 只统一正式入口的运行生命周期、启动失败 provenance 和带单位的 completion / honest-N。各种 replay 与统计复现的边界见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)，本文不把它们统称为“完全可复现”。
+本文描述 Phase 1–1.2A 的当前可执行接口。目标是审计一次已发生的运行，并在明确的源码、运行时配置和记录契约内重放；它不改变 Agent、Prompt、压力定价、社交传播、杠杆或统计公式。Phase 1.2A 在 Phase 1.1 生命周期基础上只新增 child-result 身份复用门、Provider capability provenance 和冻结的离线模型资格协议。各种 replay 与统计复现的边界见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)，本文不把它们统称为“完全可复现”。
 
 ## 快速使用
 
@@ -61,9 +61,23 @@ python3 -m experiments.run_seed \
   --out /tmp/nmsim-experiment-replay
 ```
 
-CSV reuse 模式和 Replay 互斥。批量 driver 会通过环境把 driver 名和 worker 数传入每个 manifest。
+`--price-csv` 历史分析模式和 Replay 互斥；它是已 hash 且标记为 `legacy_unverified_input` 的派生计算，不是当前 experiment child 的 resume/reuse。批量 driver 会通过环境把 driver 名和 worker 数传入每个 manifest。
 
 正式研究入口的统一边界是 `ManagedRunContext`；它负责目录、manifest、公私事件、Record/Replay、completion 和终态。`nmsim.sim.run_sim` 仍是不自动写文件或读 Git 的低层 library API。`NullRunContext` 仅供单元测试、`repro_check` 和明确的诊断路径使用；它不是 provenance-complete 研究运行。责任、状态机和入口分类分别见 [MANAGED_RUN_LIFECYCLE.md](MANAGED_RUN_LIFECYCLE.md) 和 [ENTRYPOINTS.md](ENTRYPOINTS.md)。
+
+### 模型资格协议（Phase 1.2A 离线边界）
+
+```bash
+python3 -m experiments.model_qualification \
+  --provider mock --dry-run \
+  --out /tmp/nmsim-qualification-dry
+
+python3 -m experiments.model_qualification \
+  --provider mock \
+  --out /tmp/nmsim-qualification-mock
+```
+
+`--dry-run` 只验证并记录冻结的 protocol、八个 fixture、六个 Persona 和 rubric，形成 48 个稳定 case identity；它不构造 Provider，Provider call 为 0、`network_access=false`。完整 Mock 运行使用 `run_kind=model_qualification`，不调用 `run_sim`、不产生价格路径、不计入 simulation `honest_n_runs`。Phase 1.2A 对 Anthropic、OpenAI-compatible、`auto` 和其他外部 Provider 在构造前明确拒绝；本阶段不调用真实模型。见 [MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md)。
 
 ## 不可覆盖的目录布局
 
@@ -85,7 +99,7 @@ CSV reuse 模式和 Replay 互斥。批量 driver 会通过环境把 driver 名�
 - 可用 `--run-id` 指定测试/调试 ID；若已存在会明确失败，不会重用或覆盖。
 - 只有成功终态才发布 `latest` 和旧平铺兼容 symlink。平铺 link 直接指向生成该文件的不可变 run directory，不会因之后 `latest` 移动而改指向；已有普通文件或非受管 symlink 保持逐字节不变。
 - `run_seed` 的 canonical 结果是 run 目录中的 `experiment_result.json`；根目录仍投影原来的 `<label>_s<seed>[_rN].json`。若该路径已存在，只保留新的 canonical run，不覆盖旧文件。
-- health gate 拒绝的旧式根 JSON 被移到 `rejected/` 并附不可覆盖的原因 sidecar；不再删除失败证据。`runs/` 和 `rejected/` 都不会进入现有 analyzer 的根目录 glob。
+- Phase 1.2A driver 不会因为平铺文件“看起来已完成”而移动、覆盖或计入它。正式复用需要可验证的 managed child manifest 和 artifact hash；拒绝候选保持原样，新计算创建另一个不可覆盖 run。
 
 ## RunManifest
 
@@ -97,11 +111,11 @@ CSV reuse 模式和 Replay 互斥。批量 driver 会通过环境把 driver 名�
 | source | Git commit、dirty 状态、可行时的 diff hash；无 Git 时保留真实错误 |
 | config | 全部 Config 字段、config hash schema/classification、secret-free 全量/科学/模型请求/执行 hashes 与可审计摘要；API key 脱敏但 configured 状态不丢失 |
 | RNG | 本地 seed，并明确真实 Provider sampling 不受其完全控制 |
-| LLM | requested/resolved Provider/模型、temperature、`max_tokens`、cache、record/replay、endpoint hash、logical request、Provider call、cache hit、degraded 数 |
+| LLM | requested/resolved Provider/模型、temperature、`max_tokens`、cache、record/replay、endpoint hash、logical request、Provider call、cache hit、degraded 数，以及可选的脱敏 Provider capability snapshot |
 | execution | driver worker 数、batch 策略、每轮实际 batch size、batch 数、已知连接上限 |
 | population | Persona 完整定义、计划/实际人口、Agent id |
 | Prompt | `prompts.py` 源码 hash、模板版本和六类 system prompt hash |
-| inputs | reference、CSV reuse 或 replay record 的路径、存在性、大小和 SHA-256 |
+| inputs | reference、历史 CSV analysis input 或 replay record 的路径、provenance class、存在性、大小和 SHA-256 |
 | environment | Python、平台及 NumPy/Matplotlib/Anthropic/OpenAI/httpx 版本 |
 | lifecycle | managed context 状态、`failure_stage`、`outputs_complete`、simulation/managed completion 标志 |
 | completion | run、round、Agent decision、logical request、response source、Provider call 和 parsing 的带单位计数 |
@@ -130,6 +144,12 @@ Phase 1.1A.1 另在 manifest 顶层和 `config_contract` 中记录：
 Phase 1.1A.2 将新 recording envelope 正式升为 `1.2`。`RecordingLLM` 在首次 Provider 调用前校验 source/config metadata，并在每条记录落盘前校验完整 1.2 结构；不再生成新的 schema 1.1 记录。该阶段也通过 `nmsim/config_ingestion.py` 和 package bootstrap 把 mapping 配置输入改为 strict-default，但不改变 `nmsim/config.py` 原始字节或任何默认 Config 值。
 
 Phase 1.1B 在 manifest 中增加 `managed_context`、`bootstrap`、`failure_stage`、`outputs_complete`、`simulation_computation_completed`、`managed_run_completed` 和 `completion`。顶层 `honest_n` 保留但明确为 `agent_decisions` 单位的弃用兼容字段；批量实验使用 `planned_runs` / `started_runs` / `completed_runs` / `failed_runs` / `honest_n_runs`，不再把同一 simulation 内的 Decision 行数当成独立样本 N。完整口径见 [COMPLETION_ACCOUNTING.md](COMPLETION_ACCOUNTING.md)。
+
+Phase 1.2A 的 driver summary 另记录 `executed_runs`、`reused_runs`、
+`reuse_candidates_examined`、`reuse_candidates_rejected` 和按稳定
+reason code 汇总的拒绝数。身份门使用 `result_reuse_policy_version=1.0`，同时校验 lifecycle、scientific source/config、model request、Scenario/input、seed/population、安全路径和每个 canonical artifact 字节。文件存在不等于 run 可复用；细则见 [RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)。
+
+Provider capability schema `1.0` 记录当前 adapter 能力的保守、脱敏快照。它不改变 Provider 行为，不声称 temperature 0 使真实模型确定，也不进入 recording schema 1.2 的必填契约。因此缺少该快照的 Phase 1.1 schema 1.2 recording 仍按原 Strict Replay 规则处理。见 [PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md)。
 
 `full_effective_config_hash` 基于应用默认值、配置文件与 CLI 后的最终 `Config`，而不是用户显式输入的 CLI token。字段排序后以 UTF-8 规范 JSON 序列化；float 使用 `float.hex()`，Enum/tuple/set/bytes 有类型标记，Path 和 endpoint 只保存 identity hash，秘密只保存脱敏 configured 状态。`population` 同时保存排序 counts 和顺序敏感的 `effective_cast`，以匹配当前 Agent 创建/请求顺序。完整 38 字段分类表和精确 hash payload 见 [Replay 兼容性契约](REPLAY_COMPATIBILITY.md#运行时-effective-config-契约)。
 
@@ -257,6 +277,9 @@ PYTHONPYCACHEPREFIX=/tmp/nmsim-pycache \
 - `Config` 分类是显式 allowlist；新增 dataclass 字段必须同步增加 category、rationale 和测试，否则运行在创建 Provider/进入仿真前 fail closed。
 - Scientific fingerprint 使用显式维护的源文件清单。未来新增影响 Prompt、决策、事件顺序或科学计算的模块时，必须同步纳入清单并增加兼容测试，避免错误放行。
 - 真实 Provider 首次采样仍可能受服务端模型、调度、权重版本和 sampling 实现影响；temperature 0、local seed 或 cache 不能替代 Record/Replay。
+- Provider capability 快照只表述当前 adapter 对项目暴露的能力，不是质量评分，也不证明更强模型会形成更真实的 Agent。
+- 无 managed child manifest 的 legacy flat result 不再能正式 resume；它们仍可作为显式标记且已 hash 的历史分析输入，但其上游 Provider/model/config 身份仍不可验证。
+- Phase 1.2A qualification rubric 已在真实模型调用前冻结，但当前 real User Prompt 未显示 fixture 中的 `fundamental_value`；未来解锁真实 Provider 前必须先审阅该可见性契约，不能直接解读相关行为分数。
 - Phase 1 已为不可破坏的隐私约束收紧 legacy 异常路径：parser 不把只有 `rationale`、没有 `public_take` 的响应提升为 public text。当前 Mock 和标准 real schema 都显式返回 `public_take`，正常轨迹不受影响；Phase 1.1A 未再次改变这一行为，并用回归测试继续锁定它。
 - 事件记录没有修复现有 market 的无限余额、全额 fill、隐式做市商或 volume/fill 口径；它只把真实行为显式记录下来。
 - Phase 1 最初审计时工作区没有 `.git`，因此初始化前的 manifest 会如实记录 commit/dirty/diff 无法取得。Phase 0.5 建立仅本地 Git 基线后，新受管运行可以记录本地 commit、dirty 状态和可行时的 diff hash；这不会追溯改写旧 manifest。

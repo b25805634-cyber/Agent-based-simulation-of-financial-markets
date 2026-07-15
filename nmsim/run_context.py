@@ -492,6 +492,7 @@ class ManagedRunContext:
         """Construct Record or Strict Replay before entering the simulation."""
 
         from .llm import CostTracker, build_llm
+        from .provider_capabilities import provider_capability_snapshot
         from .recording import (
             RecordingLLM,
             ReplayLLM,
@@ -515,6 +516,20 @@ class ManagedRunContext:
             )
             source_config = recorded_model_config(replay_from)
             model_config = runtime_model_config(cfg, recorded=source_config)
+            resolved_provider = model_config.get("resolved_provider")
+            capability_snapshot = (
+                None
+                if resolved_provider in (None, "", "none")
+                else provider_capability_snapshot(
+                    str(resolved_provider),
+                    endpoint=(
+                        os.environ.get("OPENAI_BASE_URL")
+                        or getattr(cfg, "openai_base_url", None)
+                        if resolved_provider == "openai"
+                        else None
+                    ),
+                )
+            )
             llm = ReplayLLM(
                 replay_from,
                 model_config=model_config,
@@ -529,6 +544,20 @@ class ManagedRunContext:
             self.set_stage("provider_setup")
             inner, tracker = build_llm(cfg)
             model_config = runtime_model_config(cfg, llm=inner)
+            resolved_provider = model_config.get("resolved_provider")
+            capability_snapshot = (
+                None
+                if resolved_provider in (None, "", "none")
+                else provider_capability_snapshot(
+                    str(resolved_provider),
+                    endpoint=(
+                        os.environ.get("OPENAI_BASE_URL")
+                        or getattr(cfg, "openai_base_url", None)
+                        if resolved_provider == "openai"
+                        else None
+                    ),
+                )
+            )
             llm = RecordingLLM(
                 inner,
                 self.run_dir,
@@ -544,6 +573,10 @@ class ManagedRunContext:
         self.tracker = tracker
         self.llm_mode = mode
         self.network_access = bool(network_access)
+        if capability_snapshot is not None:
+            # Descriptive provenance only: this field is not part of recording
+            # schema 1.2 or the Strict Replay compatibility contract.
+            self.manifest["llm"]["provider_capability_snapshot"] = capability_snapshot
         self.register_llm_runtime(
             llm=llm,
             provider=model_config.get("resolved_provider"),

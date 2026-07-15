@@ -316,6 +316,7 @@ class GridDriverCompletionTests(unittest.TestCase):
             )
             with managed:
                 managed.record_started("cell")
+                managed.record_child_run_launched("cell")
                 managed.record_failed(
                     DriverJobResult(
                         cell="cell",
@@ -346,7 +347,11 @@ class GridDriverCompletionTests(unittest.TestCase):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             out = Path(temporary) / "grid"
 
-            def successful_child(label, news, social, seed, provider, temp, root):
+            def successful_child(
+                label, news, social, seed, provider, temp, root, model=None,
+                on_child_launch=None,
+            ):
+                on_child_launch()
                 return DriverJobResult(
                     cell=label,
                     tag=f"{label} s{seed}",
@@ -357,8 +362,6 @@ class GridDriverCompletionTests(unittest.TestCase):
                 )
 
             with mock.patch.object(
-                grid2x2, "_healthy", return_value=False
-            ), mock.patch.object(
                 grid2x2, "_run", side_effect=successful_child
             ), redirect_stdout(io.StringIO()):
                 grid2x2.main(

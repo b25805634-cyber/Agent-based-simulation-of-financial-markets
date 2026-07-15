@@ -27,7 +27,7 @@ from nmsim.managed_cli import (
 )
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
 from experiments.driver_utils import (
-    archive_rejected_result,
+    assess_run_seed_reuse,
     run_managed_driver_jobs,
     set_driver_provenance,
 )
@@ -44,14 +44,8 @@ def _bad(p):
         return 1.0
 
 
-def _run(out, m, ratio, spread, maint, frac, seed, provider, total, model):
+def _command(out, m, ratio, spread, maint, frac, seed, provider, total, model):
     label = _label(m, ratio)
-    path = os.path.join(out, f"{label}_s{seed}.json")
-    if os.path.exists(path):
-        bad = _bad(path)
-        if bad <= BAD_THRESHOLD:
-            return (f"{label}_s{seed}", True, "cached")
-        archive_rejected_result(path, f"pre-existing bad_frac={bad} > {BAD_THRESHOLD}")
     cmd = [sys.executable, "-m", "experiments.run_seed", "--seed", str(seed),
            "--provider", provider, "--out", out, "--label", label,
            "--social", "on", "--leverage", "--m", str(m), "--total", str(total),
@@ -59,23 +53,30 @@ def _run(out, m, ratio, spread, maint, frac, seed, provider, total, model):
     if maint is not None: cmd += ["--maint", str(maint)]
     if frac is not None:  cmd += ["--lev-fraction", str(frac)]
     if model:             cmd += ["--model", model]
+    return cmd
+
+
+def _run(
+    out, m, ratio, spread, maint, frac, seed, provider, total, model,
+    on_child_launch=None,
+):
+    label = _label(m, ratio)
+    path = os.path.join(out, f"{label}_s{seed}.json")
+    cmd = _command(out, m, ratio, spread, maint, frac, seed, provider, total, model)
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     last = ""
     for attempt in range(1, MAX_RETRIES + 1):
         if provider == "openai" and not _wait_for_endpoint():
             last = "endpoint unreachable (VPN down >180s)"; continue
+        if on_child_launch is not None:
+            on_child_launch()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(
-                path,
-                f"subprocess exit {p.returncode}; details are in the managed driver private log",
-            )
             continue
         if _bad(path) <= BAD_THRESHOLD:
             return (f"{label}_s{seed}", True, f"{p.stdout.strip()} (attempt {attempt})")
         last = f"bad_frac>{BAD_THRESHOLD}"
-        archive_rejected_result(path, last)
     return (f"{label}_s{seed}", False, f"gave up: {last}")
 
 
@@ -95,7 +96,7 @@ def main(argv=None):
         raise SystemExit(2)
 
     ap = RaisingArgumentParser(allow_abbrev=False)
-    ap.add_argument("--version", action="version", version="experiments.critsweep phase-1.1b")
+    ap.add_argument("--version", action="version", version="experiments.critsweep phase-1.2a")
     ap.add_argument("--m", type=float, default=0.7)
     ap.add_argument("--levels", type=float, nargs="+", required=True,
                     help="leverage L centers, low→high strength (shallower trigger)")
@@ -118,6 +119,21 @@ def main(argv=None):
     print(f"critsweep temp=0 m={args.m:g} social=on levels(L)={args.levels} spread={args.spread} "
           f"maint={args.maint} frac={args.fraction}: {len(jobs)} runs (workers={args.workers})", flush=True)
 
+    reuse_checks = {}
+    def assess(job):
+        if job not in reuse_checks:
+            label = _label(args.m, job[0])
+            reuse_checks[job] = assess_run_seed_reuse(
+                candidate_path=os.path.join(args.out, f"{label}_s{job[1]}.json"),
+                allowed_result_root=args.out,
+                child_command=_command(
+                    args.out, args.m, job[0], args.spread, args.maint,
+                    args.fraction, job[1], args.provider, args.total, args.model,
+                ),
+                max_bad_frac=BAD_THRESHOLD,
+            )
+        return reuse_checks[job]
+
     failures, summary = run_managed_driver_jobs(
         out_root=args.out,
         command_identity="experiments.critsweep",
@@ -125,16 +141,8 @@ def main(argv=None):
         workers=args.workers,
         cell_name=lambda job: _label(args.m, job[0]),
         seed_identity=lambda job: job[1],
-        is_healthy=lambda job: (
-            os.path.exists(
-                os.path.join(args.out, f"{_label(args.m, job[0])}_s{job[1]}.json")
-            )
-            and _bad(
-                os.path.join(args.out, f"{_label(args.m, job[0])}_s{job[1]}.json")
-            )
-            <= BAD_THRESHOLD
-        ),
-        run_job=lambda job: _run(
+        assess_reuse=assess,
+        run_job=lambda job, on_child_launch: _run(
             args.out,
             args.m,
             job[0],
@@ -145,6 +153,7 @@ def main(argv=None):
             args.provider,
             args.total,
             args.model,
+            on_child_launch,
         ),
     )
     print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)

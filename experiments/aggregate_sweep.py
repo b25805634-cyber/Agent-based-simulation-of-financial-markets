@@ -27,6 +27,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from nmsim.run_context import ManagedRunContext
+from nmsim.result_reuse import inspect_legacy_analysis_inputs
 
 # two-sided 95% t critical values by df
 T975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
@@ -178,6 +179,12 @@ def main(argv=None):
         run_id=args.run_id,
         input_paths=inputs,
     )
+    managed.manifest["analysis_input_provenance"] = (
+        inspect_legacy_analysis_inputs(inputs).as_manifest_payload()
+    )
+    for descriptor in managed.manifest.get("inputs", []):
+        descriptor["provenance_class"] = "legacy_unverified_input"
+    managed.manifest.write_atomic()
     with managed:
         managed.set_stage("result_export")
         analysis = {

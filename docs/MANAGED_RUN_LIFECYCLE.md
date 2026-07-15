@@ -1,6 +1,6 @@
 # Managed Run 生命周期
 
-本文定义 Phase 1.1B 的正式运行边界。`ManagedRunContext` 只负责 provenance、事件和记录器、完成量统计、输出登记与终态收尾；它不拥有 Agent 决策、Prompt、市场定价、社交传播、杠杆或 validation 计算。因此，本阶段增加的是运行审计能力，不改变科学语义。
+本文定义 Phase 1.1B 建立、并在 Phase 1.2A 扩展的正式运行边界。`ManagedRunContext` 只负责 provenance、事件和记录器、完成量统计、输出登记与终态收尾；它不拥有 Agent 决策、Prompt、市场定价、社交传播、杠杆或 validation 计算。Phase 1.2A 只在这一边界上加入正式 child-result 身份门、Provider capability snapshot 和非市场的 model qualification 运行类型，不改变市场科学语义。
 
 ## 两种运行边界
 
@@ -24,6 +24,7 @@
 - 公共事件和权限为 `0600` 的私有事件/记录文件；
 - `RecordingLLM` / `ReplayLLM` 的构造、严格 preflight 和消费完检查；
 - LLM response source、Provider 接口调用和 completion 统计；
+- resolved Provider 的脱敏 capability snapshot（描述性 provenance，不是质量评分）；
 - 当前阶段、成功、失败、中断和资源关闭；
 - 已有及部分输出的登记与 SHA-256；
 - 仅在成功终态之后发布 legacy flat-output compatibility link。
@@ -161,6 +162,25 @@ status = failed
 新 Record 继续只写 `recording_schema_version=1.2`。Phase 1.1A 产生的完整 schema 1.2 recording，只要科学源码、运行时科学 Config、model request 和逐请求 identity 匹配，仍可在当前代码上 Strict Replay。
 
 Replay preflight 在第一轮、第一条历史响应消费和任何 Provider 构造之前完成。Mismatch 没有网络 fallback，失败 manifest 中 Provider call 保持 0。Git commit 可以不同；compatibility 仍由既有 scientific fingerprint、schema/hash 和 request identity 契约决定。详细规则见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)。
+
+Phase 1.2A 在 resolved Provider 已知时向 manifest 增加可选的
+`llm.provider_capability_snapshot`。它使用 capability schema `1.0`，只保存审阅过的 adapter 特性、安全 endpoint identity 与 snapshot hash，不保存 credential。该字段不进入 recording schema 1.2 必填结构，也不改变 Strict Replay 契约；因此缺少它的 Phase 1.1 完整 schema 1.2 recording 仍可在其他 strict identity 一致时重放。未登记的 resolved Provider 在请求前 fail closed，但 registry 不构造、不调用 Provider，也不衡量模型质量。
+
+## Driver resume 与历史分析输入
+
+Batch driver 的 parent `ManagedRunContext` 在启动 child 前使用
+`nmsim.result_reuse` 的 policy `1.0` 审查候选。候选必须是在允许 result root 内的完整 managed simulation，并同时匹配生命周期、科学源、运行时科学 Config、模型请求、Scenario/input、seed、population 和注册 artifact 字节。安全目录外的 symlink、无 manifest 的平铺文件或被篡改的 artifact 都会以稳定 reason code 拒绝。
+
+只有合法候选增加 `reused_runs` 和 `honest_n_runs`。拒绝不覆盖旧 run，而是记录脱敏 audit 并启动新的不可覆盖 child。Git commit 差异不是单独阻断条件；科学指纹和其他严格身份完全相同时可按策略跨 commit 复用。
+
+显式的 historical analysis 另走 `analysis` run：输入文件记录路径、大小、hash 和 `provenance_class=legacy_unverified_input`，但不伪造 child manifest，不进入 executed/reused/honest-N 计数。完整契约见 [RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)。
+
+## Model qualification 生命周期
+
+`experiments.model_qualification` 使用同一个 managed 终态机，但
+`run_kind=model_qualification` 且不调用 `run_sim`。Phase 1.2A 只允许 Mock 和 qualification-only Fake；外部 Provider 在构造前以 `provider_setup` 失败，Provider call 为 0、`network_access=false`。`--dry-run` 同样不构造 Provider，只固化 protocol/fixture/rubric identity 和 48-case 计划。
+
+完成的 Mock qualification 把 case 计入 logical request/decision 以及独立的 `qualification_cases`，但 `simulation_runs=0`、`rounds=0`、`honest_n_runs=0`。公共 case/aggregate 文件不含 private rationale；完整 Prompt、raw response 和 rationale 只进入 `0600` 私有文件。该协议不是“唯一正确动作”测试，也不代替统计验证。
 
 ## 公私边界与限制
 

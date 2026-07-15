@@ -273,6 +273,75 @@ class ManagedRunContextIntegrationTests(unittest.TestCase):
         self.assertEqual(completion["provider_calls"]["failed"], 0)
         self.assertFalse(manifest["llm"]["runtime"]["network_access"])
 
+    def test_capability_snapshot_is_optional_source_provenance_for_strict_replay(self):
+        recorded = self._run(_cfg(self.root / "capability-replay", rounds=1))
+        source_manifest_path = Path(recorded.run_dir) / "run_manifest.json"
+        source_manifest = _read_json(source_manifest_path)
+        capability = source_manifest["llm"]["provider_capability_snapshot"]
+        self.assertEqual(capability["capability_schema_version"], "1.0")
+        self.assertEqual(capability["provider"]["provider_id"], "mock")
+        self.assertFalse(capability["provider"]["external_network_expected"])
+
+        # Phase 1.1 manifests predate this optional descriptive field. Removing
+        # it from the source must not alter schema 1.2 recording compatibility.
+        source_manifest["llm"].pop("provider_capability_snapshot")
+        source_manifest_path.write_text(
+            json.dumps(source_manifest, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+        with mock.patch(
+            "nmsim.llm.build_llm",
+            side_effect=AssertionError("provider construction attempted during replay"),
+        ):
+            replayed = self._run(
+                _cfg(self.root / "capability-replay", rounds=1),
+                replay_from=recorded.run_dir,
+            )
+
+        replay_manifest = _read_json(Path(replayed.run_dir) / "run_manifest.json")
+        replay_capability = replay_manifest["llm"]["provider_capability_snapshot"]
+        self.assertEqual(replay_capability["provider"]["provider_id"], "mock")
+        self.assertEqual(recorded.history, replayed.history)
+        self.assertEqual(
+            replay_manifest["completion"]["provider_calls"]["attempted"], 0
+        )
+        self.assertFalse(replay_manifest["llm"]["runtime"]["network_access"])
+
+    def test_unregistered_resolved_provider_fails_closed_before_a_request(self):
+        from nmsim.provider_capabilities import UnknownProviderCapabilityError
+
+        class UnreviewedProvider:
+            kind = "unreviewed"
+            model = "unreviewed-model"
+
+            def complete(self, _system, _user):
+                raise AssertionError("unreviewed provider request attempted")
+
+            def complete_batch(self, _prompts):
+                raise AssertionError("unreviewed provider request attempted")
+
+        context = ManagedRunContext.create(
+            _cfg(self.root / "unreviewed-provider", rounds=1),
+            run_id="unreviewed-provider",
+            repo_root=REPO_ROOT,
+            command_identity="test:unreviewed-provider",
+        )
+        with mock.patch(
+            "nmsim.llm.build_llm",
+            return_value=(UnreviewedProvider(), CostTracker()),
+        ):
+            with self.assertRaises(UnknownProviderCapabilityError):
+                with context:
+                    context.prepare_llm()
+
+        manifest = _read_json(context.manifest_path)
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "provider_setup")
+        self.assertEqual(
+            manifest["completion"]["provider_calls"]["attempted"], 0
+        )
+        self.assertFalse(manifest["llm"]["runtime"]["network_access"])
+
     def test_cache_hit_is_a_response_source_but_not_a_second_provider_call(self):
         context = ManagedRunContext.create(
             _cfg(self.root / "cache-accounting", rounds=1, cache=True),

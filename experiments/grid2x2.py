@@ -4,8 +4,10 @@ Toggles ONLY the social channel (price visibility is always on, identical in all
 cells) — so any real_on vs real_off difference is attributable to the narrative
 channel, not the price tape. N seeds per cell.
 
-Resumable (skips existing), self-healing (health gate + VPN wait), and HONEST
-about N: every dropped seed is logged to failures.log, none silently vanish.
+Resume is identity-gated, with a health gate and VPN wait for the existing
+external path.  A prior child is reused only after its managed identity and
+artifact hashes are verified.  Every failed seed is logged; none silently
+vanish from honest-N.
 
 Usage:
   # free, instant pipeline validation + preview:
@@ -34,7 +36,7 @@ from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
 from experiments.driver_utils import (
     DriverJobResult,
     ManagedDriverCompletion,
-    archive_rejected_result,
+    assess_run_seed_reuse,
     set_driver_provenance,
 )
 
@@ -47,20 +49,12 @@ CELLS = [
 ]
 
 
-def _exists(out, label, seed):
-    return os.path.exists(os.path.join(out, f"{label}_s{seed}.json"))
-
-
 def _bad_frac(out, label, seed):
     try:
         with open(os.path.join(out, f"{label}_s{seed}.json")) as fh:
             return json.load(fh)["health"]["bad_frac"]
     except Exception:
         return 1.0
-
-
-def _healthy(out, label, seed):
-    return _exists(out, label, seed) and _bad_frac(out, label, seed) <= BAD_THRESHOLD
 
 
 def _private_output(text, limit=32768):
@@ -77,26 +71,23 @@ def _private_output(text, limit=32768):
     return payload
 
 
-def _run(label, news, social, seed, provider, temp, out):
-    tag = f"{label} s{seed}"
-    path = os.path.join(out, f"{label}_s{seed}.json")
-    if os.path.exists(path):
-        bad = _bad_frac(out, label, seed)
-        if bad <= BAD_THRESHOLD:
-            return DriverJobResult(
-                cell=label,
-                tag=tag,
-                seed=seed,
-                ok=True,
-                source="reused",
-                attempts=0,
-            )
-        archive_rejected_result(path, f"pre-existing bad_frac={bad} > {BAD_THRESHOLD}")
+def _command(label, news, social, seed, provider, temp, out, model=None):
     cmd = [sys.executable, "-m", "experiments.run_seed", "--seed", str(seed),
            "--provider", provider, "--out", out,
            "--news", news, "--social", social, "--label", label]
     if temp is not None:
         cmd += ["--temp", str(temp)]
+    if model:
+        cmd += ["--model", str(model)]
+    return cmd
+
+
+def _run(
+    label, news, social, seed, provider, temp, out, model=None,
+    on_child_launch=None,
+):
+    tag = f"{label} s{seed}"
+    cmd = _command(label, news, social, seed, provider, temp, out, model)
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     last_code = "child_run_not_started"
     private_details = []
@@ -109,6 +100,8 @@ def _run(label, news, social, seed, provider, temp, out):
                 "detail": "configured endpoint did not become reachable",
             })
             continue
+        if on_child_launch is not None:
+            on_child_launch()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last_code = "subprocess_exit"
@@ -119,10 +112,6 @@ def _run(label, news, social, seed, provider, temp, out):
                 "stdout": _private_output(p.stdout),
                 "stderr": _private_output(p.stderr),
             })
-            archive_rejected_result(
-                path,
-                f"subprocess exit {p.returncode}; details are in the managed driver private log",
-            )
             continue
         bad = _bad_frac(out, label, seed)
         if bad <= BAD_THRESHOLD:
@@ -141,9 +130,6 @@ def _run(label, news, social, seed, provider, temp, out):
             "bad_frac": bad,
             "threshold": BAD_THRESHOLD,
         })
-        archive_rejected_result(
-            path, f"bad_frac={bad} > {BAD_THRESHOLD}; retrying"
-        )
     return DriverJobResult(
         cell=label,
         tag=tag,
@@ -172,9 +158,10 @@ def main(argv=None):
         raise SystemExit(2)
 
     ap = RaisingArgumentParser(allow_abbrev=False)
-    ap.add_argument("--version", action="version", version="experiments.grid2x2 phase-1.1b")
+    ap.add_argument("--version", action="version", version="experiments.grid2x2 phase-1.2a")
     ap.add_argument("--seeds", type=int, nargs="+", required=True)
     ap.add_argument("--provider", default="openai")
+    ap.add_argument("--model", default=None)
     ap.add_argument("--temp", type=float, default=None)
     ap.add_argument("--workers", type=int, default=1)
     ap.add_argument("--out", default="results_2x2")
@@ -185,10 +172,31 @@ def main(argv=None):
 
     os.makedirs(args.out, exist_ok=True)
     set_driver_provenance(args.workers, "experiments.grid2x2")
-    jobs = [(lbl, news, soc, s) for (lbl, news, soc) in CELLS for s in args.seeds
-            if not _healthy(args.out, lbl, s)]
-    already = sum(1 for (lbl, _, _) in CELLS for s in args.seeds
-                  if _healthy(args.out, lbl, s))
+    all_jobs = [
+        (lbl, news, soc, seed)
+        for (lbl, news, soc) in CELLS
+        for seed in args.seeds
+    ]
+    reuse_checks = {}
+    for job in all_jobs:
+        label, news, social, seed = job
+        reuse_checks[job] = assess_run_seed_reuse(
+            candidate_path=os.path.join(args.out, f"{label}_s{seed}.json"),
+            allowed_result_root=args.out,
+            child_command=_command(
+                label, news, social, seed, args.provider, args.temp, args.out,
+                args.model,
+            ),
+            max_bad_frac=BAD_THRESHOLD,
+        )
+    jobs = [
+        job for job in all_jobs
+        if reuse_checks[job] is None or not reuse_checks[job].reusable
+    ]
+    already = sum(
+        decision is not None and decision.reusable
+        for decision in reuse_checks.values()
+    )
     total = len(CELLS) * len(args.seeds)
     print(f"2x2 grid: {len(CELLS)} cells x {len(args.seeds)} seeds = {total} runs; "
           f"{len(jobs)} to run, {already} already done "
@@ -204,16 +212,27 @@ def main(argv=None):
 
     fails, n = [], 0
     with managed:
-        for label, _, _ in CELLS:
-            reused = sum(1 for seed in args.seeds if _healthy(args.out, label, seed))
-            if reused:
-                managed.record_reused(label, reused)
+        for job in all_jobs:
+            label, _news, _social, seed = job
+            decision = reuse_checks[job]
+            if decision is None:
+                continue
+            managed.record_reuse_candidate(
+                label,
+                tag=f"{label} s{seed}",
+                seed=seed,
+                decision=decision,
+            )
+            if decision.reusable:
+                managed.record_reused(label)
 
         def run_managed(job):
             label, news, social, seed = job
             managed.record_started(label)
             return _run(
-                label, news, social, seed, args.provider, args.temp, args.out
+                label, news, social, seed, args.provider, args.temp, args.out,
+                args.model,
+                lambda: managed.record_child_run_launched(label),
             )
 
         with ThreadPoolExecutor(max_workers=args.workers) as ex:
@@ -239,14 +258,8 @@ def main(argv=None):
 
                 n += 1
                 if result.ok:
-                    managed.record_completed(
-                        result.cell, reused=result.source == "reused"
-                    )
-                    message = (
-                        "accepted existing result"
-                        if result.source == "reused"
-                        else f"completed after {result.attempts} attempt(s)"
-                    )
+                    managed.record_completed(result.cell)
+                    message = f"completed after {result.attempts} attempt(s)"
                 else:
                     managed.record_failed(result)
                     fails.append(result)

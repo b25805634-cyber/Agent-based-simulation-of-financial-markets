@@ -26,7 +26,7 @@ from nmsim.managed_cli import (
 )
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
 from experiments.driver_utils import (
-    archive_rejected_result,
+    assess_run_seed_reuse,
     run_managed_driver_jobs,
     set_driver_provenance,
 )
@@ -43,37 +43,36 @@ def _bad(path):
         return 1.0
 
 
-def _run(out, m, social, seed, provider, temp, total, model):
-    path = _path(out, m, social, seed)
-    tag = os.path.basename(path)[:-5]
-    if os.path.exists(path):
-        bad = _bad(path)
-        if bad <= BAD_THRESHOLD:
-            return (tag, True, "cached")
-        archive_rejected_result(path, f"pre-existing bad_frac={bad} > {BAD_THRESHOLD}")
+def _command(out, m, social, seed, provider, temp, total, model):
     cmd = [sys.executable, "-m", "experiments.run_seed", "--seed", str(seed),
            "--provider", provider, "--out", out, "--social", social,
            "--leverage", "--m", str(m), "--total", str(total), "--temp", str(temp)]
     if model:
         cmd += ["--model", model]
+    return cmd
+
+
+def _run(
+    out, m, social, seed, provider, temp, total, model, on_child_launch=None
+):
+    path = _path(out, m, social, seed)
+    tag = os.path.basename(path)[:-5]
+    cmd = _command(out, m, social, seed, provider, temp, total, model)
     env = {**os.environ, "PYTHONHASHSEED": "0"}
     last = ""
     for attempt in range(1, MAX_RETRIES + 1):
         if provider == "openai" and not _wait_for_endpoint():
             last = "endpoint unreachable (VPN down >180s)"
             continue
+        if on_child_launch is not None:
+            on_child_launch()
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(
-                path,
-                f"subprocess exit {p.returncode}; details are in the managed driver private log",
-            )
             continue
         if _bad(path) <= BAD_THRESHOLD:
             return (tag, True, f"{p.stdout.strip()} (attempt {attempt})")
         last = f"bad_frac>{BAD_THRESHOLD}, retrying"
-        archive_rejected_result(path, last)
     return (tag, False, f"gave up after {MAX_RETRIES}: {last}")
 
 
@@ -93,7 +92,7 @@ def main(argv=None):
         raise SystemExit(2)
 
     ap = RaisingArgumentParser(allow_abbrev=False)
-    ap.add_argument("--version", action="version", version="experiments.lev2x2 phase-1.1b")
+    ap.add_argument("--version", action="version", version="experiments.lev2x2 phase-1.2a")
     ap.add_argument("--m", type=float, default=0.7)
     ap.add_argument("--socials", nargs="+", default=["off", "on"])
     ap.add_argument("--seeds", type=int, nargs="+", required=True)
@@ -116,6 +115,20 @@ def main(argv=None):
           f"{len(jobs)} runs (workers={args.workers}, model={args.model or 'MiniMax-M2.7'})",
           flush=True)
 
+    reuse_checks = {}
+    def assess(job):
+        if job not in reuse_checks:
+            reuse_checks[job] = assess_run_seed_reuse(
+                candidate_path=_path(args.out, job[0], job[1], job[2]),
+                allowed_result_root=args.out,
+                child_command=_command(
+                    args.out, job[0], job[1], job[2], args.provider,
+                    args.temp, args.total, args.model,
+                ),
+                max_bad_frac=BAD_THRESHOLD,
+            )
+        return reuse_checks[job]
+
     failures, summary = run_managed_driver_jobs(
         out_root=args.out,
         command_identity="experiments.lev2x2",
@@ -123,11 +136,8 @@ def main(argv=None):
         workers=args.workers,
         cell_name=lambda job: str(job[1]),
         seed_identity=lambda job: job[2],
-        is_healthy=lambda job: (
-            os.path.exists(_path(args.out, job[0], job[1], job[2]))
-            and _bad(_path(args.out, job[0], job[1], job[2])) <= BAD_THRESHOLD
-        ),
-        run_job=lambda job: _run(
+        assess_reuse=assess,
+        run_job=lambda job, on_child_launch: _run(
             args.out,
             job[0],
             job[1],
@@ -136,6 +146,7 @@ def main(argv=None):
             args.temp,
             args.total,
             args.model,
+            on_child_launch,
         ),
     )
     print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)

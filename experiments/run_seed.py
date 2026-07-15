@@ -33,6 +33,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from nmsim.run_context import ManagedRunContext
+from nmsim.result_reuse import inspect_legacy_analysis_inputs
 from nmsim import validation as V
 
 META = "nmsim/meta_feb2022_reference.csv"
@@ -337,6 +338,15 @@ def main(argv=None):
         run_kind="analysis" if args.price_csv else "simulation",
         planned_simulation_runs=0 if args.price_csv else 1,
     )
+    if args.price_csv:
+        manager.manifest["analysis_input_provenance"] = (
+            inspect_legacy_analysis_inputs(
+                [path for path in input_paths.values()]
+            ).as_manifest_payload()
+        )
+        for descriptor in manager.manifest.get("inputs", []):
+            descriptor["provenance_class"] = "legacy_unverified_input"
+        manager.manifest.write_atomic()
     with manager:
         if args.price_csv:
             manager.llm_mode = "reuse"

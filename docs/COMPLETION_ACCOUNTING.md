@@ -1,6 +1,7 @@
 # Completion Accounting 与 honest-N
 
-本文定义 Phase 1.1B manifest 的完成量口径。核心原则是：每个计数都必须有单位，LLM 逻辑请求不能冒充 Provider 调用，Agent decision 不能冒充独立实验样本，存在部分输出也不能冒充成功 run。
+本文定义 Phase 1.1B manifest 的完成量口径，并加入 Phase 1.2A
+的正式 result-reuse 与 model-qualification 单位。核心原则是：每个计数都必须有单位，LLM 逻辑请求不能冒充 Provider 调用，Agent decision 或 qualification case 不能冒充独立 simulation 样本，存在部分输出也不能冒充成功 run。
 
 ## Manifest schema
 
@@ -220,23 +221,31 @@ Experiment driver 的独立汇总单位是 `runs`：
   "unit": "runs",
   "planned_runs": 1,
   "started_runs": 1,
+  "executed_runs": 1,
+  "reused_runs": 0,
+  "reuse_candidates_examined": 0,
+  "reuse_candidates_rejected": 0,
   "completed_runs": 1,
   "failed_runs": 0,
   "honest_n_runs": 1,
-  "reused_runs": 0
+  "reuse_rejection_codes": {}
 }
 ```
 
 定义如下：
 
 - `planned_runs`：该 driver/cell 计划的 child simulation run 数；
-- `started_runs`：当前 driver 实际启动的 child job 数；
+- `started_runs`：当前 driver 实际进入 child execution 的兼容生命周期计数；
+- `executed_runs`：本次调用真正启动的新 managed child attempt 数；每次实际启动 `run_seed` subprocess 才加一，合法复用和仅 endpoint-wait 都不增加。同一计划 replicate 如发生 health/child retry，该值可超过 `planned_runs`，但 `honest_n_runs` 仍只能计一；
 - `completed_runs`：经 driver 验收为成功的 child run 数；
 - `failed_runs`：失败 child run 数；
 - `honest_n_runs`：被接受的成功 child run 数，必须等于 `completed_runs`；
-- `reused_runs`：验收并复用的既有成功 child run 数。复用会增加 completed/honest/reused，但不会伪造为本次 started。
+- `reused_runs`：通过 result-reuse policy 1.0 全部身份和 artifact 校验的既有 child run 数；复用会增加 completed/honest/reused，但不增加 started/executed；
+- `reuse_candidates_examined`：实际进入集中复用门的候选数；
+- `reuse_candidates_rejected`：至少一项身份、完整性、路径安全或 health 条件不满足的候选数；
+- `reuse_rejection_codes`：公共、稳定且脱敏的拒绝 reason-code 计数。
 
-Driver 只有在 `completed_runs + failed_runs == planned_runs` 且 `honest_n_runs == completed_runs` 时才能 finish。公共 `driver_summary.json` 只含受控 failure reason code；原始 child stdout/stderr 等详细失败信息写入权限为 `0600` 的 `driver_failures.private.jsonl`。
+Driver 只有在 `completed_runs + failed_runs == planned_runs` 且 `honest_n_runs == completed_runs` 时才能 finish。被拒绝的候选本身不增加 completed/failed/honest；后续新启动的 child 才进入 executed/started，并根据真实终态进入 completed 或 failed。公共 `driver_summary.json` 只含受控 failure/reuse reason code 和脱敏 reuse audit；原始 child stdout/stderr 等详细失败信息写入权限为 `0600` 的 `driver_failures.private.jsonl`。
 
 对 `grid2x2 --seeds 1`，每个 cell 的正确口径是：
 
@@ -248,6 +257,32 @@ honest_n_runs = 1
 ```
 
 某个底层 child run 即使包含 144 个 completed Agent Decision，它也仍只贡献一个 `honest_n_runs`。Agent decision 行存在依赖、共享市场状态和同一 seed，不能当作 144 个独立实验样本。
+
+同一 grid 合法重跑时，若所有 child 都通过 policy 1.0，则
+`executed_runs=0`、`reused_runs=planned_runs`、`completed_runs=honest_n_runs=planned_runs`。
+这不是增加新独立样本，只是对同一批已验证 replicate 的合法恢复。无 child manifest 的历史平铺文件只能作为显式标记的 `legacy_unverified_input` 进入分析，不进入上述 run-level 计数。
+
+## Model qualification 的单位
+
+`run_kind=model_qualification` 不是 simulation run。它复用通用
+completion 中的 logical request、Agent decision、response source 和
+Provider-interface call 字段，同时在 `qualification` 区域记录带单位的 `qualification_cases`。成功的 48-case Mock 运行口径为：
+
+```text
+qualification_cases.planned/attempted/completed/failed/skipped = 48/48/48/0/0
+llm_logical_requests.completed = 48
+agent_decisions.completed = 48
+response_sources.provider = 48
+provider_calls.succeeded = 48
+simulation_runs.planned/completed = 0/0
+rounds.planned/completed = 0/0
+honest_n_cases = 48
+honest_n_runs = 0
+network_access = false
+```
+
+Mock 仍是 Provider 接口响应来源，但不需外部网络。Dry-run 不构造
+Provider，logical request 和 Provider call 均为 0，48 个 case 记为计划但未尝试，`honest_n_cases=0`。不论 case 数多少，qualification 都不得增加 `honest_n_runs`。
 
 ## 成功判定与不变量
 

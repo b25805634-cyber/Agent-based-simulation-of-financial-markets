@@ -1,0 +1,212 @@
+{
+  "fixture_set_schema_version": "1.0",
+  "protocol_version": "1.0",
+  "fixtures": [
+    {
+      "fixture_id": "negative_news_price_unchanged",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 100.0,
+        "recent_prices": [100.0, 100.0, 100.0, 100.0]
+      },
+      "visible_news": "BREAKING: the company missed earnings expectations and cut full-year guidance sharply.",
+      "visible_social_feed": [],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": ["r11: price 100.00, held while awaiting results"],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "f765217c4362a3890dd22f00ba94a306a2d86499f58f7da44b56fbbfdf69aa4f"
+    },
+    {
+      "fixture_id": "price_crash_no_news",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 72.0,
+        "recent_prices": [100.0, 94.0, 83.0, 72.0]
+      },
+      "visible_news": null,
+      "visible_social_feed": [],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": ["r11: price weakened rapidly without a new headline"],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "9cad401d256ce946f4f1b3b46d3b8447c6b2d55857f5cd10bd294447186f0593"
+    },
+    {
+      "fixture_id": "unanimous_neighbor_panic",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 91.0,
+        "recent_prices": [96.0, 94.0, 92.0, 91.0]
+      },
+      "visible_news": null,
+      "visible_social_feed": [
+        {"sentiment": -0.95, "public_take": "The floor is gone; I am getting out."},
+        {"sentiment": -0.85, "public_take": "This looks like capitulation is accelerating."},
+        {"sentiment": -0.9, "public_take": "Risk is breaking down across the board."}
+      ],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": ["r11: price 92.00, public mood deteriorated"],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "e621bd399d9d786d4ff304bb699f76360c5c765f5c2cb9929dcb374b46e16d0e"
+    },
+    {
+      "fixture_id": "conflicting_neighbor_views",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 96.0,
+        "recent_prices": [97.0, 96.5, 95.5, 96.0]
+      },
+      "visible_news": null,
+      "visible_social_feed": [
+        {"sentiment": -0.8, "public_take": "The downside is only beginning."},
+        {"sentiment": 0.75, "public_take": "The selloff is overdone and I am adding."},
+        {"sentiment": 0.05, "public_take": "Signals conflict, so I am waiting."}
+      ],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": ["r11: price 95.50, neighbor views remained divided"],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "5759251c43b5fef4f280f46d5576e801791ea6b12eec62799281131e792ae035"
+    },
+    {
+      "fixture_id": "neutral_placebo_news",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 100.0,
+        "recent_prices": [99.8, 100.1, 99.9, 100.0]
+      },
+      "visible_news": "BREAKING: the company reported results in line with expectations and reaffirmed its guidance.",
+      "visible_social_feed": [],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": ["r11: price 99.90, no directional signal"],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "f763656c1d593f16968f03706b3b5efe19db9da975ff709df787f5a531f320b4"
+    },
+    {
+      "fixture_id": "insufficient_cash",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 125.0,
+        "recent_prices": [118.0, 121.0, 123.0, 125.0]
+      },
+      "visible_news": "The company reported strong growth and raised guidance.",
+      "visible_social_feed": [
+        {"sentiment": 0.8, "public_take": "Momentum remains strong."}
+      ],
+      "cash": 20.0,
+      "shares": 10,
+      "memory": ["r11: available cash is nearly exhausted"],
+      "fundamental_value": 120.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "bd3203e877e6fa7517bbe0c38dd981cf852ad8279f8c3c471d0a5de04412a2dc"
+    },
+    {
+      "fixture_id": "insufficient_inventory",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 78.0,
+        "recent_prices": [91.0, 86.0, 82.0, 78.0]
+      },
+      "visible_news": "The company issued a severe profit warning and cut guidance.",
+      "visible_social_feed": [
+        {"sentiment": -0.9, "public_take": "I am selling before the next leg down."}
+      ],
+      "cash": 5000.0,
+      "shares": 0,
+      "memory": ["r11: no shares remain in inventory"],
+      "fundamental_value": 85.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "9220fbbc88d554940b55a019ba718dacbc6c1f05256bbaa2de612e5f0ccce983"
+    },
+    {
+      "fixture_id": "deep_discount_to_fundamental",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 55.0,
+        "recent_prices": [60.0, 58.0, 56.0, 55.0]
+      },
+      "visible_news": null,
+      "visible_social_feed": [
+        {"sentiment": -0.45, "public_take": "Confidence remains fragile after the selloff."}
+      ],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": ["r11: price 56.00, fair-value estimate unchanged"],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "0874bd3203c51932aba53e0ae8b1032ad3762403fcd5a5509ff34ac023ea8b9d"
+    }
+  ]
+}
