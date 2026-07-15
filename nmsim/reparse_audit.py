@@ -31,6 +31,11 @@ from .fingerprint import (
     scientific_compatibility_metadata,
 )
 from .llm import parse_order
+from .recording_schema import (
+    RecordingSchemaValidationError,
+    compatibility_rule_for_record,
+    validate_v12_record_collection,
+)
 
 
 AUDIT_SCHEMA_VERSION = "1.0"
@@ -146,6 +151,57 @@ def _read_jsonl(path: pathlib.Path, *, required: bool) -> list[dict[str, Any]]:
                 )
             records.append(value)
     return records
+
+
+def _recording_schema_report(records: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
+    """Report compatibility without enforcing Strict Replay in this tool."""
+
+    if not records:
+        return {
+            "schema_versions": [],
+            "variant": "empty_recording",
+            "strict_replay": False,
+            "strict_replay_reason": "empty_recording",
+            "reparse_audit": True,
+        }
+    versions = sorted({str(record.get("schema_version")) for record in records})
+    if len(versions) != 1:
+        return {
+            "schema_versions": versions,
+            "variant": "mixed_recording_schemas",
+            "strict_replay": False,
+            "strict_replay_reason": "mixed_recording_schemas",
+            "reparse_audit": True,
+        }
+    if versions == ["1.2"]:
+        try:
+            validate_v12_record_collection(records)
+        except RecordingSchemaValidationError as error:
+            return {
+                "schema_versions": versions,
+                "variant": "invalid_schema_1_2",
+                "strict_replay": False,
+                "strict_replay_reason": error.code,
+                "validation_error_fields": list(error.fields),
+                "reparse_audit": True,
+            }
+    rules = {compatibility_rule_for_record(record) for record in records}
+    if len(rules) != 1:
+        return {
+            "schema_versions": versions,
+            "variant": "mixed_recording_schema_variants",
+            "strict_replay": False,
+            "strict_replay_reason": "mixed_recording_schema_variants",
+            "reparse_audit": True,
+        }
+    rule = next(iter(rules))
+    return {
+        "schema_versions": versions,
+        "variant": rule.variant,
+        "strict_replay": rule.strict_replay,
+        "strict_replay_reason": rule.reason,
+        "reparse_audit": rule.reparse_audit,
+    }
 
 
 def _is_within(path: pathlib.Path, parent: pathlib.Path) -> bool:
@@ -626,6 +682,7 @@ def run_reparse_audit(
             scientific_compatibility_metadata()
         ),
         "recorded_contract": _recorded_contract(records),
+        "recording_schema_compatibility": _recording_schema_report(records),
         "provider_calls": 0,
         "network_access": False,
         "simulation_continued": False,

@@ -15,11 +15,15 @@ import subprocess
 from typing import Any, Iterable, Mapping, Optional
 
 from .events import SCHEMA_VERSION as EVENT_SCHEMA_VERSION
+from .recording_schema import (
+    CURRENT_RECORDING_SCHEMA_VERSION,
+    SOURCE_COMPATIBILITY_FIELDS,
+)
 
 
 FINGERPRINT_SCHEMA_VERSION = "1.0"
 DECISION_PARSER_SCHEMA_VERSION = "1.0"
-RECORDING_SCHEMA_VERSION = "1.1"
+RECORDING_SCHEMA_VERSION = CURRENT_RECORDING_SCHEMA_VERSION
 
 # Conservative source boundary derived from the actual Config -> Agent prompt
 # -> LLM parse -> simulation -> market/social/risk -> validation call graph.
@@ -45,17 +49,7 @@ PROMPT_SOURCE_FILES = (
     "nmsim/prompts.py",
 )
 
-STRICT_COMPATIBILITY_FIELDS = (
-    "fingerprint_schema_version",
-    "decision_parser_schema_version",
-    "decision_parser_source_hash",
-    "event_schema_version",
-    "recording_schema_version",
-    "prompt_source_hash",
-    "persona_source_hash",
-    "simulation_core_source_hash",
-    "scientific_component_fingerprint",
-)
+STRICT_COMPATIBILITY_FIELDS = SOURCE_COMPATIBILITY_FIELDS
 
 
 def _sha256(value: bytes) -> str:

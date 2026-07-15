@@ -36,11 +36,21 @@ from .fingerprint import (
     STRICT_COMPATIBILITY_FIELDS,
     scientific_compatibility_metadata,
 )
+from .recording_schema import (
+    CURRENT_RECORDING_SCHEMA_VERSION,
+    RECORD_TYPE,
+    SUPPORTED_RECORDING_SCHEMA_VERSIONS,
+    RecordingSchemaValidationError,
+    compatibility_rule_for_record,
+    validate_v12_metadata,
+    validate_v12_record,
+    validate_v12_record_collection,
+)
 
 
 RECORD_SCHEMA_VERSION = RECORDING_SCHEMA_VERSION
-_LEGACY_RECORD_SCHEMA_VERSIONS = {"1.0"}
-RECORD_TYPE = "llm_call"
+if RECORD_SCHEMA_VERSION != CURRENT_RECORDING_SCHEMA_VERSION:  # pragma: no cover
+    raise RuntimeError("recording schema constants disagree")
 
 
 class ReplayMismatchError(RuntimeError):
@@ -160,6 +170,16 @@ def _missing_runtime_config_contract_error(
         "historical evidence and can be used for offline Reparse Audit.".format(
             code, side, schema_note, list(missing)
         )
+    )
+
+
+def _transitional_recording_error() -> ReplayMismatchError:
+    return ReplayMismatchError(
+        "transitional_schema_1_1_with_config_contract: recording schema 1.1 "
+        "contains the Phase 1.1A.1 runtime config extension but is not the "
+        "frozen strict-replay format. The recording remains valid historical "
+        "evidence and can be used for offline Reparse Audit; it will not be "
+        "guessed, rewritten, or promoted to schema 1.2."
     )
 
 
@@ -473,6 +493,10 @@ class RecordingLLM(_ContextMixin):
     ) -> None:
         if inner is None:
             raise ValueError("RecordingLLM requires an inner LLM")
+        if allow_append:
+            raise ValueError(
+                "allow_append is not supported for immutable LLM recordings"
+            )
         self.inner = inner
         self.kind = getattr(inner, "kind", "mock")
         self.model = getattr(inner, "model", None)
@@ -483,10 +507,13 @@ class RecordingLLM(_ContextMixin):
         compatibility = scientific_compatibility_metadata()
         if compatibility_metadata is not None:
             compatibility.update(dict(compatibility_metadata))
+        # Callers cannot ask a new recorder to emit a historical envelope.
+        compatibility["recording_schema_version"] = RECORD_SCHEMA_VERSION
         self.compatibility_metadata = _canonical_compatibility(compatibility)
+        validate_v12_metadata(self.compatibility_metadata)
         self.records_path = _resolve_records_path(records_path)
         self.event_logger = event_logger
-        _prepare_private_file(self.records_path, allow_append=allow_append)
+        _prepare_private_file(self.records_path, allow_append=False)
 
         self._lock = threading.RLock()
         self._sequence = 0
@@ -619,18 +646,19 @@ class RecordingLLM(_ContextMixin):
             if not isinstance(raw_response, str):
                 raise TypeError("LLM response must be str, got {}".format(type(raw_response)))
             record = {
+                **self.compatibility_metadata,
+                **dict(call),
                 "schema_version": RECORD_SCHEMA_VERSION,
                 "record_type": RECORD_TYPE,
                 "recorded_at": _utc_now(),
                 "run_id": (
                     self.event_logger.run_id if self.event_logger is not None else None
                 ),
-                **dict(call),
                 "model_config": self.model_config,
-                **self.compatibility_metadata,
                 "raw_response": raw_response,
                 "response_hash": _sha256_text(raw_response),
             }
+            validate_v12_record(record)
             _append_record(self.records_path, record)
             self.response_count += 1
             self.record_count += 1
@@ -671,9 +699,7 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                     "replay record at line {} is not an object".format(line_number)
                 )
             record_schema = record.get("schema_version")
-            if record_schema not in _LEGACY_RECORD_SCHEMA_VERSIONS | {
-                RECORD_SCHEMA_VERSION
-            }:
+            if record_schema not in SUPPORTED_RECORDING_SCHEMA_VERSIONS:
                 raise _compatibility_mismatch(
                     "recording_schema_version",
                     RECORD_SCHEMA_VERSION,
@@ -689,6 +715,11 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                         _display_mismatch_value(declared_schema),
                     )
                 )
+            if record_schema == RECORD_SCHEMA_VERSION:
+                try:
+                    validate_v12_record(record, line_number=line_number)
+                except RecordingSchemaValidationError as error:
+                    raise ReplayMismatchError(str(error)) from error
             if record.get("record_type") != RECORD_TYPE:
                 raise ReplayMismatchError(
                     "unsupported replay record type at line {}: {!r}".format(
@@ -729,6 +760,18 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                 )
             record["model_config"] = canonical_model_config(record.get("model_config", {}))
             records.append(record)
+    if not records:
+        raise ReplayMismatchError(
+            "empty_recording: strict replay requires a declared, complete "
+            "recording schema and cannot defer failure until the first round"
+        )
+    if all(
+        record.get("schema_version") == RECORD_SCHEMA_VERSION for record in records
+    ):
+        try:
+            validate_v12_record_collection(records)
+        except RecordingSchemaValidationError as error:
+            raise ReplayMismatchError(str(error)) from error
     return records
 
 
@@ -766,10 +809,33 @@ class ReplayLLM(_ContextMixin):
                     sorted(str(schema) for schema in schemas)
                 )
             )
-        if schemas == {"1.0"}:
-            raise _legacy_recording_error(
-                self._records[0], self.compatibility_metadata
-            )
+        if self._records:
+            schema_rule = compatibility_rule_for_record(self._records[0])
+            if schema_rule.reason == "legacy_recording_missing_replay_contract":
+                raise _legacy_recording_error(
+                    self._records[0], self.compatibility_metadata
+                )
+            if schema_rule.reason == "recording_missing_runtime_config_contract":
+                source = _compatibility_from_record(self._records[0])
+                raise _missing_runtime_config_contract_error(
+                    source=True,
+                    missing=_missing_contract_fields(
+                        source, CONFIG_CONTRACT_RECORD_FIELDS
+                    ),
+                    recording_schema=self._records[0].get("schema_version"),
+                )
+            if (
+                schema_rule.reason
+                == "transitional_schema_1_1_with_config_contract"
+            ):
+                raise _transitional_recording_error()
+            if not schema_rule.strict_replay:
+                raise ReplayMismatchError(
+                    "{}: strict replay rejected recording variant={}".format(
+                        schema_rule.reason or "recording_schema_incompatible",
+                        schema_rule.variant,
+                    )
+                )
 
         self.source_compatibility_metadata = (
             _compatibility_from_record(self._records[0])
@@ -783,16 +849,6 @@ class ReplayLLM(_ContextMixin):
                 )
 
         if self._records:
-            source_missing = _missing_contract_fields(
-                self.source_compatibility_metadata,
-                CONFIG_CONTRACT_RECORD_FIELDS,
-            )
-            if source_missing:
-                raise _missing_runtime_config_contract_error(
-                    source=True,
-                    missing=source_missing,
-                    recording_schema=self._records[0].get("schema_version"),
-                )
             current_missing = _missing_contract_fields(
                 self.compatibility_metadata,
                 CONFIG_CONTRACT_RECORD_FIELDS,

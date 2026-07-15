@@ -20,6 +20,7 @@ import unittest
 from unittest import mock
 
 from nmsim.config import Config
+from nmsim.config_contract import build_effective_config_contract
 from nmsim.events import EventLogger
 from nmsim.llm import CostTracker
 from nmsim.recording import RecordingLLM, ReplayMismatchError
@@ -219,18 +220,6 @@ class Phase1IntegrationTests(unittest.TestCase):
             run_dir = Path(temporary) / "private-boundary"
             logger = EventLogger("private-boundary", run_dir=run_dir)
             provider = _ScriptedRealProvider()
-            recorded_llm = RecordingLLM(
-                provider,
-                run_dir,
-                model_config={
-                    "provider": provider.kind,
-                    "model": provider.model,
-                    "temperature": provider.temperature,
-                    "max_tokens": provider.max_tokens,
-                    "cache_enabled": False,
-                },
-                event_logger=logger,
-            )
             cfg = Config(
                 provider="openai",
                 seed=9,
@@ -243,6 +232,24 @@ class Phase1IntegrationTests(unittest.TestCase):
                 topology="fully_connected",
                 social_weight=1.0,
                 cache_enabled=False,
+                out_dir=str(run_dir),
+            )
+            recorded_llm = RecordingLLM(
+                provider,
+                run_dir,
+                model_config={
+                    "provider": provider.kind,
+                    "model": provider.model,
+                    "temperature": provider.temperature,
+                    "max_tokens": provider.max_tokens,
+                    "cache_enabled": False,
+                },
+                event_logger=logger,
+                compatibility_metadata=build_effective_config_contract(
+                    cfg,
+                    base_dir=Path(temporary),
+                    execution_context={"test_boundary": "private-reasoning"},
+                ),
             )
 
             run_sim(

@@ -2,13 +2,15 @@
 
 本文描述 2026-07-15 工作区中的实际实现，不描述理想架构。核心入口是 `python3 -m nmsim.run`；`narrative_market_sim.py` 是已经分叉的旧 Phase-1 脚本。
 
-> Phase 1/1.1A/1.1A.1 更新：核心回合顺序和科学语义未变；managed CLI/`run_seed` 现已在 Provider 外层加入 immutable run manifest、公共/私有事件、严格 LLM Record/Replay 以及科学组件指纹。Phase 1.1A 另新增不继续市场的离线 reparse audit；Phase 1.1A.1 将最终有效 `Config` 的分类摘要与 hash 绑定到 strict replay preflight。详细 schema 与命令见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md) 和 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)。下文关于市场、观察和随机性的描述仍是 compatibility baseline；原“raw response 不持久化”的缺口已由私有 sidecar 补上。
+> Phase 1/1.1A/1.1A.1/1.1A.2 更新：核心回合顺序和科学语义未变；managed CLI/`run_seed` 现已在 Provider 外层加入 immutable run manifest、公共/私有事件、严格 LLM Record/Replay 以及科学组件指纹。Phase 1.1A 另新增不继续市场的离线 reparse audit；Phase 1.1A.1 将最终有效 `Config` 的分类摘要与 hash 绑定到 strict replay preflight；Phase 1.1A.2 将新 recording 正式升为 schema 1.2，并使 mapping 配置输入默认 fail closed。详细 schema 与命令见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md) 和 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)。下文关于市场、观察和随机性的描述仍是 compatibility baseline；原“raw response 不持久化”的缺口已由私有 sidecar 补上。
 
 ## 模块责任
 
 | 模块 | 当前责任 | 不负责的内容 |
 |---|---|---|
-| `nmsim/config.py` | 单一 `Config` dataclass、JSON 序列化和宽松 `from_dict` | 没有独立 Scenario、运行时校验、schema version 或 secret redaction |
+| `nmsim/config.py` | 单一 `Config` dataclass、默认值和 JSON 序列化；原始字节保持 scientific fingerprint 基线 | 没有独立 `ScenarioSpec`、完整取值/跨字段 domain validation、Config schema version 或 secret redaction |
+| `nmsim/config_ingestion.py` | strict-default mapping ingestion、集中 alias、unknown/duplicate-source 校验和安全建议 | 不改默认值；不提供 `strict=False` 宽松迁移；不属于市场科学 allowlist |
+| `nmsim/__init__.py` | 在正常包导入时将 strict ingestion 显式绑定到 `Config`，并回填 `nmsim.config` 的 alias/异常导出 | 不改 Config dataclass 字段或仿真语义 |
 | `nmsim/config_contract.py` | 对最终有效 `Config` 逐字段 fail-closed 分类，生成稳定、脱敏的 scientific/model-request/execution 摘要与 hash | 不修改 Config 值；不替代 source fingerprint 或实际 resolved model config |
 | `nmsim/types.py` | `Order`、`Statement` TypedDict 和 `Side` | 没有 `Decision`、fill、portfolio 或 event 类型 |
 | `nmsim/prompts.py` | 六类 persona、real system/user prompt | 不执行 persona 数值 policy；不含数值 fundamental/social gain |
@@ -75,11 +77,25 @@ Scientific Component Fingerprint 回答“执行的科学源码是否兼容”�
 
 `population` 是一个必须保留当前语义的特例：原始 counts 按 key 排序用于审计，同时显式保存按当前 dict insertion order 产生的 `effective_cast`。该 cast 会影响 Agent、batch、社交图和 leverage cohort 顺序，因此不能为追求表面上的 dict 无序性而丢掉。
 
+### Config 输入与 contract 分类是两个边界
+
+正常包导入先执行 `nmsim/__init__.py`；它将 `nmsim/config_ingestion.py` 的 strict contract 安装到现有 `Config` class，并把 alias/异常类回填到 `nmsim.config` 导入表面。因此 `import nmsim`、`from nmsim import Config` 和 `from nmsim.config import Config` 这些受支持路径所得的 `Config.from_dict(data, strict=True)` 都会在构造 dataclass 前拒绝未知或含糊 mapping 输入。审计未找到历史 Config mapping alias，因此当前集中 map 为空；argparse 的 CLI flag 不被当作 alias 证据。机制和回归测试仍保证：未来只有经 artifact 证明的精确 alias 可在 unknown validation 前规范化，alias/canonical 重复在值相同时也拒绝。未知名按稳定顺序列出，近似建议不自动更正，输入值不进入错误，过长或 credential/private-shaped key 会截断/脱敏。`strict=False` 显式不支持：它抛出 `ConfigSchemaError`，不是一条可用于正式实验的 legacy 忽略通道。
+
+当前两个 managed 入口不从任意 mapping 恢复 Config：`nmsim.run` 和 `experiments.run_seed` 由 `argparse` 拒绝未知 CLI flag，然后显式构造 Config。Strict Replay 比较这个当前 effective Config 与 recording 摘要/hash，不会用宽松 `from_dict` 还原历史配置。未来配置文件或 manifest 恢复必须调用 strict ingestion。输入 unknown key 在 Config 构造时失败；已合法新增的 dataclass 字段若未进入 `CONFIG_FIELD_RULES`，则在 `validate_config_classification` 构建 contract 时失败。两者不可合并为一个默认 execution catch-all。
+
+如果配置输入错误发生在 `RunManager.create` 之前，它尚未进入合法 managed run lifecycle：不创建 run directory/finished manifest，不发出 `RunStarted` 或 `RoundStarted`，不构造/调用 Provider，不访问网络，也不产生 canonical outputs。本阶段不提前实现 Phase 1.1B 的统一 startup-failure lifecycle。
+
+### Scenario label 不是科学内容身份
+
+`scenario_id`/label 当前是人类可读 execution metadata，修改 label 本身不阻止 Replay。当前真实 Scenario 内容由 `news_round`、`news_text`、`seed_fraction`、`reference_path` 内容身份以及 population/信息可见性等 scientific Config 约束。Manifest 的 `scenario.definition_sha256` 只是当前有限摘要的描述性 hash，不替代 scientific config contract。未来引入 `ScenarioSpec` / `EventStream` 时，payload、事件时间线、可见性策略和输入数据 hash 必须进入 scientific config 或独立 `scenario_content_hash`，不得只依靠 label。Phase 1.1A.2 不实现 `ScenarioSpec`。
+
 ## 从公开入口到价格更新
 
 ```mermaid
 flowchart TD
-    CLI[python -m nmsim.run / experiment driver] --> CFG[Config]
+    CLI[python -m nmsim.run / experiment driver] --> INGEST[argparse or strict mapping ingestion]
+    INGEST -->|unknown/ambiguous| CFGERR[configuration error; no managed lifecycle]
+    INGEST --> CFG[Config]
     CFG --> RM[RunManager.create]
     RM --> CONTRACT[effective Config summaries + hashes]
     CONTRACT --> MANIFEST[running manifest + RunStarted]
@@ -261,16 +277,16 @@ Recording 位于 cache 外侧，保存每个 logical Agent response；manifest �
 
 Strict replay 是 managed replay 的默认且唯一成功路径。`ReplayLLM` 完全不持有 inner Provider；`RunManager` 已在它构造前创建 running manifest、标记 `network_access=false`/`provider_calls=0` 并计算当前 source/config 契约。`ReplayLLM.__init__` 随后在调用 `run_sim`、发出第一个 `RoundStarted` 或消费第一条历史 response 之前完成 preflight。实际检查层次是：
 
-1. **Recording envelope 与完整性**：JSON、连续 call sequence、record type、Prompt/response hash 和单一 recording schema 先被验证。真正的 schema 1.0 recording 立即以 `legacy_recording_missing_replay_contract` 拒绝；不从当前默认值猜测或回填缺失契约。
-2. **Effective-config 契约完整性**：当前 recording schema 1.1 每条记录必须有 config hash schema、classification hash、三类 hash/字段列表/规范化摘要以及 full hash。Phase 1.1A 期间、在该扩展前产生的 schema 1.1 recording 虽有 source fingerprint，但缺少运行时配置契约，因而以 `recording_missing_runtime_config_contract` fail closed。
+1. **Recording 兼容矩阵**：先按 envelope 明示版本和 runtime config contract 状态分类，不根据字段“看起来像新格式”猜测或升级。Schema 1.0 以 `legacy_recording_missing_replay_contract` 拒绝；无 config contract 的 pre-contract 1.1 以 `recording_missing_runtime_config_contract` 拒绝；有 config contract 的 transitional 1.1 以 `transitional_schema_1_1_with_config_contract` 拒绝。这三类仍可 Reparse Audit，但只有完整 1.2 可继续 Strict Replay。
+2. **Schema 1.2 正式结构与完整性**：加载时校验 required top-level/request fields、type、envelope/declared version、record type，重算 Prompt/response hash，并检查 request/order/batch 与全文件 compatibility/model identity。1.2 缺必需字段或校验失败都是 malformed 1.2，不降级或用当前默认值回填；Reparse 也将其标为 `strict_replay=false`。空 recording 在首轮前拒绝，且 append 模式被禁用以保护历史文件。
 3. **运行时科学/模型请求配置**：`config_hash_schema_version` 和 `config_classification_hash` 必须一致；`scientific_config_hash` 或 `model_request_config_hash` 不一致时，按规范化摘要列出具体差异字段，只显示该字段安全值 hash 和 category hash 缩写，随即拒绝。`execution_config_hash` 不作阻断键；其字段级差异写入 manifest 的 `replay_compatibility` 并显式标记 allowed。
 4. **科学源与 schema 身份**：`fingerprint_schema_version`、`decision_parser_schema_version`、`decision_parser_source_hash`、`event_schema_version`、`recording_schema_version`、`prompt_source_hash`、`persona_source_hash`、`simulation_core_source_hash` 和 `scientific_component_fingerprint` 必须逐字段一致。同一 recording 内所有记录必须声明同一 source/config 身份。
 5. **Resolved 模型逻辑配置**：Provider（requested/resolved）、最终模型名、temperature、max tokens、cache/use-cheap-model 状态和 endpoint identity hash 在原有 secret-free `model_config` 中逐键比较；credential 不进入该序列化对象。
 6. **每次 logical request**：只有 constructor preflight 全部通过后，仿真才会开始。每轮的 Agent identity、Persona identity、round、全局调用序号、batch 序号/索引/大小与长度前缀的组合 Prompt hash 必须与下一条记录完全对应。整批全部匹配后 cursor 才推进，结束时还必须消费全部 recording。
 
-`RecordingLLM` 在每条 schema 1.1 logical-call record 中保存 `RunManager.replay_compatibility`，即 source fingerprint/schema、Git identity 和全部 effective-config 契约；不仅依赖 manifest sidecar。任一阻断字段不一致均立即抛出 `ReplayMismatchError`。managed 运行会捕获该错误，在已创建的 run directory 保留 failed manifest 和 `RunFailed` 事件，且不生成看似成功的 canonical 结果。constructor preflight 错配时第一轮尚未开始、honest-N 为 0；若是 preflight 通过后的逐请求错配，manifest 则保留已完成的真实数量。错误不回显完整 Prompt、private rationale、API key 或 Authorization 内容；此路径没有网络访问或 Provider fallback。
+`RecordingLLM` 只写 schema 1.2；在首次 Provider 调用前用 `validate_v12_metadata()` 验证 source/config metadata，并在每条 logical-call record 落盘前用 `validate_v12_record()` 验证正式结构。记录内保存 `RunManager.replay_compatibility`，即 source fingerprint/schema、Git identity 和全部 effective-config 契约；不仅依赖 manifest sidecar。任一阻断字段不一致均立即抛出 `ReplayMismatchError`。managed 运行会捕获该错误，在已创建的 run directory 保留 failed manifest 和 `RunFailed` 事件，且不生成看似成功的 canonical 结果。constructor preflight 错配时第一轮尚未开始、honest-N 为 0；若是 preflight 通过后的逐请求错配，manifest 则保留已完成的真实数量。错误不回显完整 Prompt、private rationale、API key 或 Authorization 内容；此路径没有网络访问或 Provider fallback。
 
-schema 1.0 和 pre-extension schema 1.1 的上述拒绝只表示它们不满足当前 Strict Replay 证据契约，不表示历史运行无效或 raw response 损坏。两者均仍可进入不继续市场的离线 Reparse Audit。
+Schema 1.0、pre-contract schema 1.1 和 transitional schema 1.1 的上述拒绝只表示它们不满足当前正式 Strict Replay 证据契约，不表示历史运行无效或 raw response 损坏。三者均仍可进入不继续市场的离线 Reparse Audit，但不会被原地改写为 1.2。正式矩阵见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md#兼容矩阵)。
 
 worker/batch/cache 在这个边界中的分工是显式的：
 
@@ -300,7 +316,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 
 ### `Config`
 
-38 个字段，完整实效表见 [CODEX_HANDOFF_AUDIT.md](CODEX_HANDOFF_AUDIT.md)。它同时混合 timeline、population、provider、social、leverage、validation 和 output concern，没有独立 Scenario/Policy/Engine 配置。Phase 1.1A.1 没有拆分或改写该 dataclass，只在边界将其 27 个 scientific、9 个 model-request 和 2 个 execution 字段逐一登记到 `CONFIG_FIELD_RULES`；任一未分类新字段都使契约构建 fail closed。
+38 个字段，完整实效表见 [CODEX_HANDOFF_AUDIT.md](CODEX_HANDOFF_AUDIT.md)。它同时混合 timeline、population、provider、social、leverage、validation 和 output concern，没有独立 Scenario/Policy/Engine 配置。Phase 1.1A.1 没有拆分该 dataclass，只在边界将其 27 个 scientific、9 个 model-request 和 2 个 execution 字段逐一登记到 `CONFIG_FIELD_RULES`；任一未分类新字段都使契约构建 fail closed。Phase 1.1A.2 保持 `config.py` dataclass/默认值的原始字节，由 package bootstrap 将外部 strict `from_dict` contract 绑定到 class，当前不接受任何未经证据的 alias，并提供 unknown/duplicate-source 错误且明确不支持 `strict=False`。
 
 ### `Order` (`TypedDict`)
 
@@ -381,8 +397,10 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 5. `config.json`
 6. `sim_overview.png`（matplotlib 可用时）
 
-并新增 `run_manifest.json`、`events.jsonl`、`private_events.jsonl`、`llm_records.jsonl`。manifest 与每条 LLM recording 保存 parser/event/recording/fingerprint schema 版本、Prompt/Persona/parser/core 哈希、总科学指纹、Git 身份，以及版本化的 effective-config 分类、脱敏摘要和 full/scientific/model-request/execution hashes；replay 运行的 manifest 还保存 strict 检查结果、execution 差异与 cross-commit 标志。事件现记录 observation hash/public feed、LLM logical calls、所有提交订单、真实 Agent fill、逐轮 portfolio 变更、margin/liquidation、metrics、batch 与 run status。
+并新增 `run_manifest.json`、`events.jsonl`、`private_events.jsonl`、`llm_records.jsonl`。新 `llm_records.jsonl` 只写 schema 1.2；manifest 与每条 LLM recording 保存 parser/event/recording/fingerprint schema 版本、Prompt/Persona/parser/core 哈希、总科学指纹、Git 身份，以及版本化的 effective-config 分类、脱敏摘要和 full/scientific/model-request/execution hashes；replay 运行的 manifest 还保存 strict 检查结果、execution 差异与 cross-commit 标志。事件现记录 observation hash/public feed、LLM logical calls、所有提交订单、真实 Agent fill、逐轮 portfolio 变更、margin/liquidation、metrics、batch 与 run status。
 
 Reparse audit 不写入 managed run directory，而是在单独 audit 目录写出 public results、0600 private rationale sidecar 和 summary；该目录不包含价格轨迹或仿真 canonical 输出。
 
 仍未完整记录/实现：Provider SDK 中间 retry/request id、显式 market-maker inventory、phantom seller 账本、独立 adjacency artifact，以及没有 `.git` 时的 commit/diff。根目录旧输出只在安全时通过 `latest` symlink 保持兼容，普通历史文件永不覆盖。
+
+需要单独记住这个边界设计：`nmsim/config.py` 仍在 scientific source allowlist 中，且 Phase 1.1A.2 保持了该文件原始字节和所有默认值，所以 simulation core source hash 和总 scientific fingerprint 保持基线身份。`nmsim/config_ingestion.py` 是 package/configuration instrumentation，由 `nmsim/__init__.py` 在正常包导入时安装 strict contract，未被伪装为市场规则。它的行为由 unknown/alias/正式入口测试锁定，最终 effective Config 由运行时 config hash 约束，recording evidence 结构由 schema 1.2 约束。未来改变这个 instrumentation 边界时必须同步审查相关 schema 和 fail-closed 测试。

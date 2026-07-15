@@ -15,6 +15,29 @@ Package layout:
   validation.py  Phase 4: behavioral stylized facts + real-episode comparison
   run.py         CLI entry point (CSV + plots + cost print)
 """
+from . import config as _config_module
 from .config import Config
+from .config_ingestion import (
+    CONFIG_FIELD_ALIASES,
+    ConfigAliasConflictError,
+    ConfigSchemaError,
+    UnknownConfigFieldError,
+    install_config_ingestion_contract,
+)
 
-__all__ = ["Config"]
+install_config_ingestion_contract(Config)
+
+# Keep the established ``nmsim.config`` import surface usable while the input
+# contract remains outside the raw-byte scientific source allowlist.
+_config_module.CONFIG_FIELD_ALIASES = CONFIG_FIELD_ALIASES
+_config_module.ConfigAliasConflictError = ConfigAliasConflictError
+_config_module.ConfigSchemaError = ConfigSchemaError
+_config_module.UnknownConfigFieldError = UnknownConfigFieldError
+
+__all__ = [
+    "CONFIG_FIELD_ALIASES",
+    "Config",
+    "ConfigAliasConflictError",
+    "ConfigSchemaError",
+    "UnknownConfigFieldError",
+]
