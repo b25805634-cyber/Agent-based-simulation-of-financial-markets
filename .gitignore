@@ -1,0 +1,77 @@
+# macOS and local editor state
+.DS_Store
+**/.DS_Store
+._*
+.claude/settings.local.json
+.vscode/
+.idea/
+*.swp
+*~
+
+# Python bytecode, environments, builds, and tool caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+.tox/
+.nox/
+.venv/
+venv/
+build/
+dist/
+*.egg-info/
+
+# Local secrets and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+credentials*.json
+*_credentials.json
+secrets*.json
+*_secrets.json
+
+# Managed run trees and rejected-run evidence
+runs/
+rejected/
+/latest
+
+# Defense in depth for private LLM and reasoning records
+private_events.jsonl
+llm_records.jsonl
+reasoning_traces.csv
+*_traces.json
+
+# Historical/generated experiment artifacts: preserve locally, do not stage
+/outputs/
+/outputs_*/
+/results/
+/results_*/
+/traces/
+/logs/
+/*.log
+/outputs_sweep_gain.png
+
+# Defensive root outputs if a run uses --out .
+/price_path.csv
+/propagation.csv
+/stylized_facts.json
+/sim_overview.png
+/config.json
+/experiment_result.json
+/events.jsonl
+/run_manifest.json
+
+# Atomic/interrupted local writes
+*.tmp
+
+# Unrelated confidential local document
+/VPN接入 - Higgs Asset wiki.pdf
