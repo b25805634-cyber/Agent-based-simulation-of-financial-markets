@@ -43,8 +43,9 @@ PROTOCOL_ROOT = Path(__file__).resolve().parents[1] / "qualification"
 PROTOCOL_PATH = PROTOCOL_ROOT / "protocol.json"
 OBSERVATIONS_PATH = PROTOCOL_ROOT / "observations.json"
 RUBRIC_PATH = PROTOCOL_ROOT / "rubric.json"
+VISIBILITY_CONTRACT_PATH = PROTOCOL_ROOT / "visibility_contract.json"
 ALLOWED_PROVIDER_IDS = frozenset({"mock", "fake_test_provider"})
-QUALIFICATION_OUTPUT_SCHEMA_VERSION = "1.0"
+QUALIFICATION_OUTPUT_SCHEMA_VERSION = "1.1"
 _REQUIRED_DECISION_FIELDS = frozenset(
     {"quantity", "limit_price", "sentiment", "public_take"}
 )
@@ -149,30 +150,264 @@ def _read_json(path: Path) -> dict[str, Any]:
     return value
 
 
+_FIXTURE_FIELD_PATHS = frozenset(
+    {
+        "fixture_id",
+        "protocol_version",
+        "round",
+        "market_state.latest_price",
+        "market_state.recent_prices",
+        "visible_news",
+        "visible_social_feed.sentiment",
+        "visible_social_feed.public_take",
+        "cash",
+        "shares",
+        "memory",
+        "fundamental_value",
+        "invisible_fields",
+        "input_hash",
+    }
+)
+_VISIBILITY_STATUSES = frozenset({"always", "conditional", "never", "mode_dependent"})
+
+
+def _visibility_fields(contract: Mapping[str, Any]) -> dict[str, Mapping[str, Any]]:
+    rows = contract.get("fields")
+    if not isinstance(rows, list):
+        raise QualificationProtocolError("visibility contract fields must be a list")
+    indexed: dict[str, Mapping[str, Any]] = {}
+    required = {
+        "field",
+        "present_in_fixture",
+        "visible_to_model",
+        "visibility_by_prompt_mode",
+        "visible_to_evaluator",
+        "private_or_public",
+        "allowed_for_scoring",
+        "rationale",
+    }
+    for row in rows:
+        if not isinstance(row, Mapping) or not required.issubset(row):
+            raise QualificationProtocolError(
+                "visibility contract field is missing required metadata"
+            )
+        name = str(row["field"])
+        if not name or name in indexed:
+            raise QualificationProtocolError(
+                "visibility contract field names must be non-empty and unique"
+            )
+        if row["visible_to_model"] not in _VISIBILITY_STATUSES:
+            raise QualificationProtocolError(
+                "invalid model visibility for field {}".format(name)
+            )
+        if row["present_in_fixture"] is not True or not isinstance(
+            row["visible_to_evaluator"], bool
+        ):
+            raise QualificationProtocolError(
+                "invalid fixture/evaluator visibility metadata for field {}".format(
+                    name
+                )
+            )
+        by_mode = row["visibility_by_prompt_mode"]
+        if not isinstance(by_mode, Mapping) or set(by_mode) != {"real", "mock"}:
+            raise QualificationProtocolError(
+                "prompt-mode visibility must cover real and mock for field {}".format(
+                    name
+                )
+            )
+        if not str(row["private_or_public"]).strip() or not str(
+            row["rationale"]
+        ).strip():
+            raise QualificationProtocolError(
+                "visibility contract field {} requires classification and rationale".format(
+                    name
+                )
+            )
+        if not isinstance(row["allowed_for_scoring"], list):
+            raise QualificationProtocolError(
+                "allowed_for_scoring must be a list for field {}".format(name)
+            )
+        indexed[name] = row
+    if set(indexed) != _FIXTURE_FIELD_PATHS:
+        missing = sorted(_FIXTURE_FIELD_PATHS - set(indexed))
+        extra = sorted(set(indexed) - _FIXTURE_FIELD_PATHS)
+        raise QualificationProtocolError(
+            "visibility contract fixture fields differ: missing={} extra={}".format(
+                missing, extra
+            )
+        )
+    return indexed
+
+
+def _validate_rubric_visibility(
+    rubric: Mapping[str, Any], contract: Mapping[str, Any]
+) -> None:
+    fields_by_name = _visibility_fields(contract)
+    non_fixture_rows = contract.get("non_fixture_prompt_inputs")
+    if not isinstance(non_fixture_rows, list):
+        raise QualificationProtocolError(
+            "visibility contract non_fixture_prompt_inputs must be a list"
+        )
+    non_fixture = {
+        str(row.get("field")): row
+        for row in non_fixture_rows
+        if isinstance(row, Mapping) and row.get("field")
+    }
+    all_inputs = {**fields_by_name, **non_fixture}
+    for section_name in ("engineering_metrics", "behavioral_diagnostics"):
+        section = rubric.get(section_name)
+        if not isinstance(section, Mapping):
+            raise QualificationProtocolError(
+                "rubric {} must be an object".format(section_name)
+            )
+        prefix = "engineering" if section_name == "engineering_metrics" else "behavioral"
+        for metric_name, raw_spec in section.items():
+            if not isinstance(raw_spec, Mapping):
+                raise QualificationProtocolError(
+                    "rubric metric {}.{} lacks dependency metadata".format(
+                        prefix, metric_name
+                    )
+                )
+            model_dependencies = raw_spec.get("model_input_dependencies")
+            evaluator_dependencies = raw_spec.get("evaluator_dependencies")
+            if not isinstance(model_dependencies, list) or not isinstance(
+                evaluator_dependencies, list
+            ):
+                raise QualificationProtocolError(
+                    "rubric metric {}.{} must declare model and evaluator dependencies".format(
+                        prefix, metric_name
+                    )
+                )
+            metric_id = "{}.{}".format(prefix, metric_name)
+            is_not_scored = raw_spec.get("mode") == "not_scored"
+            if is_not_scored and not str(raw_spec.get("reason", "")).strip():
+                raise QualificationProtocolError(
+                    "not_scored metric {} requires a reason".format(metric_id)
+                )
+            resolved_dependencies = []
+            for dependency in model_dependencies:
+                field = all_inputs.get(str(dependency))
+                if field is None:
+                    raise QualificationProtocolError(
+                        "rubric metric {} references unknown model input {}".format(
+                            metric_id, dependency
+                        )
+                    )
+                resolved_dependencies.append((dependency, field))
+            for dependency, field in resolved_dependencies:
+                visibility = field.get("visible_to_model")
+                if not is_not_scored and visibility in {"never", "mode_dependent"}:
+                    raise QualificationProtocolError(
+                        "rubric metric {} depends on model-invisible field {}".format(
+                            metric_id, dependency
+                        )
+                    )
+            for dependency, field in resolved_dependencies:
+                allowed = field.get("allowed_for_scoring", [])
+                if not is_not_scored and metric_id not in allowed:
+                    raise QualificationProtocolError(
+                        "rubric metric {} is not allowed to score field {}".format(
+                            metric_id, dependency
+                        )
+                    )
+
+    fundamental = rubric["behavioral_diagnostics"].get("fundamental_anchor_score", {})
+    if (
+        fundamental.get("mode") != "not_scored"
+        or fundamental.get("reason") != "fundamental_anchor_not_visible"
+    ):
+        raise QualificationProtocolError(
+            "fundamental_anchor_score must remain not_scored while the real prompt hides fundamental_value"
+        )
+
+
+def _validate_fixture_shapes(fixtures: Sequence[Mapping[str, Any]]) -> None:
+    expected_top = {
+        "fixture_id",
+        "protocol_version",
+        "round",
+        "market_state",
+        "visible_news",
+        "visible_social_feed",
+        "cash",
+        "shares",
+        "memory",
+        "fundamental_value",
+        "invisible_fields",
+        "input_hash",
+    }
+    for fixture in fixtures:
+        if set(fixture) != expected_top:
+            raise QualificationProtocolError(
+                "fixture fields differ from visibility contract: {}".format(
+                    fixture.get("fixture_id")
+                )
+            )
+        state = fixture.get("market_state")
+        if not isinstance(state, Mapping) or set(state) != {
+            "latest_price",
+            "recent_prices",
+        }:
+            raise QualificationProtocolError(
+                "fixture market_state differs from visibility contract: {}".format(
+                    fixture.get("fixture_id")
+                )
+            )
+        feed = fixture.get("visible_social_feed")
+        if not isinstance(feed, list) or any(
+            not isinstance(item, Mapping)
+            or set(item) != {"sentiment", "public_take"}
+            for item in feed
+        ):
+            raise QualificationProtocolError(
+                "fixture social feed differs from visibility contract: {}".format(
+                    fixture.get("fixture_id")
+                )
+            )
+
+
 def load_protocol_bundle(
     *,
     protocol_path: Path = PROTOCOL_PATH,
     observations_path: Path = OBSERVATIONS_PATH,
     rubric_path: Path = RUBRIC_PATH,
+    visibility_contract_path: Path = VISIBILITY_CONTRACT_PATH,
 ) -> dict[str, Any]:
     protocol = _read_json(protocol_path)
     observations = _read_json(observations_path)
     rubric = _read_json(rubric_path)
+    visibility_contract = _read_json(visibility_contract_path)
     version = str(protocol.get("protocol_version", ""))
-    if not version or observations.get("protocol_version") != version:
+    observation_version = str(
+        protocol.get("observation_protocol_version", version)
+    )
+    if not version or observations.get("protocol_version") != observation_version:
         raise QualificationProtocolError("observation protocol version mismatch")
     if rubric.get("protocol_version") != version:
         raise QualificationProtocolError("rubric protocol version mismatch")
+    if visibility_contract.get("protocol_version") != version:
+        raise QualificationProtocolError("visibility contract protocol version mismatch")
+    if visibility_contract.get("observation_protocol_version") != observation_version:
+        raise QualificationProtocolError(
+            "visibility contract observation protocol version mismatch"
+        )
+    if visibility_contract.get("visibility_contract_version") != protocol.get(
+        "visibility_contract_version"
+    ) or rubric.get("visibility_contract_version") != protocol.get(
+        "visibility_contract_version"
+    ):
+        raise QualificationProtocolError("visibility contract version mismatch")
     fixtures = observations.get("fixtures")
     if not isinstance(fixtures, list):
         raise QualificationProtocolError("observations.fixtures must be a list")
+    _validate_fixture_shapes(fixtures)
     fixture_ids = [str(fixture.get("fixture_id", "")) for fixture in fixtures]
     if not fixture_ids or len(fixture_ids) != len(set(fixture_ids)):
         raise QualificationProtocolError("fixture ids must be non-empty and unique")
     if sorted(fixture_ids) != sorted(protocol.get("fixture_ids", [])):
         raise QualificationProtocolError("protocol and observation fixture ids differ")
     for fixture in fixtures:
-        if fixture.get("protocol_version") != version:
+        if fixture.get("protocol_version") != observation_version:
             raise QualificationProtocolError(
                 "fixture protocol version mismatch: {}".format(
                     fixture.get("fixture_id")
@@ -206,13 +441,16 @@ def load_protocol_bundle(
         raise QualificationProtocolError("protocol must define exactly 48 cases")
     if rubric.get("frozen_before_external_provider_calls") is not True:
         raise QualificationProtocolError("rubric must be frozen before external calls")
+    _validate_rubric_visibility(rubric, visibility_contract)
     return {
         "protocol": protocol,
         "observations": observations,
         "rubric": rubric,
+        "visibility_contract": visibility_contract,
         "protocol_hash": stable_json_hash(protocol),
         "fixture_set_hash": fixture_set_hash(fixtures),
         "rubric_hash": stable_json_hash(rubric),
+        "visibility_contract_hash": stable_json_hash(visibility_contract),
     }
 
 
@@ -432,6 +670,7 @@ def aggregate_results(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     by_fixture_actions: dict[str, Counter] = defaultdict(Counter)
     persona_vectors: dict[str, list[str]] = defaultdict(list)
     sentiments_by_fixture_persona: dict[str, dict[str, float]] = defaultdict(dict)
+    actions_by_fixture_persona: dict[str, dict[str, str]] = defaultdict(dict)
     for result in completed:
         persona = str(result["persona_id"])
         fixture = str(result["fixture_id"])
@@ -440,6 +679,7 @@ def aggregate_results(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
         by_fixture_actions[fixture][action] += 1
         persona_vectors[persona].append(action)
         sentiments_by_fixture_persona[fixture][persona] = float(result["sentiment"])
+        actions_by_fixture_persona[fixture][persona] = action
 
     def count_flag(flag: str) -> int:
         return sum(bool(result["diagnostic_flags"].get(flag)) for result in completed)
@@ -477,6 +717,9 @@ def aggregate_results(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
     }
     panic = sentiments_by_fixture_persona.get("unanimous_neighbor_panic", {})
     discount = sentiments_by_fixture_persona.get("deep_discount_to_fundamental", {})
+    discount_actions = actions_by_fixture_persona.get(
+        "deep_discount_to_fundamental", {}
+    )
     return {
         "engineering": {
             "schema_success_rate": _rate(schema_success, total),
@@ -523,9 +766,17 @@ def aggregate_results(results: Sequence[Mapping[str, Any]]) -> dict[str, Any]:
                 "interpretation": "relative_diagnostic",
             },
             "fundamental_anchor_score": {
-                "value_institution": discount.get("value_institution"),
-                "retail_crowd": discount.get("retail_crowd"),
-                "interpretation": "relative_diagnostic",
+                "status": "not_scored",
+                "reason": "fundamental_anchor_not_visible",
+                "score": None,
+                "raw_evidence": {
+                    persona: {
+                        "sentiment": discount.get(persona),
+                        "action": discount_actions.get(persona),
+                    }
+                    for persona in ("value_institution", "retail_crowd")
+                },
+                "interpretation": "raw_distribution_only",
             },
             "persona_distinctiveness": {
                 "unique_action_vectors": len(unique_vectors),
@@ -617,9 +868,14 @@ def _initialise_manifest(
         "output_schema_version": QUALIFICATION_OUTPUT_SCHEMA_VERSION,
         "protocol_version": bundle["protocol"]["protocol_version"],
         "protocol_hash": bundle["protocol_hash"],
+        "observation_protocol_version": bundle["observations"]["protocol_version"],
         "fixture_set_hash": bundle["fixture_set_hash"],
         "rubric_version": bundle["rubric"]["rubric_version"],
         "rubric_hash": bundle["rubric_hash"],
+        "visibility_contract_version": bundle["visibility_contract"][
+            "visibility_contract_version"
+        ],
+        "visibility_contract_hash": bundle["visibility_contract_hash"],
         "persona_ids": list(bundle["protocol"]["persona_ids"]),
         "persona_count": len(bundle["protocol"]["persona_ids"]),
         "fixture_ids": list(bundle["protocol"]["fixture_ids"]),
@@ -664,8 +920,13 @@ def _dry_run_summary(
         "fixture_count": len(bundle["observations"]["fixtures"]),
         "protocol_version": bundle["protocol"]["protocol_version"],
         "protocol_hash": bundle["protocol_hash"],
+        "observation_protocol_version": bundle["observations"]["protocol_version"],
         "fixture_set_hash": bundle["fixture_set_hash"],
         "rubric_hash": bundle["rubric_hash"],
+        "visibility_contract_version": bundle["visibility_contract"][
+            "visibility_contract_version"
+        ],
+        "visibility_contract_hash": bundle["visibility_contract_hash"],
         "provider": args.provider,
         "model_requested": args.model or None,
         "model_resolved": manager.manifest["qualification"]["model_resolved"],
@@ -767,6 +1028,18 @@ def run_qualification(
             private_data={"raw_response": raw},
         )
         public, private = evaluate_response(case, raw)
+        public.update(
+            {
+                "prompt_hash": prompt_hash,
+                "prompt_variant": (
+                    "mock_agent_prompt_v1"
+                    if provider_id == "mock"
+                    else "real_agent_prompt_v1"
+                ),
+                "source_fixture_hash": case.fixture["input_hash"],
+                "visibility_contract_hash": bundle["visibility_contract_hash"],
+            }
+        )
         public["latency_ms"] = elapsed_ms
         private.update(
             {
@@ -814,9 +1087,14 @@ def run_qualification(
         "run_kind": "model_qualification",
         "protocol_version": bundle["protocol"]["protocol_version"],
         "protocol_hash": bundle["protocol_hash"],
+        "observation_protocol_version": bundle["observations"]["protocol_version"],
         "fixture_set_hash": bundle["fixture_set_hash"],
         "rubric_version": bundle["rubric"]["rubric_version"],
         "rubric_hash": bundle["rubric_hash"],
+        "visibility_contract_version": bundle["visibility_contract"][
+            "visibility_contract_version"
+        ],
+        "visibility_contract_hash": bundle["visibility_contract_hash"],
         "provider": provider_id,
         "model_requested": manager.manifest["qualification"]["model_requested"],
         "model_resolved": manager.manifest["qualification"]["model_resolved"],
@@ -857,7 +1135,7 @@ def run_qualification(
 
 def build_argparser() -> argparse.ArgumentParser:
     parser = RaisingArgumentParser(allow_abbrev=False)
-    parser.add_argument("--version", action="version", version="model-qualification 1.0")
+    parser.add_argument("--version", action="version", version="model-qualification 1.1")
     parser.add_argument("--provider", default="mock")
     parser.add_argument("--model", default="")
     parser.add_argument("--seed", type=int, default=7)
@@ -909,6 +1187,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             "qualification_protocol": PROTOCOL_PATH,
             "qualification_observations": OBSERVATIONS_PATH,
             "qualification_rubric": RUBRIC_PATH,
+            "qualification_visibility_contract": VISIBILITY_CONTRACT_PATH,
         },
         command_identity="python -m experiments.model_qualification",
         run_kind="model_qualification",
@@ -1002,6 +1281,7 @@ __all__ = [
     "QualificationProtocolError",
     "QualificationProviderGuardError",
     "RUBRIC_PATH",
+    "VISIBILITY_CONTRACT_PATH",
     "aggregate_results",
     "build_argparser",
     "build_cases",

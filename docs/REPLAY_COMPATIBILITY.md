@@ -66,6 +66,13 @@ Strict Replay 不再用一个模糊的“版本 hash”代替不同责任：
 
 `full_effective_config_hash` 还覆盖全部 38 个 `Config` 字段的脱敏规范表示，用于审计整体身份；它包含 execution 字段，因而不作为 strict 放行/拒绝的单一开关。
 
+文档和报告必须写具体 identity 名称，禁止用模糊的“默认 Config hash”。
+历史测试值 `f0508c23…` 是 raw `asdict(Config())` 规范 JSON 的 SHA-256，
+没有 config-contract schema envelope；`1a36131b…` 是固定 base_dir 下的
+`full_effective_config_hash`。二者算法和身份域不同。Phase 1.1 complete tag
+与 Phase 1.2A sealing 的同 fixture 对照见
+[Config Hash Identities](CONFIG_HASH_IDENTITIES.md)。
+
 ### config hash schema 1.0
 
 `config_hash_schema_version=1.0` 的计算只接收已合并完成的 `Config` dataclass，不 hash 用户原始 CLI token。每个 hash 的 payload 是

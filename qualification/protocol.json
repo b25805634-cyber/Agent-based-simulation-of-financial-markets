@@ -1,7 +1,9 @@
 {
   "case_identity_schema_version": "1.0",
   "fixture_set_schema_version": "1.0",
-  "protocol_version": "1.0",
+  "protocol_version": "1.1",
+  "observation_protocol_version": "1.0",
+  "visibility_contract_version": "1.0",
   "run_kind": "model_qualification",
   "persona_ids": [
     "retail_crowd",
@@ -33,7 +35,8 @@
   "prompt_policy": {
     "fake_test_provider": "existing_real_agent_prompt",
     "mock": "existing_mock_agent_prompt",
-    "private_prompt_in_public_output": false
+    "private_prompt_in_public_output": false,
+    "fundamental_value_in_real_user_prompt": false
   },
   "privacy": {
     "private_case_file_mode": "0600",
@@ -51,6 +54,7 @@
     "counterfactual_market_run": false,
     "single_correct_action_test": false,
     "statistical_replicate_unit": "qualification_cases",
-    "purpose": "pre-provider engineering qualification and relative persona diagnostics"
+    "purpose": "pre-provider engineering qualification and relative persona diagnostics",
+    "fundamental_anchor_score": "not_scored_until_fundamental_signal_is_visible"
   }
 }

@@ -254,7 +254,8 @@ Important remaining risks:
   retroactively rewritten.
 - Managed provenance records what calculation ran; it does not cure known
   inferential limitations of legacy analyzers.
-- The qualification protocol is frozen before any real-model call, but the
-  current real User Prompt does not expose the fixture's fundamental-value
-  field. That visibility boundary must be reviewed and versioned before the
-  corresponding real-provider diagnostic is interpreted.
+- Qualification protocol/rubric 1.1 and visibility contract 1.0 are frozen
+  before any real-model call. Because the current real User Prompt does not
+  expose the fixture's numeric fundamental value, the corresponding diagnostic
+  is machine-readably `not_scored`; raw actions/sentiments remain descriptive
+  evidence only.

@@ -1,0 +1,214 @@
+{
+  "visibility_contract_schema_version": "1.0",
+  "visibility_contract_version": "1.0",
+  "protocol_version": "1.1",
+  "observation_protocol_version": "1.0",
+  "prompt_modes": {
+    "real": {
+      "provider_ids": ["fake_test_provider"],
+      "system_builder": "nmsim.prompts.build_system",
+      "user_builder": "nmsim.prompts.build_user"
+    },
+    "mock": {
+      "provider_ids": ["mock"],
+      "system_builder": "nmsim.agents.Agent.build_prompt(mode=mock)",
+      "user_builder": "nmsim.agents.Agent.build_prompt(mode=mock)"
+    }
+  },
+  "fields": [
+    {
+      "field": "fixture_id",
+      "present_in_fixture": true,
+      "visible_to_model": "never",
+      "visibility_by_prompt_mode": {"real": "never", "mock": "never"},
+      "visible_to_evaluator": true,
+      "private_or_public": "evaluator_metadata",
+      "allowed_for_scoring": [],
+      "rationale": "Stable grouping and case identity metadata; it is not part of the trader observation."
+    },
+    {
+      "field": "protocol_version",
+      "present_in_fixture": true,
+      "visible_to_model": "never",
+      "visibility_by_prompt_mode": {"real": "never", "mock": "never"},
+      "visible_to_evaluator": true,
+      "private_or_public": "evaluator_metadata",
+      "allowed_for_scoring": [],
+      "rationale": "Versions the frozen observation payload without steering the model."
+    },
+    {
+      "field": "round",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "direct", "mock": "direct"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": [],
+      "rationale": "Both user-prompt builders include the current round."
+    },
+    {
+      "field": "market_state.latest_price",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "direct", "mock": "direct"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": [
+        "engineering.constraint_violation_count",
+        "behavioral.price_response_score"
+      ],
+      "rationale": "Both user-prompt builders show the latest price; the evaluator also uses it for order-constraint diagnostics."
+    },
+    {
+      "field": "market_state.recent_prices",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "direct_with_derived_trend", "mock": "direct_with_derived_trend"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": ["behavioral.price_response_score"],
+      "rationale": "Both prompt modes show the recent tape and a derived trend."
+    },
+    {
+      "field": "visible_news",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "direct_or_explicit_none", "mock": "direct_or_explicit_none"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": ["behavioral.news_response_score"],
+      "rationale": "Both prompt modes explicitly encode either the delivered news or that no fresh news arrived."
+    },
+    {
+      "field": "visible_social_feed.sentiment",
+      "present_in_fixture": true,
+      "visible_to_model": "conditional",
+      "visibility_by_prompt_mode": {
+        "real": "individual_values_when_effective_social_weight_positive_otherwise_quiet",
+        "mock": "aggregate_mean_when_effective_social_weight_positive_otherwise_omitted"
+      },
+      "visible_to_evaluator": true,
+      "private_or_public": "public_social_input_inside_private_prompt",
+      "allowed_for_scoring": [
+        "behavioral.social_response_score",
+        "behavioral.contrarian_response_score"
+      ],
+      "rationale": "Social susceptibility is part of the existing Agent policy: eligible real prompts receive individual public sentiment while Mock receives only the mean."
+    },
+    {
+      "field": "visible_social_feed.public_take",
+      "present_in_fixture": true,
+      "visible_to_model": "conditional",
+      "visibility_by_prompt_mode": {
+        "real": "individual_public_text_when_effective_social_weight_positive_otherwise_quiet",
+        "mock": "never"
+      },
+      "visible_to_evaluator": true,
+      "private_or_public": "public_social_input_inside_private_prompt",
+      "allowed_for_scoring": [
+        "behavioral.social_response_score",
+        "behavioral.contrarian_response_score"
+      ],
+      "rationale": "Only the real prompt consumes neighbour public text; Mock behavior has always consumed the aggregate sentiment only."
+    },
+    {
+      "field": "cash",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "direct", "mock": "direct"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": ["engineering.constraint_violation_count"],
+      "rationale": "Both prompt modes show available cash; the evaluator checks requested buy notional against it."
+    },
+    {
+      "field": "shares",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "direct", "mock": "direct"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": ["engineering.constraint_violation_count"],
+      "rationale": "Both prompt modes show inventory; the evaluator checks requested sell quantity against it."
+    },
+    {
+      "field": "memory",
+      "present_in_fixture": true,
+      "visible_to_model": "always",
+      "visibility_by_prompt_mode": {"real": "last_three_entries", "mock": "last_three_entries"},
+      "visible_to_evaluator": true,
+      "private_or_public": "private_prompt_input",
+      "allowed_for_scoring": [],
+      "rationale": "Both prompt modes include the same bounded recent-memory projection."
+    },
+    {
+      "field": "fundamental_value",
+      "present_in_fixture": true,
+      "visible_to_model": "mode_dependent",
+      "visibility_by_prompt_mode": {"real": "never", "mock": "direct"},
+      "visible_to_evaluator": true,
+      "private_or_public": "evaluator_context_and_mock_private_prompt_input",
+      "allowed_for_scoring": [],
+      "rationale": "The production real user prompt does not expose a numeric fundamental value. Mock has historically consumed it; this asymmetry makes fundamental_anchor_score not_scored."
+    },
+    {
+      "field": "invisible_fields",
+      "present_in_fixture": true,
+      "visible_to_model": "never",
+      "visibility_by_prompt_mode": {"real": "never", "mock": "never"},
+      "visible_to_evaluator": true,
+      "private_or_public": "protocol_guard_metadata",
+      "allowed_for_scoring": [],
+      "rationale": "A deny-list used to test the observation boundary; its names and values are not prompt content."
+    },
+    {
+      "field": "input_hash",
+      "present_in_fixture": true,
+      "visible_to_model": "never",
+      "visibility_by_prompt_mode": {"real": "never", "mock": "never"},
+      "visible_to_evaluator": true,
+      "private_or_public": "evaluator_metadata",
+      "allowed_for_scoring": [],
+      "rationale": "Integrity identity for the fixture payload, never a behavioral input."
+    }
+  ],
+  "non_fixture_prompt_inputs": [
+    {
+      "field": "persona_profile",
+      "present_in_fixture": false,
+      "visible_to_model": "always",
+      "visible_to_evaluator": true,
+      "private_or_public": "private_system_prompt_input",
+      "allowed_for_scoring": [
+        "behavioral.persona_tendency_score",
+        "behavioral.contrarian_response_score",
+        "behavioral.persona_distinctiveness",
+        "behavioral.same_model_persona_collapse"
+      ],
+      "rationale": "The existing persona text is placed in the system prompt; the evaluator groups responses by stable persona id."
+    },
+    {
+      "field": "decision_output_schema",
+      "present_in_fixture": false,
+      "visible_to_model": "always",
+      "visible_to_evaluator": true,
+      "private_or_public": "private_system_prompt_input",
+      "allowed_for_scoring": [],
+      "rationale": "The existing prompt asks for the same structured Decision fields used by engineering diagnostics."
+    }
+  ],
+  "forbidden_prompt_content": [
+    "future_prices",
+    "market_clearing_formula",
+    "other_agent_private_rationale",
+    "private_margin_reference_book",
+    "expected_answer",
+    "evaluation_rubric",
+    "private_rationale"
+  ],
+  "public_output_policy": {
+    "full_prompt": "forbidden",
+    "private_rationale": "forbidden",
+    "raw_response": "forbidden"
+  }
+}

@@ -36,7 +36,7 @@
 | 正式 experiment driver | 管理 parent attempt 的 run-level completion，用集中 reuse gate 验证候选，调用受管 `run_seed` child，保留脱敏 summary/audit 和 0600 failure detail | 不把文件存在当作成功；不把 child 内 Decision 行数当作独立 N |
 | 正式派生分析入口 | 在 managed analysis attempt 中读取历史 JSON/trace，把 legacy input 路径/大小/hash 和未验证身份计数入 manifest，并计算原有表/图 | 不伪造 child manifest；不统一或静默修改历史 analyzer 的过滤、配对和 CI 公式 |
 | `experiments/model_qualification.py` | `run_kind=model_qualification` 的 managed 入口；加载冻结 protocol/fixtures/rubric，构造 6×8=48 cases，执行 Mock/Fake 或 dry-run，分离公私输出 | 不调用市场、不产生价格路径；Phase 1.2A 不构造外部真实 Provider |
-| `qualification/*.json` | 版本化协议、8 个 Observation fixtures 和软行为 rubric | 不包含未来价格、private rationale、评价答案或 rubric 泄漏到 Observation |
+| `qualification/*.json` | protocol 1.1、字节不变的 8 个 Observation fixtures、rubric 1.1 和 field-level visibility contract 1.0 | 不包含未来价格、private rationale、评价答案或 rubric 泄漏到 Observation；真实 Prompt 不可见的 fundamental anchor 明确 not-scored |
 
 ## Scientific Component Fingerprint
 
@@ -120,7 +120,7 @@ Provider capability registry 与 reuse identity 是相关但不同的层。前�
 Model qualification 是旁路 managed flow：
 
 ```text
-bootstrap -> validate/hash protocol + fixtures + rubric -> Phase 1.2A provider guard
+bootstrap -> validate/hash protocol + fixtures + rubric + visibility contract -> Phase 1.2A provider guard
   -> dry-run (no Provider) OR 48 Mock/Fake logical calls
   -> public case results + aggregate diagnostics
   -> 0600 prompts/raw responses/private rationale

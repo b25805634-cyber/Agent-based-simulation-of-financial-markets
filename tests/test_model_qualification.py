@@ -67,11 +67,165 @@ class QualificationProtocolTests(unittest.TestCase):
         self.assertNotEqual(original, qualification.stable_json_hash(rubric))
 
     def test_protocol_version_and_frozen_rubric_are_recordable(self):
-        self.assertEqual(self.bundle["protocol"]["protocol_version"], "1.0")
-        self.assertEqual(self.bundle["rubric"]["rubric_version"], "1.0")
+        self.assertEqual(self.bundle["protocol"]["protocol_version"], "1.1")
+        self.assertEqual(self.bundle["observations"]["protocol_version"], "1.0")
+        self.assertEqual(self.bundle["rubric"]["rubric_version"], "1.1")
+        self.assertEqual(
+            self.bundle["visibility_contract"]["visibility_contract_version"],
+            "1.0",
+        )
         self.assertTrue(self.bundle["rubric"]["frozen_before_external_provider_calls"])
-        for key in ("protocol_hash", "fixture_set_hash", "rubric_hash"):
+        for key in (
+            "protocol_hash",
+            "fixture_set_hash",
+            "rubric_hash",
+            "visibility_contract_hash",
+        ):
             self.assertRegex(self.bundle[key], r"^[0-9a-f]{64}$")
+
+    def test_fixture_payload_hash_is_unchanged_by_protocol_and_rubric_upgrade(self):
+        self.assertEqual(
+            self.bundle["fixture_set_hash"],
+            "95109438f101ea1251520b3deb71fed9b96b097d2c9b89c1a6b73e16294aaf34",
+        )
+
+    def test_visibility_contract_covers_every_fixture_field(self):
+        fields = {
+            row["field"]: row
+            for row in self.bundle["visibility_contract"]["fields"]
+        }
+        self.assertEqual(fields["fundamental_value"]["visible_to_model"], "mode_dependent")
+        self.assertEqual(
+            fields["fundamental_value"]["visibility_by_prompt_mode"],
+            {"real": "never", "mock": "direct"},
+        )
+        self.assertFalse(fields["invisible_fields"]["allowed_for_scoring"])
+        self.assertEqual(len(fields), 14)
+
+    def test_visibility_claims_match_actual_real_and_mock_prompts(self):
+        agents = qualification._agents_by_persona(7)
+        for case in self.cases:
+            fixture = case.fixture
+            state = fixture["market_state"]
+            for provider_id in ("fake_test_provider", "mock"):
+                with self.subTest(
+                    fixture=case.fixture_id,
+                    persona=case.persona_id,
+                    provider=provider_id,
+                ):
+                    system, user = qualification._build_prompt(
+                        case, agents[case.persona_id], provider_id
+                    )
+                    self.assertIn("ROUND: {}".format(fixture["round"]), user)
+                    self.assertIn("{:.2f}".format(state["latest_price"]), user)
+                    for price in state["recent_prices"]:
+                        self.assertIn("{:.2f}".format(price), user)
+                    self.assertIn("{:.2f}".format(fixture["cash"]), user)
+                    self.assertIn(str(fixture["shares"]), user)
+                    self.assertIn(fixture["memory"][-1], user)
+                    if fixture["visible_news"]:
+                        self.assertIn(fixture["visible_news"], user)
+                    if provider_id == "mock":
+                        self.assertIn(
+                            "FUNDAMENTAL: {:.2f}".format(
+                                fixture["fundamental_value"]
+                            ),
+                            user,
+                        )
+                    else:
+                        self.assertNotIn("FUNDAMENTAL:", user)
+                        self.assertNotIn("fundamental_value", user)
+                    self.assertNotIn(case.fixture_id, system + user)
+                    self.assertNotIn(fixture["input_hash"], system + user)
+                    for forbidden in self.bundle["visibility_contract"][
+                        "forbidden_prompt_content"
+                    ]:
+                        self.assertNotIn(forbidden, system + user)
+
+    def test_social_visibility_matches_prompt_variant_and_persona_gate(self):
+        agents = qualification._agents_by_persona(7)
+        panic = next(
+            case
+            for case in self.cases
+            if case.persona_id == "retail_crowd"
+            and case.fixture_id == "unanimous_neighbor_panic"
+        )
+        _system, real_user = qualification._build_prompt(
+            panic, agents["retail_crowd"], "fake_test_provider"
+        )
+        _system, mock_user = qualification._build_prompt(
+            panic, agents["retail_crowd"], "mock"
+        )
+        for item in panic.fixture["visible_social_feed"]:
+            self.assertIn(item["public_take"], real_user)
+            self.assertNotIn(item["public_take"], mock_user)
+        self.assertIn("SOCIAL_SENTIMENT: -0.9000", mock_user)
+
+        conflict = next(
+            case
+            for case in self.cases
+            if case.persona_id == "retail_crowd"
+            and case.fixture_id == "conflicting_neighbor_views"
+        )
+        _system, conflict_mock = qualification._build_prompt(
+            conflict, agents["retail_crowd"], "mock"
+        )
+        self.assertRegex(conflict_mock, r"SOCIAL_SENTIMENT: -?0\.0000")
+        for item in conflict.fixture["visible_social_feed"]:
+            self.assertNotIn(item["public_take"], conflict_mock)
+
+        quant = next(
+            case
+            for case in self.cases
+            if case.persona_id == "quant_arb"
+            and case.fixture_id == "unanimous_neighbor_panic"
+        )
+        _system, quant_real = qualification._build_prompt(
+            quant, agents["quant_arb"], "fake_test_provider"
+        )
+        _system, quant_mock = qualification._build_prompt(
+            quant, agents["quant_arb"], "mock"
+        )
+        self.assertIn("The floor is quiet", quant_real)
+        self.assertNotIn("SOCIAL_SENTIMENT", quant_mock)
+        for item in quant.fixture["visible_social_feed"]:
+            self.assertNotIn(item["public_take"], quant_real + quant_mock)
+
+    def test_rubric_cannot_score_a_model_invisible_dependency(self):
+        rubric = copy.deepcopy(self.bundle["rubric"])
+        metric = rubric["behavioral_diagnostics"]["fundamental_anchor_score"]
+        metric["mode"] = "relative_diagnostic"
+        metric.pop("reason", None)
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            rubric_path = Path(temporary) / "invalid-rubric.json"
+            rubric_path.write_text(json.dumps(rubric), encoding="utf-8")
+            with self.assertRaisesRegex(
+                qualification.QualificationProtocolError,
+                "model-invisible field fundamental_value",
+            ):
+                qualification.load_protocol_bundle(rubric_path=rubric_path)
+
+    def test_fundamental_anchor_is_not_scored_but_keeps_raw_evidence(self):
+        rows = []
+        for case in self.cases:
+            raw = json.dumps(
+                {
+                    "action": "buy" if case.persona_id == "value_institution" else "hold",
+                    "quantity": 1 if case.persona_id == "value_institution" else 0,
+                    "limit_price": case.fixture["market_state"]["latest_price"],
+                    "sentiment": 0.5 if case.persona_id == "value_institution" else 0.0,
+                    "public_take": "Public diagnostic response.",
+                    "reasoning": "private",
+                }
+            )
+            rows.append(qualification.evaluate_response(case, raw)[0])
+        metric = qualification.aggregate_results(rows)["behavioral_diagnostics"][
+            "fundamental_anchor_score"
+        ]
+        self.assertEqual(metric["status"], "not_scored")
+        self.assertEqual(metric["reason"], "fundamental_anchor_not_visible")
+        self.assertIsNone(metric["score"])
+        self.assertEqual(metric["raw_evidence"]["value_institution"]["action"], "buy")
 
     def test_observations_exclude_private_future_and_expected_answer_payloads(self):
         forbidden = {
@@ -182,6 +336,9 @@ class QualificationManagedCLITests(unittest.TestCase):
         self.assertEqual(summary["case_count"], 48)
         self.assertEqual(summary["persona_count"], 6)
         self.assertEqual(summary["fixture_count"], 8)
+        self.assertEqual(summary["protocol_version"], "1.1")
+        self.assertEqual(summary["observation_protocol_version"], "1.0")
+        self.assertRegex(summary["visibility_contract_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(summary["provider_calls"], 0)
         self.assertFalse(summary["network_access"])
         self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
@@ -242,6 +399,11 @@ class QualificationManagedCLITests(unittest.TestCase):
         self.assertFalse(manifest["llm"]["runtime"]["network_access"])
         self.assertEqual(summary["honest_n_cases"], 48)
         self.assertEqual(summary["honest_n_runs"], 0)
+        self.assertEqual(summary["output_schema_version"], "1.1")
+        self.assertEqual(
+            summary["metrics"]["behavioral_diagnostics"]["fundamental_anchor_score"]["status"],
+            "not_scored",
+        )
         self.assertEqual(len(cases), 48)
         self.assertFalse((run_dir / "price_path.csv").exists())
         self.assertFalse((run_dir / "sim_overview.png").exists())

@@ -153,6 +153,13 @@ Provider capability schema `1.0` 记录当前 adapter 能力的保守、脱敏�
 
 `full_effective_config_hash` 基于应用默认值、配置文件与 CLI 后的最终 `Config`，而不是用户显式输入的 CLI token。字段排序后以 UTF-8 规范 JSON 序列化；float 使用 `float.hex()`，Enum/tuple/set/bytes 有类型标记，Path 和 endpoint 只保存 identity hash，秘密只保存脱敏 configured 状态。`population` 同时保存排序 counts 和顺序敏感的 `effective_cast`，以匹配当前 Agent 创建/请求顺序。完整 38 字段分类表和精确 hash payload 见 [Replay 兼容性契约](REPLAY_COMPATIBILITY.md#运行时-effective-config-契约)。
 
+不得再使用无字段名的“默认 Config hash”。`f0508c23…` 是
+`asdict(Config())` 的 legacy raw-default JSON hash；`1a36131b…` 才是固定
+base_dir 下 config contract 1.0 的 `full_effective_config_hash`。Phase 1.1 tag
+与 Phase 1.2A sealing commit 的 full/scientific/model-request/execution hash
+和规范化 summary 已用同一 fixture 逐字段核对且完全相同。完整证据和具体
+hash 见 [Config Hash Identities](CONFIG_HASH_IDENTITIES.md)。
+
 这些 identity 不可合并解读：
 
 - scientific source fingerprint 说明科学源码字节；
@@ -279,7 +286,7 @@ PYTHONPYCACHEPREFIX=/tmp/nmsim-pycache \
 - 真实 Provider 首次采样仍可能受服务端模型、调度、权重版本和 sampling 实现影响；temperature 0、local seed 或 cache 不能替代 Record/Replay。
 - Provider capability 快照只表述当前 adapter 对项目暴露的能力，不是质量评分，也不证明更强模型会形成更真实的 Agent。
 - 无 managed child manifest 的 legacy flat result 不再能正式 resume；它们仍可作为显式标记且已 hash 的历史分析输入，但其上游 Provider/model/config 身份仍不可验证。
-- Phase 1.2A qualification rubric 已在真实模型调用前冻结，但当前 real User Prompt 未显示 fixture 中的 `fundamental_value`；未来解锁真实 Provider 前必须先审阅该可见性契约，不能直接解读相关行为分数。
+- Phase 1.2A sealing 将 qualification protocol/rubric 升为 1.1 并冻结 visibility contract 1.0；当前 real User Prompt 不显示 fixture 中的 `fundamental_value`，所以 `fundamental_anchor_score` 必须保持 `not_scored/fundamental_anchor_not_visible`。未来若加入显式基本面信号，必须作为单独的版本化科学实验，不能静默修改现有 Prompt。
 - Phase 1 已为不可破坏的隐私约束收紧 legacy 异常路径：parser 不把只有 `rationale`、没有 `public_take` 的响应提升为 public text。当前 Mock 和标准 real schema 都显式返回 `public_take`，正常轨迹不受影响；Phase 1.1A 未再次改变这一行为，并用回归测试继续锁定它。
 - 事件记录没有修复现有 market 的无限余额、全额 fill、隐式做市商或 volume/fill 口径；它只把真实行为显式记录下来。
 - Phase 1 最初审计时工作区没有 `.git`，因此初始化前的 manifest 会如实记录 commit/dirty/diff 无法取得。Phase 0.5 建立仅本地 Git 基线后，新受管运行可以记录本地 commit、dirty 状态和可行时的 diff hash；这不会追溯改写旧 manifest。

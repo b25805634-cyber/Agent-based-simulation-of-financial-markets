@@ -9,11 +9,13 @@ creates more realistic market agents.
 
 | Component | Version / SHA-256 |
 |---|---|
-| Protocol | `1.0` / `f13942987b4801187a7f02533a4676d95e934690dc3a8ed170b890480a6b4388` |
+| Protocol | `1.1` / `2e88eca2e86b3a63cfdd6f251533aac3b90c3a27d7a9906328d83a81fc717925` |
+| Observation payload protocol | `1.0` (fixture bytes unchanged) |
 | Fixture set | `95109438f101ea1251520b3deb71fed9b96b097d2c9b89c1a6b73e16294aaf34` |
-| Rubric | `1.0` / `0bf96644169a67f5ac10308720670f8afefb2bd94b655550f856da62dff1ecf7` |
+| Rubric | `1.1` / `a007938d7ac97465be4bd03e736843408e7bf6c1da7d7048babd9a94ffe458fc` |
+| Visibility contract | `1.0` / `bfbd1c4b2fda8aa543d76038bdc8f6c17f9bcb7fd734ac665cfce292fc5a549c` |
 | Case identity | `1.0` |
-| Public output | `1.0` |
+| Public output | `1.1` |
 
 The fixture-set hash sorts fixtures by `fixture_id`, so JSON list order does
 not affect identity. Each fixture also carries an `input_hash` calculated from
@@ -27,6 +29,14 @@ Source files are:
 - `qualification/protocol.json`
 - `qualification/observations.json`
 - `qualification/rubric.json`
+- `qualification/visibility_contract.json`
+
+Protocol/rubric 1.0 was never used for an external Provider. The sealing check
+therefore superseded it with 1.1 before real sampling. Observation JSON and all
+eight fixture `input_hash` values were left byte-for-byte unchanged, so the
+fixture-set hash remains the same. Case ids change because their registered
+protocol version changes; the matrix remains the same six Personas by eight
+source observations.
 
 ## Case matrix
 
@@ -49,14 +59,22 @@ Agent's private rationale, a private margin reference book, the expected
 answer, or the rubric.
 
 The prompt builder is not changed. Mock uses the existing structured mock
-prompt; the in-process fake uses the existing real-agent prompt. A known
-boundary must be resolved before Phase 1.2B: the current real `build_user`
-template does not display the `fundamental_value` argument that
-`Agent.build_prompt` receives, while the current Mock prompt does. The fixture
-records the value, but no Phase 1.2A change silently adds it to the real User
-Prompt. Therefore the real-provider fundamental-anchor diagnostic must not be
-interpreted until that visibility contract is explicitly reviewed and, if
-changed, versioned.
+prompt; the in-process fake uses the existing real-agent prompt. The versioned
+visibility contract records the important projection differences:
+
+- both variants receive round, price tape, news/no-news, cash, shares and the
+  bounded memory;
+- Mock receives numeric `fundamental_value`; the real User Prompt does not;
+- eligible real prompts receive individual neighbour sentiment and
+  `public_take`, while Mock receives only aggregate social sentiment;
+- Persona social gating still applies. In particular, `quant_arb` has zero
+  effective social weight and receives no feed in either variant;
+- fixture id, hashes, invisible-field deny-list, rubric, expected answers,
+  future prices and private rationale never enter either Prompt.
+
+This is an audit contract, not a silent Observation change. Each public case
+may record only the prompt hash/variant, source fixture hash and visibility
+contract hash; full Prompt remains private.
 
 ## Provider guard
 
@@ -134,9 +152,19 @@ latency when measured, response source, and honest case count. Token usage is
 Behavioral diagnostics report action distributions globally, by Persona, and
 by fixture before reporting relative indicators. These include
 sentiment/action consistency, Persona tendency, social/news/price responses,
-contrarian and fundamental-anchor comparisons, Persona distinctiveness, and a
-same-model Persona-collapse indicator. Ambiguous comparisons may be
-`not_scored`; none forces one action as the correct answer.
+contrarian comparisons, Persona distinctiveness, and a same-model
+Persona-collapse indicator. `fundamental_anchor_score` is explicitly
+`status=not_scored`, `reason=fundamental_anchor_not_visible`, and `score=null`.
+Its raw action/sentiment evidence remains visible, but is not coerced to zero
+and “did not buy” is not interpreted as lack of fundamental anchoring. A future
+numeric fundamental signal requires a separate, versioned scientific
+experiment; it is not added by this sealing patch.
+
+Every rubric metric now declares model-input and evaluator dependencies.
+Protocol loading fails closed when an active metric depends on an input that is
+never/model-dependently visible, or when the visibility contract does not allow
+that field for scoring. A deliberately `not_scored` metric must include a
+machine-readable reason.
 
 ## Privacy
 
