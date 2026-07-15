@@ -23,9 +23,15 @@ from collections.abc import Mapping, Sequence
 from typing import Any, Optional, Union
 
 from .events import EventLogger, json_safe
+from .fingerprint import (
+    RECORDING_SCHEMA_VERSION,
+    STRICT_COMPATIBILITY_FIELDS,
+    scientific_compatibility_metadata,
+)
 
 
-RECORD_SCHEMA_VERSION = "1.0"
+RECORD_SCHEMA_VERSION = RECORDING_SCHEMA_VERSION
+_LEGACY_RECORD_SCHEMA_VERSIONS = {"1.0"}
 RECORD_TYPE = "llm_call"
 
 
@@ -51,6 +57,44 @@ def _canonical_json(value: Any) -> str:
         separators=(",", ":"),
         allow_nan=False,
     )
+
+
+def _canonical_compatibility(value: Mapping[str, Any]) -> dict[str, Any]:
+    return json.loads(_canonical_json(dict(value)))
+
+
+def _display_mismatch_value(value: Any) -> str:
+    """Return a bounded, non-private mismatch representation."""
+
+    if isinstance(value, str):
+        if len(value) == 64 and all(ch in "0123456789abcdef" for ch in value.lower()):
+            return "sha256:" + value[:12]
+        return repr(value if len(value) <= 80 else value[:77] + "...")
+    if isinstance(value, (dict, list, tuple)):
+        return "sha256:" + _sha256_text(_canonical_json(value))[:12]
+    return repr(value)
+
+
+def _compatibility_mismatch(field: str, expected: Any, actual: Any) -> ReplayMismatchError:
+    return ReplayMismatchError(
+        "strict replay incompatibility for {}: expected={} actual={}".format(
+            field,
+            _display_mismatch_value(expected),
+            _display_mismatch_value(actual),
+        )
+    )
+
+
+def _compatibility_from_record(record: Mapping[str, Any]) -> dict[str, Any]:
+    values = {
+        field: record.get(field)
+        for field in (*STRICT_COMPATIBILITY_FIELDS, "git_commit", "git_dirty")
+    }
+    # Phase 1 records predate the explicit field but their envelope was 1.0.
+    # This makes the strict rejection diagnostic concrete rather than "missing".
+    if values.get("recording_schema_version") is None:
+        values["recording_schema_version"] = record.get("schema_version")
+    return values
 
 
 def _prompt_hash(system: str, user: str) -> str:
@@ -315,6 +359,7 @@ class RecordingLLM(_ContextMixin):
         records_path: Union[str, os.PathLike[str]],
         model_config: Optional[Mapping[str, Any]] = None,
         event_logger: Optional[EventLogger] = None,
+        compatibility_metadata: Optional[Mapping[str, Any]] = None,
         *,
         allow_append: bool = False,
     ) -> None:
@@ -327,6 +372,10 @@ class RecordingLLM(_ContextMixin):
         if model_config is not None:
             inferred_config.update(dict(model_config))
         self.model_config = canonical_model_config(inferred_config)
+        compatibility = scientific_compatibility_metadata()
+        if compatibility_metadata is not None:
+            compatibility.update(dict(compatibility_metadata))
+        self.compatibility_metadata = _canonical_compatibility(compatibility)
         self.records_path = _resolve_records_path(records_path)
         self.event_logger = event_logger
         _prepare_private_file(self.records_path, allow_append=allow_append)
@@ -348,6 +397,9 @@ class RecordingLLM(_ContextMixin):
             "records": self.record_count,
             "batches": len(self.batch_sizes),
             "batch_sizes": list(self.batch_sizes),
+            "scientific_component_fingerprint": self.compatibility_metadata.get(
+                "scientific_component_fingerprint"
+            ),
         }
 
     def __getattr__(self, name: str) -> Any:
@@ -371,6 +423,9 @@ class RecordingLLM(_ContextMixin):
             "system_hash": fingerprint["system_hash"],
             "user_hash": fingerprint["user_hash"],
             "model_config": self.model_config,
+            "scientific_component_fingerprint": self.compatibility_metadata.get(
+                "scientific_component_fingerprint"
+            ),
         }
         self.event_logger.emit(
             "LLMRequestRecorded",
@@ -455,6 +510,7 @@ class RecordingLLM(_ContextMixin):
                 ),
                 **dict(call),
                 "model_config": self.model_config,
+                **self.compatibility_metadata,
                 "raw_response": raw_response,
                 "response_hash": _sha256_text(raw_response),
             }
@@ -497,10 +553,23 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                 raise ReplayMismatchError(
                     "replay record at line {} is not an object".format(line_number)
                 )
-            if record.get("schema_version") != RECORD_SCHEMA_VERSION:
+            record_schema = record.get("schema_version")
+            if record_schema not in _LEGACY_RECORD_SCHEMA_VERSIONS | {
+                RECORD_SCHEMA_VERSION
+            }:
+                raise _compatibility_mismatch(
+                    "recording_schema_version",
+                    RECORD_SCHEMA_VERSION,
+                    record_schema,
+                )
+            declared_schema = record.get("recording_schema_version")
+            if declared_schema is not None and declared_schema != record_schema:
                 raise ReplayMismatchError(
-                    "unsupported replay schema at line {}: {!r}".format(
-                        line_number, record.get("schema_version")
+                    "inconsistent recording_schema_version at line {}: "
+                    "envelope={} declared={}".format(
+                        line_number,
+                        _display_mismatch_value(record_schema),
+                        _display_mismatch_value(declared_schema),
                     )
                 )
             if record.get("record_type") != RECORD_TYPE:
@@ -554,6 +623,7 @@ class ReplayLLM(_ContextMixin):
         source: Union[str, os.PathLike[str]],
         model_config: Optional[Mapping[str, Any]] = None,
         event_logger: Optional[EventLogger] = None,
+        compatibility_metadata: Optional[Mapping[str, Any]] = None,
     ) -> None:
         self.records_path = _resolve_records_path(source, must_exist=True)
         self._records = _load_records(self.records_path)
@@ -567,16 +637,55 @@ class ReplayLLM(_ContextMixin):
                     "record file contains multiple model configurations"
                 )
 
+        self.source_compatibility_metadata = (
+            _compatibility_from_record(self._records[0])
+            if self._records else {}
+        )
+        for record in self._records[1:]:
+            record_compatibility = _compatibility_from_record(record)
+            if record_compatibility != self.source_compatibility_metadata:
+                raise ReplayMismatchError(
+                    "record file contains multiple scientific compatibility identities"
+                )
+
+        current_compatibility = scientific_compatibility_metadata()
+        if compatibility_metadata is not None:
+            current_compatibility.update(dict(compatibility_metadata))
+        self.compatibility_metadata = _canonical_compatibility(current_compatibility)
+        if self._records:
+            for field in STRICT_COMPATIBILITY_FIELDS:
+                expected = self.source_compatibility_metadata.get(field)
+                actual = self.compatibility_metadata.get(field)
+                if expected != actual:
+                    raise _compatibility_mismatch(field, expected, actual)
+
+        self.source_git_commit = self.source_compatibility_metadata.get("git_commit")
+        self.current_git_commit = self.compatibility_metadata.get("git_commit")
+        self.cross_commit_same_scientific_fingerprint = bool(
+            self.source_git_commit
+            and self.current_git_commit
+            and self.source_git_commit != self.current_git_commit
+            and self.source_compatibility_metadata.get(
+                "scientific_component_fingerprint"
+            ) == self.compatibility_metadata.get("scientific_component_fingerprint")
+        )
+
         self.model_config = canonical_model_config(
             self.source_model_config if model_config is None else model_config
         )
         if self._records and self.model_config != self.source_model_config:
-            raise ReplayMismatchError(
-                "model configuration mismatch: recorded={} requested={}".format(
-                    _sha256_text(_canonical_json(self.source_model_config)),
-                    _sha256_text(_canonical_json(self.model_config)),
-                )
-            )
+            for field in sorted(set(self.source_model_config) | set(self.model_config)):
+                expected = self.source_model_config.get(field)
+                actual = self.model_config.get(field)
+                if expected != actual:
+                    raise ReplayMismatchError(
+                        "model configuration mismatch for {}: expected={} actual={}".format(
+                            field,
+                            _display_mismatch_value(expected),
+                            _display_mismatch_value(actual),
+                        )
+                    )
+            raise ReplayMismatchError("model configuration mismatch")
 
         self.kind = str(
             self.source_model_config.get(
@@ -616,14 +725,20 @@ class ReplayLLM(_ContextMixin):
             "remaining_records": self.remaining_records,
             "batches": len(self.batch_sizes),
             "batch_sizes": list(self.batch_sizes),
+            "cross_commit_same_scientific_fingerprint": (
+                self.cross_commit_same_scientific_fingerprint
+            ),
         }
 
     def _mismatch(
         self, sequence: int, field: str, recorded: Any, requested: Any
     ) -> ReplayMismatchError:
         return ReplayMismatchError(
-            "replay mismatch at call {} for {}: recorded={!r}, requested={!r}".format(
-                sequence, field, recorded, requested
+            "replay mismatch at call {} for {}: expected={} actual={}".format(
+                sequence,
+                field,
+                _display_mismatch_value(recorded),
+                _display_mismatch_value(requested),
             )
         )
 
@@ -654,6 +769,9 @@ class ReplayLLM(_ContextMixin):
                 "persona_id": context["persona_id"],
                 **dict(fingerprint),
                 "model_config": self.model_config,
+                "scientific_component_fingerprint": self.compatibility_metadata.get(
+                    "scientific_component_fingerprint"
+                ),
                 "source": "replay",
             },
             private_data={"system_prompt": system, "user_prompt": user},

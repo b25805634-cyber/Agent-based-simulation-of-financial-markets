@@ -120,10 +120,18 @@ def _live(args, cfg, manager):
     from nmsim.sim import run_sim
 
     if args.replay_from:
+        manager.register_llm_runtime(
+            mode="replay",
+            record_source=_replay_records_path(args.replay_from),
+            network_access=False,
+            provider_calls=0,
+            provider_connection_limit=0,
+        )
         source_config = recorded_model_config(args.replay_from)
         model_config = runtime_model_config(cfg, recorded=source_config)
         llm = ReplayLLM(args.replay_from, model_config=model_config,
-                        event_logger=manager.events)
+                        event_logger=manager.events,
+                        compatibility_metadata=manager.scientific_compatibility)
         tracker = CostTracker()
         manager.register_llm_runtime(
             llm=llm, provider=model_config.get("resolved_provider"),
@@ -137,7 +145,8 @@ def _live(args, cfg, manager):
         inner, tracker = build_llm(cfg)
         model_config = runtime_model_config(cfg, llm=inner)
         llm = RecordingLLM(inner, manager.run_dir, model_config=model_config,
-                           event_logger=manager.events)
+                           event_logger=manager.events,
+                           compatibility_metadata=manager.scientific_compatibility)
         manager.register_llm_runtime(
             llm=llm, provider=model_config.get("resolved_provider"),
             model=model_config.get("model"), mode="record",
@@ -151,6 +160,9 @@ def _live(args, cfg, manager):
             ),
         )
 
+    # Keep failure accounting available even if run_sim raises before _live can
+    # return its local llm object to main().
+    manager.active_llm = llm
     res = run_sim(cfg, llm, tracker, event_logger=manager.events,
                   run_id=manager.run_id)
     if isinstance(llm, ReplayLLM):
@@ -397,11 +409,21 @@ def main():
               f"cascade={metrics['peak_cascade']} bad={health['bad_frac']} -> {location}")
     except BaseException as exc:
         if manager is not None:
-            if llm is not None:
-                manager.register_batch_sizes(getattr(llm, "batch_sizes", []))
-            completed = int(result["health"]["total_llm_orders"]) if result else 0
+            active_llm = llm or getattr(manager, "active_llm", None)
+            if active_llm is not None:
+                manager.register_batch_sizes(getattr(active_llm, "batch_sizes", []))
+            completed = (
+                int(result["health"]["total_llm_orders"])
+                if result else int(getattr(active_llm, "response_count", 0))
+            )
             failed = int(result["health"]["bad_orders"]) if result else 0
-            manager.fail(exc, completed=completed, failed=failed,
+            expected = None
+            if not args.price_csv:
+                planned = manager.manifest["personas"]["population"][
+                    "planned_llm_total"
+                ]
+                expected = cfg.n_rounds * int(planned)
+            manager.fail(exc, expected=expected, completed=completed, failed=failed,
                          honest_n=max(0, completed - failed))
         raise
 

@@ -28,6 +28,8 @@ from typing import Any, Iterable, Mapping, Optional
 from urllib.parse import urlsplit, urlunsplit
 import uuid
 
+from .fingerprint import scientific_compatibility_metadata
+
 
 MANIFEST_SCHEMA_VERSION = "1.0"
 _RUN_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
@@ -406,6 +408,10 @@ class RunManager:
         # Inspect Git before creating provenance files, so this run cannot make
         # an otherwise-clean worktree look dirty.
         git_state = collect_git_state(self.repo_root)
+        scientific_compatibility = scientific_compatibility_metadata(
+            self.repo_root, git_state=git_state
+        )
+        self.scientific_compatibility = scientific_compatibility
         config = redact_secrets(cfg)
         personas, prompt = _prompt_metadata(self.repo_root)
         scenario_hash = _stable_json_hash({
@@ -454,6 +460,9 @@ class RunManager:
             "status": "running",
             "failure_reason": None,
             "git": git_state,
+            **scientific_compatibility,
+            "scientific_compatibility": scientific_compatibility,
+            "cross_commit_same_scientific_fingerprint": None,
             "config": config,
             "config_sha256": _stable_json_hash(config),
             "scenario": scenario,
@@ -570,6 +579,31 @@ class RunManager:
                 model = model or getattr(llm, "model", None)
                 if cache_enabled is None and hasattr(llm, "enabled"):
                     cache_enabled = bool(llm.enabled)
+                if hasattr(llm, "cross_commit_same_scientific_fingerprint"):
+                    cross_commit = bool(
+                        getattr(llm, "cross_commit_same_scientific_fingerprint")
+                    )
+                    self.manifest[
+                        "cross_commit_same_scientific_fingerprint"
+                    ] = cross_commit
+                    self.manifest["replay_compatibility"] = {
+                        "source_git_commit": getattr(llm, "source_git_commit", None),
+                        "current_git_commit": getattr(llm, "current_git_commit", None),
+                        "source_git_dirty": getattr(
+                            llm, "source_compatibility_metadata", {}
+                        ).get("git_dirty"),
+                        "current_git_dirty": getattr(
+                            llm, "compatibility_metadata", {}
+                        ).get("git_dirty"),
+                        "source_scientific_component_fingerprint": getattr(
+                            llm, "source_compatibility_metadata", {}
+                        ).get("scientific_component_fingerprint"),
+                        "current_scientific_component_fingerprint": getattr(
+                            llm, "compatibility_metadata", {}
+                        ).get("scientific_component_fingerprint"),
+                        "strict_compatibility_passed": True,
+                        "cross_commit_same_scientific_fingerprint": cross_commit,
+                    }
             if provider is not None:
                 self.manifest["llm"]["resolved_provider"] = str(provider)
             if model is not None:

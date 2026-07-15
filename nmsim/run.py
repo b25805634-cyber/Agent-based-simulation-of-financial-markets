@@ -119,12 +119,22 @@ def _replay_records_path(source: str) -> str:
 def _managed_llm(cfg: Config, manager: RunManager, replay_from: str | None):
     """Build record or replay at the existing provider-interface boundary."""
     if replay_from:
+        # Register the offline/fail-closed boundary before reading any replay
+        # metadata, so even constructor mismatches leave an honest manifest.
+        manager.register_llm_runtime(
+            mode="replay",
+            record_source=_replay_records_path(replay_from),
+            network_access=False,
+            provider_calls=0,
+            provider_connection_limit=0,
+        )
         source_config = recorded_model_config(replay_from)
         expected_config = runtime_model_config(cfg, recorded=source_config)
         llm = ReplayLLM(
             replay_from,
             model_config=expected_config,
             event_logger=manager.events,
+            compatibility_metadata=manager.scientific_compatibility,
         )
         tracker = CostTracker()
         manager.register_llm_runtime(
@@ -148,6 +158,7 @@ def _managed_llm(cfg: Config, manager: RunManager, replay_from: str | None):
         manager.run_dir,
         model_config=model_config,
         event_logger=manager.events,
+        compatibility_metadata=manager.scientific_compatibility,
     )
     manager.register_llm_runtime(
         llm=llm,
@@ -166,7 +177,7 @@ def _managed_llm(cfg: Config, manager: RunManager, replay_from: str | None):
     return llm, tracker
 
 
-def _sample_counts(res: SimResult | None, cfg: Config):
+def _sample_counts(res: SimResult | None, cfg: Config, llm=None):
     if res is None:
         if cfg.population:
             planned = 0
@@ -175,7 +186,8 @@ def _sample_counts(res: SimResult | None, cfg: Config):
             planned = min(planned, cfg.max_llm_agents)
         else:
             planned = min(cfg.n_llm_agents, cfg.max_llm_agents, 6)
-        return cfg.n_rounds * max(0, planned), 0, 0
+        completed = int(getattr(llm, "response_count", 0)) if llm is not None else 0
+        return cfg.n_rounds * max(0, planned), completed, 0
     completed = failed = 0
     for items in res.traces.values():
         for item in items:
@@ -280,7 +292,7 @@ def run(cfg: Config, *, replay_from: str | None = None,
         if manager is not None:
             if llm is not None:
                 manager.register_batch_sizes(getattr(llm, "batch_sizes", []))
-            expected, completed, failed = _sample_counts(res, cfg)
+            expected, completed, failed = _sample_counts(res, cfg, llm)
             manager.fail(
                 exc,
                 expected=expected,
