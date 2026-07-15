@@ -21,8 +21,18 @@ import re
 import glob
 import json
 import math
-import argparse
+import sys
+from pathlib import Path
 from statistics import mean, stdev
+
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 
 CELLS = {                       # cell key -> filename label
     "soc_off_levoff": "off",
@@ -86,15 +96,10 @@ def _paired(a, b):
     return [_drop(a[s]) - _drop(b[s]) for s in sorted(set(a) & set(b))]
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="results_sweep")
-    ap.add_argument("--m", type=float, default=0.7)
-    ap.add_argument("--plot", default=None)
-    args = ap.parse_args()
-    data = load(args.out, args.m)
+def analyze(input_dir, m, out_path):
+    data = load(input_dir, m)
 
-    print(f"===== LEVERAGE 2x2  (m={args.m:g}, real news) =====")
+    print(f"===== LEVERAGE 2x2  (m={m:g}, real news) =====")
     print("cells:", ", ".join(f"{k}(n={len(data[k])})" for k in CELLS), "\n")
 
     # ---- (1) four-cell mean drops ----
@@ -196,15 +201,91 @@ def main():
         ax.bar(cats, means, color=cols, alpha=.85)
         ax.axhline(0, color="k", lw=.8)
         ax.set_ylabel("mean drop (trough/pre - 1)")
-        ax.set_title(f"Leverage 2x2 — mean crash depth (m={args.m:g})\n"
+        ax.set_title(f"Leverage 2x2 — mean crash depth (m={m:g})\n"
                      "stabiliser (social) vs amplifier (leverage)")
         for i, v in enumerate(means):
             ax.text(i, v - 0.01, f"{v:+.3f}", ha="center", va="top", fontsize=9)
-        out = args.plot or os.path.join(args.out, f"leverage_2x2_m{args.m:g}.png")
-        plt.tight_layout(); plt.savefig(out, dpi=130)
-        print(f"\nfigure -> {out}")
+        plt.tight_layout(); plt.savefig(out_path, dpi=130)
+        print(f"\nfigure -> {out_path}")
     except Exception as e:
         print(f"\nplot skipped: {e}")
+        raise
+
+
+def _input_paths(out_dir, m):
+    paths = []
+    for label in CELLS.values():
+        paths.extend(sorted(Path(out_dir).glob(f"m{m:g}_real_{label}_s*.json")))
+    return sorted(set(paths))
+
+
+def build_argparser():
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--out", default="results_sweep")
+    ap.add_argument("--m", type=float, default=0.7)
+    ap.add_argument("--plot", default=None)
+    ap.add_argument("--run-id", default=None)
+    return ap
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_sweep",
+            command_identity="python -m experiments.lev_analyze",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    input_dir = Path(args.out)
+    legacy_plot = (
+        Path(args.plot)
+        if args.plot
+        else input_dir / f"leverage_2x2_m{args.m:g}.png"
+    )
+    inputs = _input_paths(input_dir, args.m)
+    managed = ManagedRunContext.create_driver(
+        out_root=legacy_plot.parent,
+        command_identity="experiments.lev_analyze",
+        planned_runs=0,
+        run_id=args.run_id,
+        input_paths=inputs,
+    )
+    with managed:
+        managed.set_stage("result_export")
+        analysis = {
+            "schema_version": "1.0",
+            "unit": "analysis_attempts",
+            "planned": 1,
+            "started": 1,
+            "completed": 0,
+            "failed": 0,
+            "input_files": len(inputs),
+        }
+        managed.manifest["managed_context"]["run_kind"] = "analysis"
+        managed.manifest["analysis_completion"] = analysis
+        managed.manifest.write_atomic()
+        try:
+            analyze(
+                str(input_dir), args.m,
+                str(managed.run_dir / legacy_plot.name),
+            )
+        except BaseException:
+            analysis["failed"] = 1
+            managed.manifest.write_atomic()
+            raise
+        analysis["completed"] = 1
+        managed.manifest.write_atomic()
+        managed.finish(legacy_filenames=(legacy_plot.name,))
 
 
 if __name__ == "__main__":

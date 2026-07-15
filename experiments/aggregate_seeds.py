@@ -12,10 +12,19 @@ import os
 import glob
 import json
 import math
-import argparse
+import sys
+from pathlib import Path
 from statistics import mean, pstdev
 
 from nmsim import validation as V
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 
 META = "nmsim/meta_feb2022_reference.csv"
 
@@ -130,13 +139,69 @@ def _print(s):
     print(f"  RMSE per seed: {s['rmse_logprice_per_seed']}")
 
 
-def main():
-    p = argparse.ArgumentParser()
+def _input_paths(gain, results_dir):
+    return [Path(META), *sorted(Path(results_dir).glob(f"g{gain}_s*.json"))]
+
+
+def build_argparser():
+    p = RaisingArgumentParser(allow_abbrev=False)
     p.add_argument("--gain", type=float, required=True)
     p.add_argument("--results", default="results")
     p.add_argument("--out", default="results")
-    args = p.parse_args()
-    aggregate(args.gain, args.results, args.out)
+    p.add_argument("--run-id", default=None)
+    return p
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results",
+            command_identity="python -m experiments.aggregate_seeds",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    inputs = _input_paths(args.gain, args.results)
+    managed = ManagedRunContext.create_driver(
+        out_root=Path(args.out),
+        command_identity="experiments.aggregate_seeds",
+        planned_runs=0,
+        run_id=args.run_id,
+        input_paths=inputs,
+    )
+    names = (f"summary_g{args.gain}.json", f"envelope_g{args.gain}.png")
+    with managed:
+        managed.set_stage("result_export")
+        analysis = {
+            "schema_version": "1.0",
+            "unit": "analysis_attempts",
+            "planned": 1,
+            "started": 1,
+            "completed": 0,
+            "failed": 0,
+            "input_files": len(inputs),
+        }
+        managed.manifest["managed_context"]["run_kind"] = "analysis"
+        managed.manifest["analysis_completion"] = analysis
+        managed.manifest.write_atomic()
+        try:
+            aggregate(args.gain, args.results, str(managed.run_dir))
+        except BaseException:
+            analysis["failed"] = 1
+            managed.manifest.write_atomic()
+            raise
+        analysis["completed"] = 1
+        managed.manifest.write_atomic()
+        managed.finish(legacy_filenames=names)
 
 
 if __name__ == "__main__":

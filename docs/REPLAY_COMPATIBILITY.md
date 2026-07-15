@@ -1,6 +1,6 @@
 # Replay 兼容性契约
 
-本文定义 Phase 1.1A/1.1A.1/1.1A.2 的本地 Replay 版本、运行时配置和配置输入边界。它的目标是让不兼容的历史响应重放明确失败，并为解析器升级提供离线审计路径；它不改变 Agent、Prompt、Persona、市场、社交、杠杆、默认参数或正常响应的解析结果。
+本文定义 Phase 1.1A–1.1B 的本地 Replay 版本、运行时配置和配置输入边界。它的目标是让不兼容的历史响应重放明确失败，并为解析器升级提供离线审计路径；它不改变 Agent、Prompt、Persona、市场、社交、杠杆、默认参数或正常响应的解析结果。Phase 1.1B 只替换外层生命周期编排；recording schema 仍为 `1.2`，Phase 1.1A 的完整 1.2 记录在既有 strict 身份一致时继续兼容。
 
 ## 五种不同的复现与审计能力
 
@@ -33,7 +33,7 @@ nmsim/types.py
 nmsim/validation.py
 ```
 
-这组文件覆盖 Agent observation 与 Prompt 构造、Decision 解析、相关类型和配置默认值、simulation 科学步骤顺序、市场 clearing、社交传播、杠杆/强平和指标计算。`recording.py`、`provenance.py`、`reparse_audit.py` 等审计设施由独立 schema 约束；普通文档、测试、实验 driver、运行目录、结果、私有日志和时间戳不进入科学组件指纹。
+这组文件覆盖 Agent observation 与 Prompt 构造、Decision 解析、相关类型和配置默认值、simulation 科学步骤顺序、市场 clearing、社交传播、杠杆/强平和指标计算。`recording.py`、`provenance.py`、`reparse_audit.py` 等审计设施由独立 schema 约束；Phase 1.1B 新增/修改的 `nmsim/run_context.py`、`nmsim/managed_cli.py`、`nmsim/entrypoints.py`、`nmsim/run.py` 和 experiment driver/lifecycle 文件也不在 scientific allowlist 内。普通文档、测试、运行目录、结果、私有日志和时间戳同样不进入科学组件指纹。
 
 因此，只修改 `README`、`docs/` 或普通工作流文档不会改变科学指纹。反之，只要上述科学组件的原始字节变化，即使 Git commit 没变而工作树为 dirty，相关 hash 也会变化，strict replay 会拒绝。
 
@@ -146,7 +146,7 @@ S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”�
 
 `strict=False` 没有保留为宽松迁移通道；显式传入它会抛出 `ConfigSchemaError`，不忽略任何字段。当前 `nmsim.run` 和 `experiments.run_seed` 由 `argparse` 解析已知 flag 并显式构造 `Config`；`argparse` 自身会拒绝未知 CLI flag，它的 `--rounds` 等 flag 不等于跳过 mapping alias 校验。Strict Replay 也不把 recorded summary 宽松反序列化为 `Config`；它将当前已合法构造的 effective Config 与 recording contract 比较。未来任何配置文件、manifest 恢复或研究入口都必须使用 strict mapping ingestion，不能以当前默认值伪装未知字段从未出现。
 
-未知输入 key 和“新增 `Config` dataclass 字段但没有进入分类表”是两个独立的 fail-closed 边界：前者由 `Config.from_dict` 在对象构造时拒绝，后者由 `validate_config_classification()` 在契约构建时拒绝。如果 mapping 输入错误发生在 `RunManager.create` 之前，它属于 CLI/configuration error：还没有合法 run lifecycle，因而没有 run directory、finished manifest、`RunStarted`/`RoundStarted` 或 canonical outputs，也没有 Provider 构造或网络访问。将所有这类启动失败统一纳入 managed failed run 是 Phase 1.1B 之后的边界，本阶段不扩展生命周期。
+未知输入 key 和“新增 `Config` dataclass 字段但没有进入分类表”是两个独立的 fail-closed 边界：前者由 `Config.from_dict` 在对象构造时拒绝，后者由 `validate_config_classification()` 在契约构建时拒绝。Phase 1.1B 的两阶段 CLI 在安全 output root/run id 已确定后，将这类 full-validation 失败封存为 `failure_stage=config_validation` 的 provisional managed attempt：有 failed manifest 和一个 `RunFailed`，无 `RoundStarted`、Provider/网络或成功 canonical projection。非法 run id/路径穿越、output root 无法安全解析/创建等极早期错误可能只有脱敏 `provenance_not_created_reason`；`--help`/`--version` 正常退出且不创建 run。详见 [MANAGED_RUN_LIFECYCLE.md](MANAGED_RUN_LIFECYCLE.md)。
 
 ## Manifest 与 recording 元数据
 
@@ -197,7 +197,7 @@ S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”�
 
 ## Strict replay 校验顺序
 
-Strict replay 是 `--replay-from` 的默认且唯一正式语义，没有静默忽略不兼容的开关。`RunManager` 先以最终有效 `Config` 创建不可覆盖 run directory、running manifest 和 `RunStarted`；随后 `ReplayLLM` 构造器在 `run_sim` 之前完成所有配置/版本 preflight。此时尚未发生 `RoundStarted`、未消费第一条历史响应，也不存在 Provider 对象或网络 fallback。检查分为五层：
+Strict replay 是 `--replay-from` 的默认且唯一正式语义，没有静默忽略不兼容的开关。`ManagedRunContext` 先以最终有效 `Config` 调用 `RunManager` primitives，创建不可覆盖 run directory、running manifest 和 `RunStarted`；随后 `prepare_llm()` 构造 `ReplayLLM`，在 `run_sim` 之前完成所有配置/版本 preflight。此时尚未发生 `RoundStarted`、未消费第一条历史响应，也不存在 Provider 对象或网络 fallback。检查分为五层：
 
 1. Schema 矩阵与正式结构：先根据 envelope 明示版本分类 1.0、两类 1.1 或 1.2；只有完整 1.2 可进入 Strict Replay。对 1.2 校验 required fields、type、hash 形式和版本一致性，不从字段存在性猜测版本。
 2. 记录完整性：验证 JSON object、record type、连续 call sequence、完整 Prompt 的 `system_hash`/`user_hash`/`prompt_hash`、原始响应 hash，以及整份记录内 model/compatibility identity 一致。
@@ -207,7 +207,7 @@ Strict replay 是 `--replay-from` 的默认且唯一正式语义，没有静默�
 
 任一 strict 字段不一致都会立即抛出 `ReplayMismatchError`。配置错误指出 category、差异字段、每个规范值的安全摘要及 expected/actual category hash 缩写；版本/hash 错误也指出具体字段。错误信息不会输出完整 Prompt、API key、endpoint credential、原始响应或 private rationale。Replay 对象不持有底层 Provider，没有网络 fallback，也不会在失败后转而创建 Provider。
 
-由受管 CLI 发起的 mismatch 会保留 `status=failed` 的 manifest、失败原因、实际完成数和 `RunFailed` 事件；不会发布看起来成功的 canonical 输出。`llm.runtime` 在读取 replay 元数据之前就记录 `network_access=false`、`provider_calls=0` 和连接上限 0。
+由受管 CLI 发起的 mismatch 会保留 `status=failed`、`failure_stage=replay_preflight`、`outputs_complete=false` 的 manifest、实际 completion 和唯一 `RunFailed`；不会发布看起来成功的 canonical/flat 输出。`llm.runtime` 在读取 replay 元数据之前就记录 `network_access=false`、Provider call 为 0 和连接上限 0。
 
 ## Git commit、dirty 状态与跨 commit
 
@@ -217,6 +217,12 @@ Strict replay 是 `--replay-from` 的默认且唯一正式语义，没有静默�
 - `git_dirty` 是 provenance 字段，不是 blanket gate；真正的兼容判断来自相应源 hash 和 schema。
 
 这只说明两个工作树在当前指纹覆盖边界内兼容，不说明整个仓库等同，也不免除对遗漏科学组件的持续审计。
+
+### Phase 1.1B 生命周期跨 commit 边界
+
+Phase 1.1B 的 `run_context.py`、`managed_cli.py`、`entrypoints.py`、`run.py` 与 experiment driver/lifecycle 变更位于当前 scientific component allowlist 之外。它们可以改变 manifest 生命周期、completion 口径和输出发布时机，但不改变 Prompt、Persona、parser、Agent observation、市场、社交、杠杆或 validation。因此，Phase 1.1A 产生的完整 schema 1.2 recording 在 scientific fingerprint、scientific/model-request Config、resolved model config 和每次 request identity 全部匹配时，可在 Phase 1.1B commit 上执行 cross-commit Strict Replay。
+
+这项兼容不是对生命周期变更的 blanket 豁免：如果未来将影响科学行为的代码错放在 allowlist 之外，必须修正指纹覆盖集/版本并增加测试，不能借此声称兼容。Recording schema 仍为 `1.2`，Phase 1.1B 未引入新的 Replay 忽略开关或降级路径。生命周期终态与 completion 单位分别见 [MANAGED_RUN_LIFECYCLE.md](MANAGED_RUN_LIFECYCLE.md) 和 [COMPLETION_ACCOUNTING.md](COMPLETION_ACCOUNTING.md)。
 
 ### 2026-07-15 跨 commit 示例的真实 provenance
 
@@ -311,4 +317,5 @@ python3 -m nmsim.run \
 - Strict replay 验证应用层保存的最终响应，不包含 Provider SDK 内部 retry 的每次中间 request/response。
 - 即使科学指纹相同，Python/NumPy/Matplotlib 或平台差异仍可能影响数值边角和图像字节；manifest 中的环境版本用于解释这些差异。
 - Reparse 是 parser 差异审计，不是因果识别、反事实推演或统计重复。
+- Managed lifecycle 的 completion 是带单位 provenance 计数，不会让一次 Replay 或同一市场内的多条 Agent Decision 自动成为多个独立统计样本。
 - `nmsim/config.py` 仍在 scientific component allowlist 中，而且 Phase 1.1A.2 保持了它的原始字节和全部默认值。Strict ingestion 位于 allowlist 外的 `nmsim/config_ingestion.py`，由包初始化边界显式安装；因此 Prompt、Persona、simulation core source hash 和总 scientific fingerprint 保持基线身份。这不是将新市场规则移出 allowlist：ingestion 只拒绝未知/含糊输入，最终 effective Config 仍由配置 hash 约束，recording 结构变化则由 schema 1.2 约束。未来修改这个绑定边界时仍必须审查 config/recording schema 并保留 fail-closed 测试。

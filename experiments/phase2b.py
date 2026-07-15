@@ -19,9 +19,20 @@ Usage:
   python -m experiments.phase2b --cells levon  --seeds 1..8 --leverage-ratio 3.0 --leverage-spread 0.7 --out results_phase2b
 """
 from __future__ import annotations
-import os, sys, json, argparse, subprocess
+import os, sys, json, subprocess
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
-from experiments.driver_utils import archive_rejected_result, set_driver_provenance
+from experiments.driver_utils import (
+    archive_rejected_result,
+    run_managed_driver_jobs,
+    set_driver_provenance,
+)
 
 
 def _path(out, m, social, lev, seed):
@@ -62,7 +73,10 @@ def _run(out, m, social, lev, seed, provider, total, model, lr, lspread, maint, 
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(path, f"subprocess exit {p.returncode}: {last}")
+            archive_rejected_result(
+                path,
+                f"subprocess exit {p.returncode}; details are in the managed driver private log",
+            )
             continue
         if _bad(path) <= BAD_THRESHOLD:
             return (tag, True, f"{p.stdout.strip()} (attempt {attempt})")
@@ -71,8 +85,23 @@ def _run(out, m, social, lev, seed, provider, total, model, lr, lspread, maint, 
     return (tag, False, f"gave up: {last}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_phase2b",
+            command_identity="experiments.phase2b",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--version", action="version", version="experiments.phase2b phase-1.1b")
     ap.add_argument("--m", type=float, default=0.7)
     ap.add_argument("--cells", choices=["levoff", "levon", "both"], default="both")
     ap.add_argument("--socials", nargs="+", default=["off", "on"])
@@ -86,8 +115,10 @@ def main():
     ap.add_argument("--leverage-spread", type=float, default=None)
     ap.add_argument("--maint", type=float, default=None)
     ap.add_argument("--lev-fraction", type=float, default=None)
-    args = ap.parse_args()
-    os.makedirs(args.out, exist_ok=True)
+    try:
+        args = ap.parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
     set_driver_provenance(args.workers, "experiments.phase2b")
 
     levs = {"levoff": [False], "levon": [True], "both": [False, True]}[args.cells]
@@ -96,20 +127,34 @@ def main():
           f"(workers={args.workers}, lev L={args.leverage_ratio}±{args.leverage_spread} "
           f"maint={args.maint} frac={args.lev_fraction})", flush=True)
 
-    fails, done = [], 0
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(_run, args.out, args.m, soc, lev, s, args.provider, args.total,
-                          args.model, args.leverage_ratio, args.leverage_spread,
-                          args.maint, args.lev_fraction)
-                for (s, lev, soc) in jobs]
-        for f in as_completed(futs):
-            tag, ok, msg = f.result(); done += 1
-            print(f"[{done}/{len(jobs)}] {'OK ' if ok else 'FAIL'} {tag}: {msg}", flush=True)
-            if not ok: fails.append((tag, msg))
-    with open(os.path.join(args.out, "failures.log"), "a") as fh:
-        for tag, msg in fails: fh.write(f"{tag}: {msg}\n")
-    print(f"DONE. failures: {len(fails)}", flush=True)
+    failures, summary = run_managed_driver_jobs(
+        out_root=args.out,
+        command_identity="experiments.phase2b",
+        jobs=jobs,
+        workers=args.workers,
+        cell_name=lambda job: f"{job[2]}_{'lev' if job[1] else 'cash'}",
+        seed_identity=lambda job: job[0],
+        is_healthy=lambda job: (
+            os.path.exists(_path(args.out, args.m, job[2], job[1], job[0]))
+            and _bad(_path(args.out, args.m, job[2], job[1], job[0]))
+            <= BAD_THRESHOLD
+        ),
+        run_job=lambda job: _run(
+            args.out,
+            args.m,
+            job[2],
+            job[1],
+            job[0],
+            args.provider,
+            args.total,
+            args.model,
+            args.leverage_ratio,
+            args.leverage_spread,
+            args.maint,
+            args.lev_fraction,
+        ),
+    )
+    print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)
 
 
 if __name__ == "__main__":

@@ -21,9 +21,18 @@ import csv
 import json
 import math
 import argparse
+import sys
 from pathlib import Path
 
 from nmsim.config import Config
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 from nmsim import validation as V
 
 META = "nmsim/meta_feb2022_reference.csv"
@@ -114,68 +123,20 @@ def _replay_records_path(source):
 
 
 def _live(args, cfg, manager):
-    from nmsim.llm import build_llm, CostTracker
-    from nmsim.recording import (RecordingLLM, ReplayLLM,
-                                 recorded_model_config, runtime_model_config)
     from nmsim.sim import run_sim
-
-    if args.replay_from:
-        manager.register_llm_runtime(
-            mode="replay",
-            record_source=_replay_records_path(args.replay_from),
-            network_access=False,
-            provider_calls=0,
-            provider_connection_limit=0,
-        )
-        source_config = recorded_model_config(args.replay_from)
-        model_config = runtime_model_config(cfg, recorded=source_config)
-        llm = ReplayLLM(args.replay_from, model_config=model_config,
-                        event_logger=manager.events,
-                        compatibility_metadata=manager.replay_compatibility)
-        tracker = CostTracker()
-        manager.register_llm_runtime(
-            llm=llm, provider=model_config.get("resolved_provider"),
-            model=model_config.get("model"), mode="replay",
-            record_source=_replay_records_path(args.replay_from),
-            cache_enabled=model_config.get("cache_enabled"),
-            model_config=model_config, network_access=False,
-            application_concurrency_limit=None, provider_connection_limit=0,
-        )
-    else:
-        inner, tracker = build_llm(cfg)
-        model_config = runtime_model_config(cfg, llm=inner)
-        llm = RecordingLLM(inner, manager.run_dir, model_config=model_config,
-                           event_logger=manager.events,
-                           compatibility_metadata=manager.replay_compatibility)
-        manager.register_llm_runtime(
-            llm=llm, provider=model_config.get("resolved_provider"),
-            model=model_config.get("model"), mode="record",
-            record_source=llm.records_path,
-            cache_enabled=model_config.get("cache_enabled"),
-            model_config=model_config,
-            network_access=getattr(llm, "kind", "mock") != "mock",
-            application_concurrency_limit=None,
-            provider_connection_limit=(
-                40 if model_config.get("resolved_provider") == "openai" else None
-            ),
-        )
-
-    # Keep failure accounting available even if run_sim raises before _live can
-    # return its local llm object to main().
-    manager.active_llm = llm
-    res = run_sim(cfg, llm, tracker, event_logger=manager.events,
-                  run_id=manager.run_id)
-    if isinstance(llm, ReplayLLM):
-        llm.assert_exhausted()
+    llm, tracker = manager.prepare_llm(args.replay_from)
+    res = manager.execute_simulation(
+        run_sim,
+        cfg,
+        llm,
+        tracker,
+        event_logger=manager.observer,
+        run_id=manager.run_id,
+    )
+    manager.assert_replay_exhausted()
     res.run_dir = str(manager.run_dir)
     manager.set_population(res.agents)
-    manager.register_batch_sizes(getattr(llm, "batch_sizes", []))
-    manager.register_llm_runtime(
-        logical_requests=getattr(llm, "request_count", 0),
-        recorded_responses=getattr(llm, "response_count", 0),
-        provider_calls=tracker.calls,
-        cache_hits=tracker.cache_hits,
-    )
+    manager.sync_llm_accounting(llm, tracker)
     bad = total = 0
     for items in res.traces.values():
         for (_a, _s, _q, _l, _se, _tk, why) in items:
@@ -214,8 +175,9 @@ def _live(args, cfg, manager):
     return out, res, llm
 
 
-def main():
-    p = argparse.ArgumentParser()
+def build_argparser():
+    p = RaisingArgumentParser(allow_abbrev=False)
+    p.add_argument("--version", action="version", version="experiments.run_seed phase-1.1b")
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--provider", default="openai")
     p.add_argument("--model", default=None, help="override served model id (e.g. HiggsAI)")
@@ -260,10 +222,11 @@ def main():
     p.add_argument("--scenario-id", default=None)
     p.add_argument("--run-id", default=None,
                    help="optional explicit unique id; existing ids are refused")
-    args = p.parse_args()
+    return p
 
-    if args.price_csv and args.replay_from:
-        p.error("--price-csv reuse mode and --replay-from are mutually exclusive")
+
+def config_from_args(args):
+    """Build the same effective Config as the historical CLI."""
 
     if args.label is None:
         lev_sfx = "_lev" if args.leverage else ""
@@ -314,10 +277,36 @@ def main():
         cfg.n_rounds = args.rounds
     if args.news_round is not None:
         cfg.news_round = args.news_round
+    return cfg
 
-    os.makedirs(args.out, exist_ok=True)
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results",
+            command_identity="python -m experiments.run_seed",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    parser = build_argparser()
+    try:
+        args = parser.parse_args(argv)
+        if args.price_csv and args.replay_from:
+            parser.error("--price-csv reuse mode and --replay-from are mutually exclusive")
+        cfg = config_from_args(args)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+
     rep_sfx = f"_r{args.rep}" if args.rep is not None else ""
     path = os.path.join(args.out, f"{args.label}_s{args.seed}{rep_sfx}.json")
+    legacy_basename = os.path.basename(path)
     input_paths = {}
     if args.price_csv:
         input_paths["price_csv"] = args.price_csv
@@ -332,25 +321,25 @@ def main():
     except ValueError:
         worker_count = 1
 
-    from nmsim.provenance import RunManager
-    manager = None
-    result = None
-    res = None
-    llm = None
-    try:
-        manager = RunManager.create(
-            cfg, out_root=args.out,
-            scenario_id=args.scenario_id or args.label,
-            run_id=args.run_id,
-            worker_count=worker_count,
-            input_paths=input_paths,
-            batching={
-                "strategy": "one logical LLM-agent batch per simulation round",
-                "driver": os.environ.get("NMSIM_DRIVER", "experiments.run_seed"),
-                "driver_workers": worker_count,
-            },
-        )
+    manager = ManagedRunContext.create(
+        cfg,
+        out_root=args.out,
+        scenario_id=args.scenario_id or args.label,
+        run_id=args.run_id,
+        worker_count=worker_count,
+        input_paths=input_paths,
+        batching={
+            "strategy": "one logical LLM-agent batch per simulation round",
+            "driver": os.environ.get("NMSIM_DRIVER", "experiments.run_seed"),
+            "driver_workers": worker_count,
+        },
+        command_identity="python -m experiments.run_seed",
+        run_kind="analysis" if args.price_csv else "simulation",
+        planned_simulation_runs=0 if args.price_csv else 1,
+    )
+    with manager:
         if args.price_csv:
+            manager.llm_mode = "reuse"
             manager.register_llm_runtime(
                 provider="none", model="none", mode="reuse",
                 cache_enabled=False, network_access=False,
@@ -368,64 +357,31 @@ def main():
             result["realized_m"] = round(fuel / rest, 4) if rest else None
         result["run_id"] = manager.run_id
         result["run_manifest"] = str(manager.manifest_path)
+        result["completion"] = manager.manifest["completion"]
+        result["honest_n"] = manager.manifest["honest_n"]
+        result["honest_n_unit"] = "agent_decisions"
+        result["honest_n_deprecated"] = True
 
+        manager.set_stage("result_export")
         canonical_path = manager.run_dir / "experiment_result.json"
         with canonical_path.open("x", encoding="utf-8") as fh:
             json.dump(result, fh, indent=2)
-        legacy_collision = False
-        try:
-            with open(path, "x") as fh:
-                json.dump(result, fh, indent=2)
-        except FileExistsError:
-            # A historical result or a concurrent winner remains authoritative
-            # at the flat compatibility path; this run is still preserved in
-            # its unique canonical directory.
-            legacy_collision = True
-            manager.manifest["warnings"].append(
-                f"left existing legacy result untouched: {os.path.abspath(path)}")
-            manager.manifest.write_atomic()
+        compatibility_source = manager.run_dir / legacy_basename
+        with compatibility_source.open("x", encoding="utf-8") as fh:
+            json.dump(result, fh, indent=2)
 
         health = result["health"]
-        completed = int(health["total_llm_orders"])
         failed = int(health["bad_orders"])
-        expected = completed
-        if res is not None:
-            actual_llm = sum(bool(getattr(a, "is_llm", False)) for a in res.agents)
-            expected = cfg.n_rounds * actual_llm
         manager.register_llm_runtime(
             degraded=failed > 0,
             failed_or_degraded_decisions=failed,
         )
-        manager.publish_legacy_links([])
-        manager.finish(
-            expected=expected, completed=completed, failed=failed,
-            honest_n=max(0, completed - failed),
-            extra_results={"legacy_result": path} if not legacy_collision else None,
-        )
+        manager.finish(legacy_filenames=[legacy_basename])
         metrics = result["metrics"]
-        location = str(canonical_path) if legacy_collision else path
+        location = path if os.path.exists(path) else str(canonical_path)
         print(f"[{args.label} s{args.seed}] rmse={metrics['rmse_logprice']} "
               f"drop={metrics['drop_depth']} recovery={metrics['recovery']} "
               f"cascade={metrics['peak_cascade']} bad={health['bad_frac']} -> {location}")
-    except BaseException as exc:
-        if manager is not None:
-            active_llm = llm or getattr(manager, "active_llm", None)
-            if active_llm is not None:
-                manager.register_batch_sizes(getattr(active_llm, "batch_sizes", []))
-            completed = (
-                int(result["health"]["total_llm_orders"])
-                if result else int(getattr(active_llm, "response_count", 0))
-            )
-            failed = int(result["health"]["bad_orders"]) if result else 0
-            expected = None
-            if not args.price_csv:
-                planned = manager.manifest["personas"]["population"][
-                    "planned_llm_total"
-                ]
-                expected = cfg.n_rounds * int(planned)
-            manager.fail(exc, expected=expected, completed=completed, failed=failed,
-                         honest_n=max(0, completed - failed))
-        raise
 
 
 if __name__ == "__main__":

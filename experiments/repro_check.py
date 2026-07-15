@@ -18,10 +18,11 @@ import subprocess
 _SNIPPET = (
     "from nmsim.config import Config;"
     "from nmsim.llm import build_llm;"
+    "from nmsim.run_context import NullRunContext;"
     "from nmsim.sim import run_sim;"
     "cfg=Config(provider='mock', seed=7, n_rounds=24, news_round=12);"
     "llm,t=build_llm(cfg);"
-    "res=run_sim(cfg,llm,t);"
+    "ctx=NullRunContext();res=ctx.execute_simulation(run_sim,cfg,llm,t);"
     "print(';'.join(f'{p:.6f}' for p in res.history))"
 )
 

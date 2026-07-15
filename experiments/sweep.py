@@ -18,11 +18,21 @@ from __future__ import annotations
 import os
 import sys
 import json
-import argparse
 import subprocess
 
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
-from experiments.driver_utils import archive_rejected_result, set_driver_provenance
+from experiments.driver_utils import (
+    archive_rejected_result,
+    run_managed_driver_jobs,
+    set_driver_provenance,
+)
 
 
 def _bad_frac(path):
@@ -65,7 +75,10 @@ def _run_one(out, m, social, seed, rep, provider, temp, total, rounds, model=Non
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(path, f"subprocess exit {p.returncode}: {last}")
+            archive_rejected_result(
+                path,
+                f"subprocess exit {p.returncode}; details are in the managed driver private log",
+            )
             continue
         bad = _bad_frac(path)
         if bad <= BAD_THRESHOLD:
@@ -75,8 +88,23 @@ def _run_one(out, m, social, seed, rep, provider, temp, total, rounds, model=Non
     return (tag, False, f"gave up after {MAX_RETRIES} attempts: {last}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_sweep",
+            command_identity="experiments.sweep",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--version", action="version", version="experiments.sweep phase-1.1b")
     ap.add_argument("mode", choices=["calibrate", "sweep"])
     ap.add_argument("--m", type=float, default=0.5, help="calibrate: fuel ratio")
     ap.add_argument("--seed", type=int, default=1, help="calibrate: the fixed seed")
@@ -92,9 +120,11 @@ def main():
                     help="parallel runs; 2 = ~60 peak concurrent calls (probe-verified "
                          "safe; fills the per-round straggler idle). Do NOT exceed 2.")
     ap.add_argument("--out", default="results_sweep")
-    args = ap.parse_args()
+    try:
+        args = ap.parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
 
-    os.makedirs(args.out, exist_ok=True)
     set_driver_provenance(args.workers, "experiments.sweep")
     if args.mode == "calibrate":
         jobs = [(args.m, soc, args.seed, rep)
@@ -112,34 +142,32 @@ def main():
           f"(total={args.total} agents, temp={args.temp}, rounds={args.rounds or 24})",
           flush=True)
 
-    fails = []
-    if args.workers > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        done = 0
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = [ex.submit(_run_one, args.out, m, soc, s, rep,
-                              args.provider, args.temp, args.total, args.rounds,
-                              args.model)
-                    for (m, soc, s, rep) in todo]
-            for f in as_completed(futs):
-                tag, ok, msg = f.result()
-                done += 1
-                print(f"[{done}/{len(todo)}] {'OK ' if ok else 'FAIL'} {tag}: {msg}",
-                      flush=True)
-                if not ok:
-                    fails.append((tag, msg))
-    else:
-        for i, (m, soc, s, rep) in enumerate(todo, 1):
-            tag, ok, msg = _run_one(args.out, m, soc, s, rep,
-                                    args.provider, args.temp, args.total, args.rounds, args.model)
-            print(f"[{i}/{len(todo)}] {'OK ' if ok else 'FAIL'} {tag}: {msg}", flush=True)
-            if not ok:
-                fails.append((tag, msg))
-
-    with open(os.path.join(args.out, "failures.log"), "a") as fh:
-        for tag, msg in fails:
-            fh.write(f"{tag}: {msg}\n")
-    print(f"DONE. failures: {len(fails)}", flush=True)
+    failures, summary = run_managed_driver_jobs(
+        out_root=args.out,
+        command_identity="experiments.sweep",
+        jobs=jobs,
+        workers=args.workers,
+        cell_name=lambda job: f"m{job[0]:g}_{job[1]}",
+        seed_identity=lambda job: job[2],
+        is_healthy=lambda job: (
+            os.path.exists(_fname(args.out, job[0], job[1], job[2], job[3]))
+            and _bad_frac(_fname(args.out, job[0], job[1], job[2], job[3]))
+            <= BAD_THRESHOLD
+        ),
+        run_job=lambda job: _run_one(
+            args.out,
+            job[0],
+            job[1],
+            job[2],
+            job[3],
+            args.provider,
+            args.temp,
+            args.total,
+            args.rounds,
+            args.model,
+        ),
+    )
+    print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)
 
 
 if __name__ == "__main__":

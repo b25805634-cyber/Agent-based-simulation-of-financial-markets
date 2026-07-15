@@ -15,8 +15,18 @@ import os
 import re
 import glob
 import json
-import argparse
+import sys
+from pathlib import Path
 from statistics import mean, stdev
+
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 
 # two-sided 95% t critical values by df
 T975 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
@@ -41,12 +51,8 @@ def load(out_dir):
     return data
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="results_sweep")
-    ap.add_argument("--plot", default=None, help="output PNG (default <out>/sweep_main.png)")
-    args = ap.parse_args()
-    data = load(args.out)
+def analyze(input_dir, out_png):
+    data = load(input_dir)
 
     rows = []
     print("===== POPULATION-COMPOSITION SWEEP =====")
@@ -122,9 +128,79 @@ def main():
         ax.set_title("Where does social dampening cross zero?\n"
                      "(paired same-seed, 95% t-CI, real Meta news, 30 agents)")
         ax.grid(alpha=0.3)
-        out_png = args.plot or os.path.join(args.out, "sweep_main.png")
         plt.tight_layout(); plt.savefig(out_png, dpi=135); plt.close()
         print(f"\nwrote {out_png}")
+
+
+def _input_paths(out_dir):
+    paths = []
+    for path in sorted(Path(out_dir).glob("*.json")):
+        match = FNAME.search(path.name)
+        if match and not match.group("rep"):
+            paths.append(path)
+    return paths
+
+
+def build_argparser():
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--out", default="results_sweep")
+    ap.add_argument("--plot", default=None, help="output PNG (default <out>/sweep_main.png)")
+    ap.add_argument("--run-id", default=None)
+    return ap
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_sweep",
+            command_identity="python -m experiments.aggregate_sweep",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    input_dir = Path(args.out)
+    legacy_plot = Path(args.plot) if args.plot else input_dir / "sweep_main.png"
+    out_root = legacy_plot.parent
+    inputs = _input_paths(input_dir)
+    managed = ManagedRunContext.create_driver(
+        out_root=out_root,
+        command_identity="experiments.aggregate_sweep",
+        planned_runs=0,
+        run_id=args.run_id,
+        input_paths=inputs,
+    )
+    with managed:
+        managed.set_stage("result_export")
+        analysis = {
+            "schema_version": "1.0",
+            "unit": "analysis_attempts",
+            "planned": 1,
+            "started": 1,
+            "completed": 0,
+            "failed": 0,
+            "input_files": len(inputs),
+        }
+        managed.manifest["managed_context"]["run_kind"] = "analysis"
+        managed.manifest["analysis_completion"] = analysis
+        managed.manifest.write_atomic()
+        try:
+            analyze(str(input_dir), str(managed.run_dir / legacy_plot.name))
+        except BaseException:
+            analysis["failed"] = 1
+            managed.manifest.write_atomic()
+            raise
+        analysis["completed"] = 1
+        managed.manifest.write_atomic()
+        managed.finish(legacy_filenames=(legacy_plot.name,))
 
 
 if __name__ == "__main__":

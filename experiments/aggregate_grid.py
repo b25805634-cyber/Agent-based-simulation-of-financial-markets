@@ -13,10 +13,19 @@ import os
 import glob
 import json
 import math
-import argparse
+import sys
+from pathlib import Path
 from statistics import mean, pstdev, stdev
 
 from nmsim import validation as V
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 
 META = "nmsim/meta_feb2022_reference.csv"
 CELLS = ["real_on", "real_off", "plac_on", "plac_off"]
@@ -192,12 +201,83 @@ def _print(s):
         print(f"     news (real_off - plac_off):     Δ={ne['delta']}  d={ne['cohen_d']}  [{ne['size']}]")
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def _input_paths(results_dir):
+    paths = [Path(META)]
+    for label in CELLS:
+        paths.extend(sorted(Path(results_dir).glob(f"{label}_s*.json")))
+    return paths
+
+
+def build_argparser():
+    ap = RaisingArgumentParser(allow_abbrev=False)
     ap.add_argument("--results", default="results_2x2")
     ap.add_argument("--out", default=None)
-    args = ap.parse_args()
-    aggregate(args.results, args.out or args.results)
+    ap.add_argument("--run-id", default=None)
+    return ap
+
+
+def _bootstrap_results_root(argv):
+    parser = RaisingArgumentParser(add_help=False, allow_abbrev=False)
+    parser.add_argument("--results", default="results_2x2")
+    try:
+        known, _unknown = parser.parse_known_args(argv)
+        return known.results
+    except ManagedCLIError:
+        return "results_2x2"
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out=_bootstrap_results_root(argv),
+            command_identity="python -m experiments.aggregate_grid",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    out_root = Path(args.out or args.results)
+    inputs = _input_paths(args.results)
+    managed = ManagedRunContext.create_driver(
+        out_root=out_root,
+        command_identity="experiments.aggregate_grid",
+        planned_runs=0,
+        run_id=args.run_id,
+        input_paths=inputs,
+    )
+    with managed:
+        managed.set_stage("result_export")
+        analysis = {
+            "schema_version": "1.0",
+            "unit": "analysis_attempts",
+            "planned": 1,
+            "started": 1,
+            "completed": 0,
+            "failed": 0,
+            "input_files": len(inputs),
+        }
+        managed.manifest["managed_context"]["run_kind"] = "analysis"
+        managed.manifest["analysis_completion"] = analysis
+        managed.manifest.write_atomic()
+        try:
+            aggregate(args.results, str(managed.run_dir))
+        except BaseException:
+            analysis["failed"] = 1
+            managed.manifest.write_atomic()
+            raise
+        analysis["completed"] = 1
+        managed.manifest.write_atomic()
+        managed.finish(
+            legacy_filenames=("grid_summary.json", "envelope_2x2.png")
+        )
 
 
 if __name__ == "__main__":

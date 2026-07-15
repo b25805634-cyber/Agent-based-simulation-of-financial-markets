@@ -1,6 +1,6 @@
 # Run provenance、事件日志与 LLM Record/Replay
 
-本文描述 Phase 1/1.1A/1.1A.1/1.1A.2 的当前可执行接口。目标是审计一次已发生的运行，并在明确的源码、运行时配置和记录契约内重放；它不改变 Agent、Prompt、压力定价、社交传播、杠杆或统计公式。各种 replay 与统计复现的边界见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)，本文不把它们统称为“完全可复现”。
+本文描述 Phase 1–1.1B 的当前可执行接口。目标是审计一次已发生的运行，并在明确的源码、运行时配置和记录契约内重放；它不改变 Agent、Prompt、压力定价、社交传播、杠杆或统计公式。Phase 1.1B 只统一正式入口的运行生命周期、启动失败 provenance 和带单位的 completion / honest-N。各种 replay 与统计复现的边界见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)，本文不把它们统称为“完全可复现”。
 
 ## 快速使用
 
@@ -63,6 +63,8 @@ python3 -m experiments.run_seed \
 
 CSV reuse 模式和 Replay 互斥。批量 driver 会通过环境把 driver 名和 worker 数传入每个 manifest。
 
+正式研究入口的统一边界是 `ManagedRunContext`；它负责目录、manifest、公私事件、Record/Replay、completion 和终态。`nmsim.sim.run_sim` 仍是不自动写文件或读 Git 的低层 library API。`NullRunContext` 仅供单元测试、`repro_check` 和明确的诊断路径使用；它不是 provenance-complete 研究运行。责任、状态机和入口分类分别见 [MANAGED_RUN_LIFECYCLE.md](MANAGED_RUN_LIFECYCLE.md) 和 [ENTRYPOINTS.md](ENTRYPOINTS.md)。
+
 ## 不可覆盖的目录布局
 
 ```text
@@ -81,7 +83,7 @@ CSV reuse 模式和 Replay 互斥。批量 driver 会通过环境把 driver 名�
 
 - 默认 `run_id` 是 UTC 时间戳加随机 UUID；目录以 `exist_ok=False` 创建。
 - 可用 `--run-id` 指定测试/调试 ID；若已存在会明确失败，不会重用或覆盖。
-- 主 CLI 在安全时把原平铺文件做成 `latest/<file>` 的受管 symlink。已有普通文件或非受管 symlink 保持逐字节不变。
+- 只有成功终态才发布 `latest` 和旧平铺兼容 symlink。平铺 link 直接指向生成该文件的不可变 run directory，不会因之后 `latest` 移动而改指向；已有普通文件或非受管 symlink 保持逐字节不变。
 - `run_seed` 的 canonical 结果是 run 目录中的 `experiment_result.json`；根目录仍投影原来的 `<label>_s<seed>[_rN].json`。若该路径已存在，只保留新的 canonical run，不覆盖旧文件。
 - health gate 拒绝的旧式根 JSON 被移到 `rejected/` 并附不可覆盖的原因 sidecar；不再删除失败证据。`runs/` 和 `rejected/` 都不会进入现有 analyzer 的根目录 glob。
 
@@ -101,7 +103,9 @@ CSV reuse 模式和 Replay 互斥。批量 driver 会通过环境把 driver 名�
 | Prompt | `prompts.py` 源码 hash、模板版本和六类 system prompt hash |
 | inputs | reference、CSV reuse 或 replay record 的路径、存在性、大小和 SHA-256 |
 | environment | Python、平台及 NumPy/Matplotlib/Anthropic/OpenAI/httpx 版本 |
-| samples | expected、completed、failed/degraded 和 `honest_n` |
+| lifecycle | managed context 状态、`failure_stage`、`outputs_complete`、simulation/managed completion 标志 |
+| completion | run、round、Agent decision、logical request、response source、Provider call 和 parsing 的带单位计数 |
+| samples | 历史兼容的 expected/completed/failed/honest-N；不得代替新 completion 或 run-level N |
 | results | run 内所有产物及外部兼容结果的大小和 SHA-256 |
 
 Phase 1.1A 在 manifest 顶层和 `scientific_compatibility` 中记录：
@@ -125,6 +129,8 @@ Phase 1.1A.1 另在 manifest 顶层和 `config_contract` 中记录：
 
 Phase 1.1A.2 将新 recording envelope 正式升为 `1.2`。`RecordingLLM` 在首次 Provider 调用前校验 source/config metadata，并在每条记录落盘前校验完整 1.2 结构；不再生成新的 schema 1.1 记录。该阶段也通过 `nmsim/config_ingestion.py` 和 package bootstrap 把 mapping 配置输入改为 strict-default，但不改变 `nmsim/config.py` 原始字节或任何默认 Config 值。
 
+Phase 1.1B 在 manifest 中增加 `managed_context`、`bootstrap`、`failure_stage`、`outputs_complete`、`simulation_computation_completed`、`managed_run_completed` 和 `completion`。顶层 `honest_n` 保留但明确为 `agent_decisions` 单位的弃用兼容字段；批量实验使用 `planned_runs` / `started_runs` / `completed_runs` / `failed_runs` / `honest_n_runs`，不再把同一 simulation 内的 Decision 行数当成独立样本 N。完整口径见 [COMPLETION_ACCOUNTING.md](COMPLETION_ACCOUNTING.md)。
+
 `full_effective_config_hash` 基于应用默认值、配置文件与 CLI 后的最终 `Config`，而不是用户显式输入的 CLI token。字段排序后以 UTF-8 规范 JSON 序列化；float 使用 `float.hex()`，Enum/tuple/set/bytes 有类型标记，Path 和 endpoint 只保存 identity hash，秘密只保存脱敏 configured 状态。`population` 同时保存排序 counts 和顺序敏感的 `effective_cast`，以匹配当前 Agent 创建/请求顺序。完整 38 字段分类表和精确 hash payload 见 [Replay 兼容性契约](REPLAY_COMPATIBILITY.md#运行时-effective-config-契约)。
 
 这些 identity 不可合并解读：
@@ -147,9 +153,9 @@ Manifest 中的 `scenario.id`/`scenario_id` 当前是人类可读 label，属于
 
 正常 `nmsim` 包导入会由 `nmsim/__init__.py` 把 `nmsim/config_ingestion.py` 的 strict contract 安装到现有 `Config` class，并保持 `nmsim.config` 的已有导入表面。因此受支持的包路径所得 `Config.from_dict(data, strict=True)` 默认拒绝未知字段，字段名稳定排序，可以显示安全的近似建议，但不自动更正或继续。审计未找到历史 Config mapping alias，所以当前集中 `CONFIG_FIELD_ALIASES` 为空；argparse 的 `--rounds` / `--out` / `--temp` 不当作 mapping alias 证据。未来只能根据可审计旧 artifact 加入精确 alias；机制保证 alias 先规范化，且 alias/canonical 或多来源冲突在值相同时也拒绝。输入值不进入错误；credential/private-shaped 或过长 key 也会脱敏或截断。
 
-`strict=False` 不是可用的 legacy 迁移路径；调用它会抛出 `ConfigSchemaError`，且不忽略任何字段。当前正式 CLI/`run_seed` 由 `argparse` 拒绝未知 flag 并显式构造 `Config`；Strict Replay 将这个当前 effective Config 与历史契约比较，不用宽松 `from_dict` 恢复历史配置。未来配置文件、manifest 恢复或新正式入口必须使用 strict mapping ingestion。这与 config contract 分类是两层边界：unknown input key 在 Config 构造时拒绝，新 dataclass 字段未分类则在 contract 构建时拒绝。
+`strict=False` 不是可用的 legacy 迁移路径；调用它会抛出 `ConfigSchemaError`，且不忽略任何字段。当前正式 CLI/`run_seed` 由 `argparse` 拒绝未知 flag 并显式构造 `Config`；Strict Replay 将这个当前 effective Config 与历史契约比较，不用宽松 `from_dict` 恢复历史配置。配置文件、manifest 恢复或新正式入口必须使用 strict mapping ingestion。这与 config contract 分类是两层边界：unknown input key 在 Config 构造时拒绝，新 dataclass 字段未分类则在 contract 构建时拒绝。
 
-如果输入错误发生在 `RunManager.create` 之前，它属于 configuration error，尚未进入合法 run lifecycle：不会有 run directory、finished manifest、`RunStarted`/`RoundStarted`、Provider 调用、网络访问或 canonical outputs。Phase 1.1A.2 不为了这个边界提前引入 Phase 1.1B 的统一 managed startup-failure lifecycle。
+Phase 1.1B 的正式 CLI 使用两阶段启动。Stage A 只安全解析 output root、可选 run id、command identity 和 Replay/config locator；`--help` / `--version` 正常退出且不创建 run。安全 root 已确定后，Stage B 的未知 Config key、alias conflict、Provider setup、Replay preflight、simulation 或 export 失败都会封存 failed manifest 和唯一 `RunFailed`。非法 run id/路径穿越、无法安全解析或创建 output root 等极早期错误可能只返回脱敏的 `provenance_not_created_reason`，不伪造已进入 managed lifecycle。详见 [MANAGED_RUN_LIFECYCLE.md](MANAGED_RUN_LIFECYCLE.md)。
 
 Manifest 不宣称真实 LLM 完全确定。Provider 返回合法的 `api-error`/降级 hold 时，为保持历史退出语义，run 仍可 `finished`；此时 `llm.runtime.degraded=true`、失败决策数和 honest-N 会如实记录。
 
@@ -214,7 +220,7 @@ Manifest 不宣称真实 LLM 完全确定。Provider 返回合法的 `api-error`
 
 Replay 在 `run_sim` 和第一个 `RoundStarted` 之前构造 `ReplayLLM`：先按集中兼容矩阵分类明示 schema，且只有通过正式结构验证的完整 1.2 可进入 Strict Replay；再校验 config hash schema/classification、scientific/model-request hashes、source compatibility 和 resolved model config。Execution hash 差异只记录，不放松后续请求校验。进入仿真后，整批请求会逐项匹配 Agent、Persona、round、call/batch sequence/index/size、完整 Prompt hash 与模型配置，全部匹配后才一次性推进 cursor。匹配失败会指出 category/字段和安全 hash 摘要，不会输出完整 Prompt、credential 或 private rationale；失败不会部分消费 batch，也绝不会改为真实 Provider 调用。运行结束还会用 `assert_exhausted()` 拒绝少 round/少 Agent 的提前结束。
 
-Preflight 错配时，run directory 和 `status=failed` manifest 已存在，`RunFailed` 事件保存安全诊断，samples completed/honest-N 为实际的 0，`network_access=false`、`provider_calls=0`，不生成成功 canonical outputs。`RunStarted` 是 run provenance 事件；配置错配时不会有任何 `RoundStarted`。
+Preflight 错配时，run directory 和 `status=failed` manifest 已存在，`failure_stage=replay_preflight`，`RunFailed` 事件保存安全诊断，completion 中 round/decision/request 完成数为 0，`network_access=false`、Provider call 为 0，`outputs_complete=false`。`RunStarted` 是 run provenance 事件；配置错配时不会有任何 `RoundStarted` 或成功 canonical projection。
 
 ## Replay 与 Reparse 的正确解释
 

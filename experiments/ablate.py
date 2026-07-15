@@ -11,11 +11,21 @@ from __future__ import annotations
 import os
 import sys
 import json
-import argparse
 import subprocess
 
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
-from experiments.driver_utils import archive_rejected_result, set_driver_provenance
+from experiments.driver_utils import (
+    archive_rejected_result,
+    run_managed_driver_jobs,
+    set_driver_provenance,
+)
 
 
 def _path(out, m, arm, seed):
@@ -51,7 +61,10 @@ def _run(out, m, arm, seed, provider, temp, total, model):
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(path, f"subprocess exit {p.returncode}: {last}")
+            archive_rejected_result(
+                path,
+                f"subprocess exit {p.returncode}; details are in the managed driver private log",
+            )
             continue
         if _bad(path) <= BAD_THRESHOLD:
             return (tag, True, f"{p.stdout.strip()} (attempt {attempt})")
@@ -60,8 +73,23 @@ def _run(out, m, arm, seed, provider, temp, total, model):
     return (tag, False, f"gave up after {MAX_RETRIES}: {last}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_sweep",
+            command_identity="experiments.ablate",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--version", action="version", version="experiments.ablate phase-1.1b")
     ap.add_argument("--m", type=float, default=0.7)
     ap.add_argument("--arms", nargs="+", default=["muted", "solo"])
     ap.add_argument("--seeds", type=int, nargs="+", required=True)
@@ -71,8 +99,10 @@ def main():
     ap.add_argument("--total", type=int, default=30)
     ap.add_argument("--workers", type=int, default=2)
     ap.add_argument("--out", default="results_sweep")
-    args = ap.parse_args()
-    os.makedirs(args.out, exist_ok=True)
+    try:
+        args = ap.parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
     set_driver_provenance(args.workers, "experiments.ablate")
 
     # arm-major within seed-pairing: finish each arm's full seed set so any
@@ -81,31 +111,29 @@ def main():
     print(f"ablation m={args.m:g} arms={args.arms}: {len(jobs)} runs "
           f"(workers={args.workers}, model={args.model or 'MiniMax-M2.7'})", flush=True)
 
-    fails, done = [], 0
-    if args.workers > 1:
-        from concurrent.futures import ThreadPoolExecutor, as_completed
-        with ThreadPoolExecutor(max_workers=args.workers) as ex:
-            futs = [ex.submit(_run, args.out, m, arm, s, args.provider,
-                              args.temp, args.total, args.model)
-                    for (m, arm, s) in jobs]
-            for f in as_completed(futs):
-                tag, ok, msg = f.result(); done += 1
-                print(f"[{done}/{len(jobs)}] {'OK ' if ok else 'FAIL'} {tag}: {msg}", flush=True)
-                if not ok:
-                    fails.append((tag, msg))
-    else:
-        for m, arm, s in jobs:
-            tag, ok, msg = _run(args.out, m, arm, s, args.provider,
-                                args.temp, args.total, args.model)
-            done += 1
-            print(f"[{done}/{len(jobs)}] {'OK ' if ok else 'FAIL'} {tag}: {msg}", flush=True)
-            if not ok:
-                fails.append((tag, msg))
-
-    with open(os.path.join(args.out, "failures.log"), "a") as fh:
-        for tag, msg in fails:
-            fh.write(f"{tag}: {msg}\n")
-    print(f"DONE. failures: {len(fails)}", flush=True)
+    failures, summary = run_managed_driver_jobs(
+        out_root=args.out,
+        command_identity="experiments.ablate",
+        jobs=jobs,
+        workers=args.workers,
+        cell_name=lambda job: str(job[1]),
+        seed_identity=lambda job: job[2],
+        is_healthy=lambda job: (
+            os.path.exists(_path(args.out, job[0], job[1], job[2]))
+            and _bad(_path(args.out, job[0], job[1], job[2])) <= BAD_THRESHOLD
+        ),
+        run_job=lambda job: _run(
+            args.out,
+            job[0],
+            job[1],
+            job[2],
+            args.provider,
+            args.temp,
+            args.total,
+            args.model,
+        ),
+    )
+    print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)
 
 
 if __name__ == "__main__":

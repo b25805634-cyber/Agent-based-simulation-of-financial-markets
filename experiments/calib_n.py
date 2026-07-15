@@ -10,24 +10,28 @@ from __future__ import annotations
 import glob
 import json
 import math
-import argparse
+import sys
+from pathlib import Path
 from statistics import mean, stdev
+
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 
 DELTA = 0.18          # 2x2 baseline ON-OFF drop effect, the size we must resolve
 N_MIN, N_MAX = 8, 12
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--out", default="results_sweep")
-    ap.add_argument("--m", type=float, default=0.5)
-    ap.add_argument("--seed", type=int, default=1)
-    args = ap.parse_args()
-
+def calibrate(input_dir, m, seed, out_path):
     arms = {}
     for soc in ("on", "off"):
         files = sorted(glob.glob(
-            f"{args.out}/m{args.m:g}_real_{soc}_s{args.seed}_r*.json"))
+            f"{input_dir}/m{m:g}_real_{soc}_s{seed}_r*.json"))
         drops = []
         for f in files:
             d = json.load(open(f))
@@ -51,9 +55,83 @@ def main():
         n = 10
         print(f"[calib] insufficient reps; defaulting N={n}")
 
-    with open(f"{args.out}/calib_N.txt", "w") as fh:
+    with open(out_path, "w") as fh:
         fh.write(str(n))
-    print(f"[calib] wrote {args.out}/calib_N.txt = {n}")
+    print(f"[calib] wrote {out_path} = {n}")
+    return n
+
+
+def _input_paths(out_dir, m, seed):
+    paths = []
+    for soc in ("on", "off"):
+        paths.extend(sorted(Path(out_dir).glob(
+            f"m{m:g}_real_{soc}_s{seed}_r*.json"
+        )))
+    return paths
+
+
+def build_argparser():
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--out", default="results_sweep")
+    ap.add_argument("--m", type=float, default=0.5)
+    ap.add_argument("--seed", type=int, default=1)
+    ap.add_argument("--run-id", default=None)
+    return ap
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_sweep",
+            command_identity="python -m experiments.calib_n",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    input_dir = Path(args.out)
+    inputs = _input_paths(input_dir, args.m, args.seed)
+    managed = ManagedRunContext.create_driver(
+        out_root=input_dir,
+        command_identity="experiments.calib_n",
+        planned_runs=0,
+        run_id=args.run_id,
+        input_paths=inputs,
+    )
+    with managed:
+        managed.set_stage("result_export")
+        analysis = {
+            "schema_version": "1.0",
+            "unit": "analysis_attempts",
+            "planned": 1,
+            "started": 1,
+            "completed": 0,
+            "failed": 0,
+            "input_files": len(inputs),
+        }
+        managed.manifest["managed_context"]["run_kind"] = "analysis"
+        managed.manifest["analysis_completion"] = analysis
+        managed.manifest.write_atomic()
+        try:
+            calibrate(
+                str(input_dir), args.m, args.seed,
+                str(managed.run_dir / "calib_N.txt"),
+            )
+        except BaseException:
+            analysis["failed"] = 1
+            managed.manifest.write_atomic()
+            raise
+        analysis["completed"] = 1
+        managed.manifest.write_atomic()
+        managed.finish(legacy_filenames=("calib_N.txt",))
 
 
 if __name__ == "__main__":

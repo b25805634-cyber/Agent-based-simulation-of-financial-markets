@@ -24,6 +24,7 @@ from .config_ingestion import (
     UnknownConfigFieldError,
     install_config_ingestion_contract,
 )
+from .run_context import ManagedRunContext, NullRunContext
 
 install_config_ingestion_contract(Config)
 
@@ -39,5 +40,7 @@ __all__ = [
     "Config",
     "ConfigAliasConflictError",
     "ConfigSchemaError",
+    "ManagedRunContext",
+    "NullRunContext",
     "UnknownConfigFieldError",
 ]

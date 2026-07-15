@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import asdict
 import hashlib
 import json
+import os
 from pathlib import Path
 import tempfile
 import unittest
@@ -231,6 +232,24 @@ class RunProvenanceTests(unittest.TestCase):
         propagated = manager.out_root / "propagation.csv"
         self.assertTrue(propagated.is_symlink())
         self.assertEqual(propagated.read_text(encoding="utf-8"), "new-propagation")
+
+    def test_flat_links_keep_their_immutable_source_when_latest_moves(self) -> None:
+        first = self._manager("legacy-first")
+        (first.run_dir / "first.json").write_text("first", encoding="utf-8")
+        first.publish_legacy_links(["first.json"])
+
+        second = self._manager("legacy-second")
+        (second.run_dir / "second.json").write_text("second", encoding="utf-8")
+        second.publish_legacy_links(["second.json"])
+
+        first_link = first.out_root / "first.json"
+        second_link = first.out_root / "second.json"
+        self.assertTrue(first_link.is_symlink())
+        self.assertTrue(second_link.is_symlink())
+        self.assertEqual(first_link.read_text(encoding="utf-8"), "first")
+        self.assertEqual(second_link.read_text(encoding="utf-8"), "second")
+        self.assertIn("runs/legacy-first/first.json", os.readlink(first_link))
+        self.assertIn("runs/legacy-second/second.json", os.readlink(second_link))
 
 
 if __name__ == "__main__":

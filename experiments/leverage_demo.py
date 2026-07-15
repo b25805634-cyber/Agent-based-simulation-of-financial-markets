@@ -11,6 +11,7 @@ from __future__ import annotations
 import argparse
 from nmsim.config import Config
 from nmsim.llm import build_llm
+from nmsim.run_context import NullRunContext
 from nmsim.sim import run_sim
 
 
@@ -29,7 +30,8 @@ def _run(seed, m, total, rounds, news_round, leverage, L, frac):
     cfg.leverage_ratio = L
     cfg.leverage_fraction = frac
     llm, tracker = build_llm(cfg)
-    return run_sim(cfg, llm, tracker)
+    with NullRunContext() as unmanaged:
+        return unmanaged.execute_simulation(run_sim, cfg, llm, tracker)
 
 
 def _summary(res):

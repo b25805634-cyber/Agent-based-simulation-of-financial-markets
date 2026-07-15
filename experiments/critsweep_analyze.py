@@ -8,8 +8,19 @@ Usage: python -m experiments.critsweep_analyze --out results_critsweep \
           --baseline-dir results_phase2b --m 0.7 --levels 2.0 2.6 3.0 3.5
 """
 from __future__ import annotations
-import os, re, glob, json, math, argparse
+import os, re, glob, json, math
+import sys
+from pathlib import Path
 from statistics import mean, stdev
+
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from nmsim.run_context import ManagedRunContext
 
 _T95 = {1:12.706,2:4.303,3:3.182,4:2.776,5:2.571,6:2.447,7:2.365,8:2.306,
         9:2.262,10:2.228,11:2.201,12:2.179,13:2.160,14:2.145,15:2.131}
@@ -29,28 +40,20 @@ def _liqsh(d): return sum(e[2] for e in d.get("liquidations",[]))
 def _nliq(d): return len(d.get("liquidations",[]))
 
 
-def main():
-    ap=argparse.ArgumentParser()
-    ap.add_argument("--out", default="results_critsweep")
-    ap.add_argument("--baseline-dir", default="results_phase2b")
-    ap.add_argument("--m", type=float, default=0.7)
-    ap.add_argument("--levels", type=float, nargs="+", required=True)
-    ap.add_argument("--plot", default=None)
-    args=ap.parse_args()
-
+def analyze(input_dir, baseline_dir, m, levels, out_path):
     # social-ON lev-OFF temp=0 baseline (paired anchor)
     def base(seed):
-        f=os.path.join(args.baseline_dir, f"m{args.m:g}_real_on_s{seed}.json")
+        f=os.path.join(baseline_dir, f"m{m:g}_real_on_s{seed}.json")
         return json.load(open(f)) if os.path.exists(f) else None
 
-    print(f"===== CRITICAL-POINT SWEEP (m={args.m:g}, social ON, temp=0) =====")
+    print(f"===== CRITICAL-POINT SWEEP (m={m:g}, social ON, temp=0) =====")
     print("leverage strength = L center (higher = shallower breach trigger = more aggressive)\n")
     print(f"{'L':>5} {'n':>3} {'mean drop':>11} {'95% CI':>22} {'Δ vs lev-off':>13} {'liq ev':>7} {'liq sh':>7}")
     rows=[]
-    for L in args.levels:
-        rx=re.compile(rf"m{re.escape(f'{args.m:g}')}_critL{re.escape(f'{L:g}')}_s(\d+)\.json$")
+    for L in levels:
+        rx=re.compile(rf"m{re.escape(f'{m:g}')}_critL{re.escape(f'{L:g}')}_s(\d+)\.json$")
         recs={}
-        for f in glob.glob(os.path.join(args.out,"*.json")):
+        for f in glob.glob(os.path.join(input_dir,"*.json")):
             g=rx.search(os.path.basename(f))
             if not g: continue
             d=json.load(open(f))
@@ -91,17 +94,107 @@ def main():
             ax.errorbar(xs,ys,yerr=[lo,hi],marker="o",capsize=5,lw=2,color="#c33")
             ax.set_xlabel("leverage strength  (L center; higher = shallower trigger)")
             ax.set_ylabel("mean crash depth (trough/pre − 1)")
-            ax.set_title(f"Critical-point sweep (m={args.m:g}, social ON, temp=0)\n"
+            ax.set_title(f"Critical-point sweep (m={m:g}, social ON, temp=0)\n"
                          "self-stabilise → self-destruct?")
             if len(rows)>=2:
                 jl=max([(rows[i+1][0],rows[i][1]-rows[i+1][1]) for i in range(len(rows)-1)],key=lambda x:x[1])[0]
                 ax.axvline(jl,ls="--",color="gray",alpha=.6,label=f"biggest jump @L={jl:g}")
                 ax.legend()
-            out=args.plot or os.path.join(args.out,f"critsweep_m{args.m:g}.png")
-            plt.tight_layout(); plt.savefig(out,dpi=130)
-            print(f"figure -> {out}")
+            plt.tight_layout(); plt.savefig(out_path,dpi=130)
+            print(f"figure -> {out_path}")
         except Exception as e:
             print(f"plot skipped: {e}")
+            raise
+
+
+def _input_paths(out_dir, baseline_dir, m, levels):
+    paths = []
+    seeds = set()
+    for level in levels:
+        pattern = f"m{m:g}_critL{level:g}_s*.json"
+        matched = sorted(Path(out_dir).glob(pattern))
+        paths.extend(matched)
+        rx = re.compile(r"_s(\d+)\.json$")
+        for path in matched:
+            match = rx.search(path.name)
+            if match:
+                seeds.add(int(match.group(1)))
+    for seed in sorted(seeds):
+        baseline = Path(baseline_dir) / f"m{m:g}_real_on_s{seed}.json"
+        if baseline.exists():
+            paths.append(baseline)
+    return paths
+
+
+def build_argparser():
+    ap=RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--out", default="results_critsweep")
+    ap.add_argument("--baseline-dir", default="results_phase2b")
+    ap.add_argument("--m", type=float, default=0.7)
+    ap.add_argument("--levels", type=float, nargs="+", required=True)
+    ap.add_argument("--plot", default=None)
+    ap.add_argument("--run-id", default=None)
+    return ap
+
+
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_critsweep",
+            command_identity="python -m experiments.critsweep_analyze",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    input_dir = Path(args.out)
+    legacy_plot = (
+        Path(args.plot)
+        if args.plot
+        else input_dir / f"critsweep_m{args.m:g}.png"
+    )
+    inputs = _input_paths(input_dir, args.baseline_dir, args.m, args.levels)
+    managed = ManagedRunContext.create_driver(
+        out_root=legacy_plot.parent,
+        command_identity="experiments.critsweep_analyze",
+        planned_runs=0,
+        run_id=args.run_id,
+        input_paths=inputs,
+    )
+    with managed:
+        managed.set_stage("result_export")
+        analysis = {
+            "schema_version": "1.0",
+            "unit": "analysis_attempts",
+            "planned": 1,
+            "started": 1,
+            "completed": 0,
+            "failed": 0,
+            "input_files": len(inputs),
+        }
+        managed.manifest["managed_context"]["run_kind"] = "analysis"
+        managed.manifest["analysis_completion"] = analysis
+        managed.manifest.write_atomic()
+        try:
+            analyze(
+                str(input_dir), args.baseline_dir, args.m, args.levels,
+                str(managed.run_dir / legacy_plot.name),
+            )
+        except BaseException:
+            analysis["failed"] = 1
+            managed.manifest.write_atomic()
+            raise
+        analysis["completed"] = 1
+        managed.manifest.write_atomic()
+        managed.finish(legacy_filenames=(legacy_plot.name,))
 
 
 if __name__=="__main__":

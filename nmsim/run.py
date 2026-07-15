@@ -12,17 +12,21 @@ import os
 import csv
 import json
 import argparse
+import sys
+from dataclasses import replace
+from collections.abc import Mapping
 from pathlib import Path
 
 from .config import Config
-from .llm import build_llm, CostTracker
-from .provenance import RunManager
-from .recording import (
-    RecordingLLM,
-    ReplayLLM,
-    recorded_model_config,
-    runtime_model_config,
+from .llm import build_llm  # compatibility import; construction lives in ManagedRunContext
+from .managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
 )
+from .run_context import ManagedRunContext, safe_output_root
 from .sim import run_sim, SimResult
 from . import validation as V
 
@@ -116,65 +120,11 @@ def _replay_records_path(source: str) -> str:
     return str(path / "llm_records.jsonl" if path.is_dir() else path)
 
 
-def _managed_llm(cfg: Config, manager: RunManager, replay_from: str | None):
-    """Build record or replay at the existing provider-interface boundary."""
-    if replay_from:
-        # Register the offline/fail-closed boundary before reading any replay
-        # metadata, so even constructor mismatches leave an honest manifest.
-        manager.register_llm_runtime(
-            mode="replay",
-            record_source=_replay_records_path(replay_from),
-            network_access=False,
-            provider_calls=0,
-            provider_connection_limit=0,
-        )
-        source_config = recorded_model_config(replay_from)
-        expected_config = runtime_model_config(cfg, recorded=source_config)
-        llm = ReplayLLM(
-            replay_from,
-            model_config=expected_config,
-            event_logger=manager.events,
-            compatibility_metadata=manager.replay_compatibility,
-        )
-        tracker = CostTracker()
-        manager.register_llm_runtime(
-            llm=llm,
-            provider=expected_config.get("resolved_provider"),
-            model=expected_config.get("model"),
-            mode="replay",
-            record_source=_replay_records_path(replay_from),
-            cache_enabled=expected_config.get("cache_enabled"),
-            model_config=expected_config,
-            network_access=False,
-            application_concurrency_limit=None,
-            provider_connection_limit=0,
-        )
-        return llm, tracker
-
-    inner, tracker = build_llm(cfg)
-    model_config = runtime_model_config(cfg, llm=inner)
-    llm = RecordingLLM(
-        inner,
-        manager.run_dir,
-        model_config=model_config,
-        event_logger=manager.events,
-        compatibility_metadata=manager.replay_compatibility,
-    )
-    manager.register_llm_runtime(
-        llm=llm,
-        provider=model_config.get("resolved_provider"),
-        model=model_config.get("model"),
-        mode="record",
-        record_source=llm.records_path,
-        cache_enabled=model_config.get("cache_enabled"),
-        model_config=model_config,
-        network_access=getattr(llm, "kind", "mock") != "mock",
-        application_concurrency_limit=None,
-        provider_connection_limit=(
-            40 if model_config.get("resolved_provider") == "openai" else None
-        ),
-    )
-    return llm, tracker
+def _managed_llm(cfg: Config, manager: ManagedRunContext, replay_from: str | None):
+    """Backward-compatible helper delegated to the unified managed context."""
+    if manager.cfg is not cfg:
+        raise ValueError("managed context Config identity mismatch")
+    return manager.prepare_llm(replay_from)
 
 
 def _sample_counts(res: SimResult | None, cfg: Config, llm=None):
@@ -209,44 +159,39 @@ def _safe_config_json(cfg: Config) -> str:
 
 def run(cfg: Config, *, replay_from: str | None = None,
         scenario_id: str | None = None, run_id: str | None = None,
-        worker_count: int | None = None) -> SimResult:
+        worker_count: int | None = None, input_paths=None,
+        command_identity: str = "library:nmsim.run.run") -> SimResult:
     if cfg.news_round > cfg.n_rounds:
         print(f"[config] news_round {cfg.news_round} > n_rounds {cfg.n_rounds}; "
               f"clamping to {cfg.n_rounds}")
         cfg.news_round = cfg.n_rounds
 
-    manager = None
-    res = None
-    llm = None
-    input_paths = None
+    managed_inputs = dict(input_paths or {})
     if replay_from:
-        input_paths = {"llm_replay_records": _replay_records_path(replay_from)}
-    try:
-        manager = RunManager.create(
-            cfg,
-            out_root=cfg.out_dir,
-            scenario_id=scenario_id,
-            run_id=run_id,
-            worker_count=worker_count,
-            input_paths=input_paths,
-        )
+        managed_inputs["llm_replay_records"] = _replay_records_path(replay_from)
+    manager = ManagedRunContext.create(
+        cfg,
+        out_root=cfg.out_dir,
+        scenario_id=scenario_id,
+        run_id=run_id,
+        worker_count=worker_count,
+        input_paths=managed_inputs,
+        command_identity=command_identity,
+    )
+    with manager:
         llm, tracker = _managed_llm(cfg, manager, replay_from)
-        res = run_sim(
-            cfg, llm, tracker,
-            event_logger=manager.events,
+        res = manager.execute_simulation(
+            run_sim,
+            cfg,
+            llm,
+            tracker,
+            event_logger=manager.observer,
             run_id=manager.run_id,
         )
-        if isinstance(llm, ReplayLLM):
-            llm.assert_exhausted()
+        manager.assert_replay_exhausted()
         res.run_dir = str(manager.run_dir)
         manager.set_population(res.agents)
-        manager.register_batch_sizes(getattr(llm, "batch_sizes", []))
-        manager.register_llm_runtime(
-            logical_requests=getattr(llm, "request_count", 0),
-            recorded_responses=getattr(llm, "response_count", 0),
-            provider_calls=tracker.calls,
-            cache_hits=tracker.cache_hits,
-        )
+        manager.sync_llm_accounting(llm, tracker)
 
         # --- Task 3 validation instrumentation ---
         # M2: shock index = last pre-news price (history[news_round-1]), so t=0 is the
@@ -262,6 +207,7 @@ def run(cfg: Config, *, replay_from: str | None = None,
                 facts_d["reference_comparison"] = {"error": str(e)}
 
         # --- canonical, immutable outputs ---
+        manager.set_stage("result_export")
         output_dir = str(manager.run_dir)
         _write_price_csv(res, os.path.join(output_dir, "price_path.csv"))
         traces_path = os.path.join(output_dir, "reasoning_traces.csv")
@@ -279,28 +225,9 @@ def run(cfg: Config, *, replay_from: str | None = None,
             degraded=failed > 0,
             failed_or_degraded_decisions=failed,
         )
-        manager.publish_legacy_links(_OUTPUT_FILENAMES)
-        manager.finish(
-            expected=expected,
-            completed=completed,
-            failed=failed,
-            honest_n=completed - failed,
-        )
+        manager.finish(legacy_filenames=_OUTPUT_FILENAMES)
         _print_summary(res, facts_d, output_dir)
         return res
-    except BaseException as exc:
-        if manager is not None:
-            if llm is not None:
-                manager.register_batch_sizes(getattr(llm, "batch_sizes", []))
-            expected, completed, failed = _sample_counts(res, cfg, llm)
-            manager.fail(
-                exc,
-                expected=expected,
-                completed=completed,
-                failed=failed,
-                honest_n=max(0, completed - failed),
-            )
-        raise
 
 
 def _print_summary(res: SimResult, facts: dict, output_dir: str | None = None):
@@ -362,7 +289,15 @@ def _print_summary(res: SimResult, facts: dict, output_dir: str | None = None):
 
 
 def build_argparser():
-    p = argparse.ArgumentParser(description="Narrative Market Sim")
+    p = RaisingArgumentParser(
+        description="Narrative Market Sim", allow_abbrev=False
+    )
+    p.add_argument("--version", action="version", version="nmsim phase-1.1b")
+    p.add_argument(
+        "--config-json",
+        default=None,
+        help="strict Config mapping JSON; CLI flags override canonical fields",
+    )
     p.add_argument("--provider", default=None, help="auto|mock|anthropic|openai")
     p.add_argument("--model", default=None)
     p.add_argument("--base-url", default=None, help="OpenAI-compatible base_url")
@@ -393,8 +328,16 @@ def build_argparser():
     return p
 
 
+def _config_mapping(path: str) -> Mapping[str, object]:
+    with open(path, encoding="utf-8") as stream:
+        value = json.load(stream)
+    if not isinstance(value, Mapping):
+        raise ValueError("Config JSON root must be an object")
+    return value
+
+
 def cfg_from_args(args) -> Config:
-    cfg = Config()
+    cfg = Config.from_dict(_config_mapping(args.config_json)) if args.config_json else Config()
     if args.provider is not None: cfg.provider = args.provider
     if args.model is not None: cfg.model = args.model
     if args.base_url is not None: cfg.openai_base_url = args.base_url
@@ -417,13 +360,52 @@ def cfg_from_args(args) -> Config:
     return cfg
 
 
-def main():
-    args = build_argparser().parse_args()
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out=Config().out_dir,
+            command_identity="python -m nmsim.run",
+            allow_config_json=True,
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    parser = build_argparser()
+    try:
+        args = parser.parse_args(argv)
+        # If a strict Config file supplies out_dir, use that safe location for
+        # a possible validation-failure attempt unless --out explicitly wins.
+        if bootstrap is not None and args.config_json and args.out is None:
+            try:
+                raw = _config_mapping(args.config_json)
+                candidate = raw.get("out_dir")
+                if isinstance(candidate, str):
+                    bootstrap = replace(
+                        bootstrap,
+                        out_root=safe_output_root(candidate, Config().out_dir),
+                    )
+            except Exception:
+                # Full validation below records the actual error using the
+                # already-safe default output root.
+                pass
+        cfg = cfg_from_args(args)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+
+    inputs = {"config_json": args.config_json} if args.config_json else None
     run(
-        cfg_from_args(args),
+        cfg,
         replay_from=args.replay_from,
         scenario_id=args.scenario_id,
         run_id=args.run_id,
+        input_paths=inputs,
+        command_identity="python -m nmsim.run",
     )
 
 

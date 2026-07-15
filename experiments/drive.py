@@ -13,11 +13,21 @@ import sys
 import json
 import time
 import socket
-import argparse
 import subprocess
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-from experiments.driver_utils import archive_rejected_result, set_driver_provenance
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
+from experiments.driver_utils import (
+    archive_rejected_result,
+    run_managed_driver_jobs,
+    set_driver_provenance,
+)
 
 BAD_THRESHOLD = 0.15      # a run with >15% failed orders is endpoint-corrupted
 MAX_RETRIES = 5           # VPN drops are expected; give each seed buffer to retry
@@ -87,7 +97,10 @@ def _run(gain, seed, provider, out):
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(path, f"subprocess exit {p.returncode}: {last}")
+            archive_rejected_result(
+                path,
+                f"subprocess exit {p.returncode}; details are in the managed driver private log",
+            )
             continue
         bad = _bad_frac(out, gain, seed)
         if bad <= BAD_THRESHOLD:
@@ -98,39 +111,49 @@ def _run(gain, seed, provider, out):
     return (tag, False, f"gave up after {MAX_RETRIES} attempts: {last}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results",
+            command_identity="experiments.drive",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--version", action="version", version="experiments.drive phase-1.1b")
     ap.add_argument("--gains", type=float, nargs="+", required=True)
     ap.add_argument("--seeds", type=int, nargs="+", required=True)
     ap.add_argument("--provider", default="openai")
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--out", default="results")
-    args = ap.parse_args()
+    try:
+        args = ap.parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
 
-    os.makedirs(args.out, exist_ok=True)
     set_driver_provenance(args.workers, "experiments.drive")
-
-    jobs = [(g, s) for g in args.gains for s in args.seeds
-            if not _healthy(args.out, g, s)]
-    skipped = [(g, s) for g in args.gains for s in args.seeds
-               if _healthy(args.out, g, s)]
-    print(f"jobs: {len(jobs)} to run, {len(skipped)} already done "
+    all_jobs = [(g, s) for g in args.gains for s in args.seeds]
+    todo = [job for job in all_jobs if not _healthy(args.out, *job)]
+    print(f"jobs: {len(todo)} to run, {len(all_jobs) - len(todo)} already done "
           f"(workers={args.workers})", flush=True)
-
-    done, fails = 0, []
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(_run, g, s, args.provider, args.out) for g, s in jobs]
-        for f in as_completed(futs):
-            tag, ok, msg = f.result()
-            done += 1
-            status = "OK " if ok else "FAIL"
-            print(f"[{done}/{len(jobs)}] {status} {tag}: {msg}", flush=True)
-            if not ok:
-                fails.append((tag, msg))
-    with open(os.path.join(args.out, "failures.log"), "a") as fh:
-        for tag, msg in fails:
-            fh.write(f"{tag}: {msg}\n")
-    print("ALL DONE", flush=True)
+    failures, summary = run_managed_driver_jobs(
+        out_root=args.out,
+        command_identity="experiments.drive",
+        jobs=all_jobs,
+        workers=args.workers,
+        cell_name=lambda job: f"g{job[0]}",
+        seed_identity=lambda job: job[1],
+        is_healthy=lambda job: _healthy(args.out, *job),
+        run_job=lambda job: _run(job[0], job[1], args.provider, args.out),
+    )
+    print(f"ALL DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)
 
 
 if __name__ == "__main__":

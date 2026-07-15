@@ -23,6 +23,9 @@ refactored into the typed `nmsim/` package and extended through Tasks 1–3.
 | `events.py` | versioned public/private JSONL event streams with an enforced privacy boundary. |
 | `recording.py` | provider-compatible LLM Record/Replay; strict Prompt/Persona/model/order matching and no replay network fallback. |
 | `provenance.py` | immutable run directories, atomic manifests, hashes, environment and honest-N. |
+| `run_context.py` | formal `ManagedRunContext` lifecycle, Record/Replay wiring, completion accounting, idempotent finalization, plus the explicit no-provenance `NullRunContext`. |
+| `managed_cli.py` | two-stage CLI bootstrap and safe failed-attempt provenance. |
+| `entrypoints.py` | auditable registry of official, diagnostic, library and unsupported execution surfaces. |
 | `sim.py` | the round loop tying it all together. |
 | `run.py` | CLI entry point → CSVs, plots, cost print. |
 
@@ -57,10 +60,13 @@ falls back to the deterministic mock otherwise.
 
 ### Outputs
 
-Every managed run is written to a unique, non-overwriting
-`<out>/runs/<run_id>/` directory. On a fresh output root, `latest` and the old
-flat filenames are compatibility symlinks; an existing regular historical file
-is never replaced.
+Every formal research run crosses `ManagedRunContext` and is written to a
+unique, non-overwriting `<out>/runs/<run_id>/` directory. Only a successfully
+finalized run publishes `latest` and old flat compatibility links; each flat
+link points directly at the immutable run that produced it, and an existing
+regular historical file is never replaced. A partial output file is not a
+successful sample: check `status=finished`, `managed_run_completed=true` and
+`outputs_complete=true` in the manifest.
 
 - `price_path.csv`, `propagation.csv`, `reasoning_traces.csv`
 - `stylized_facts.json` (+ `reference_comparison` when `--reference` is given)
@@ -70,8 +76,23 @@ is never replaced.
 - `private_events.jsonl`, `llm_records.jsonl` (mode `0600`; full prompts,
   raw responses and private reasoning)
 
-See [`docs/RUN_PROVENANCE.md`](docs/RUN_PROVENANCE.md) for schemas, replay
-semantics, experiment compatibility and failure handling.
+The manifest also carries unitized completion for runs, rounds, Agent
+decisions, logical requests, response sources, Provider-interface calls and
+parsing. Legacy top-level `honest_n` means completed Agent decisions and is
+deprecated; experiment summaries use run-level `honest_n_runs`.
+
+See [`docs/RUN_PROVENANCE.md`](docs/RUN_PROVENANCE.md) for schemas and replay,
+[`docs/MANAGED_RUN_LIFECYCLE.md`](docs/MANAGED_RUN_LIFECYCLE.md) for startup and
+failure handling, [`docs/ENTRYPOINTS.md`](docs/ENTRYPOINTS.md) for the supported
+execution surfaces, and [`docs/COMPLETION_ACCOUNTING.md`](docs/COMPLETION_ACCOUNTING.md)
+for units and honest-N.
+
+`nmsim.sim.run_sim` remains a low-level in-memory library API. Tests and
+diagnostics may explicitly use `NullRunContext`, but those results are not
+provenance-complete research outputs. `--help` and `--version` do not create a
+run; once a safe output root is known, later configuration, Provider setup,
+Replay preflight, simulation or export failures are retained as failed managed
+attempts.
 
 ## How the tasks map to acceptance
 

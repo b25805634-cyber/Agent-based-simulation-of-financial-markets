@@ -574,15 +574,19 @@ class RunManager:
 
     def _emit(self, event_type: str, round: Optional[int] = None,
               agent_id: Optional[str] = None, data: Optional[dict] = None,
-              private: bool = False) -> None:
+              private: bool = False,
+              private_data: Optional[dict] = None,
+              required: bool = False) -> None:
         try:
             if private:
                 self.events.emit_private(event_type, round_i=round,
                                          agent_id=agent_id, data=data or {})
             else:
                 self.events.emit(event_type, round_i=round, agent_id=agent_id,
-                                 data=data or {})
+                                 data=data or {}, private_data=private_data)
         except Exception as exc:
+            if required:
+                raise
             # Do not lose the run manifest merely because event I/O failed.
             warning = f"event logging failed for {event_type}: {type(exc).__name__}: {exc}"
             self.manifest["warnings"].append(self._sanitize_text(warning))
@@ -607,6 +611,48 @@ class RunManager:
             if secret and secret != "EMPTY":
                 text = text.replace(secret, "<redacted>")
         return text[:8000]
+
+    def _failure_summaries(self, error: Any) -> tuple[str, str]:
+        """Return a public-safe summary and a private, secret-redacted detail."""
+
+        error_type = type(error).__name__ if not isinstance(error, str) else "RunError"
+        detail = self._sanitize_text(
+            error if isinstance(error, str) else f"{error_type}: {error}"
+        )
+        # These contract exceptions are deliberately designed to contain only
+        # field names and hash prefixes.  Generic exception messages can contain
+        # prompts or private rationales, so only their type is public.
+        public_detail_types = {
+            "ConfigAliasConflictError",
+            "ConfigContractError",
+            "ConfigSchemaError",
+            "ReplayMismatchError",
+            "RecordingSchemaValidationError",
+            "UnknownConfigFieldError",
+            "UnclassifiedConfigFieldError",
+        }
+        if error_type in public_detail_types:
+            public = detail
+        elif isinstance(error, str):
+            public = "RunError: managed run failed; details are in private_events.jsonl"
+        elif isinstance(error, KeyboardInterrupt):
+            public = "KeyboardInterrupt: managed run interrupted"
+        elif isinstance(error, SystemExit):
+            public = "SystemExit: managed command exited before completion"
+        else:
+            public = f"{error_type}: managed run failed; details are in private_events.jsonl"
+        return public, detail
+
+    def _refresh_event_artifacts(self) -> None:
+        """Refresh event hashes after the terminal event without a full rescan."""
+
+        by_path = {item.get("path"): item for item in self.manifest.get("results", [])}
+        for path in (self.public_events_path, self.private_events_path):
+            relative = str(path.relative_to(self.run_dir))
+            descriptor = _file_descriptor(path, relative)
+            descriptor["inside_run_directory"] = True
+            by_path[relative] = descriptor
+        self.manifest["results"] = [by_path[key] for key in sorted(by_path)]
 
     def register_llm_runtime(self, llm: Any = None, provider: Optional[str] = None,
                              model: Optional[str] = None, mode: Optional[str] = None,
@@ -776,7 +822,10 @@ class RunManager:
         target = os.readlink(str(path))
         if basename is None:
             return target.startswith("runs/") and len(Path(target).parts) == 2
-        return target == f"latest/{basename}"
+        parts = Path(target).parts
+        return target == f"latest/{basename}" or (
+            len(parts) == 3 and parts[0] == "runs" and parts[-1] == basename
+        )
 
     def publish_legacy_links(self, filenames: Iterable[os.PathLike]) -> dict:
         """Publish a managed ``latest`` link and safe flat compatibility links.
@@ -820,11 +869,16 @@ class RunManager:
                         compatibility["skipped"].append(message)
                         continue
                     temporary = self.out_root / f".{basename}.{uuid.uuid4().hex}.tmp"
+                    # A flat result must keep pointing at the immutable run that
+                    # produced it.  Pointing through the shared ``latest`` link
+                    # makes distinct run_seed filenames dangle as soon as a
+                    # later child becomes latest.
+                    stable_target = os.path.relpath(str(source), str(self.out_root))
                     try:
-                        os.symlink(f"latest/{basename}", str(temporary))
+                        os.symlink(stable_target, str(temporary))
                         os.replace(str(temporary), str(link))
                         compatibility["legacy_links"].append({
-                            "path": str(link), "target": f"latest/{basename}",
+                            "path": str(link), "target": stable_target,
                         })
                     finally:
                         if os.path.lexists(str(temporary)):
@@ -841,11 +895,19 @@ class RunManager:
             if any(v is not None for v in (expected, completed, failed, honest_n)):
                 self.set_samples(expected=expected, completed=completed,
                                  failed=failed, honest_n=honest_n)
-            self._emit("RunFinished", data={"samples": self.manifest["samples"]})
+            # Validate and hash canonical outputs before announcing success.  A
+            # collection failure can therefore still become one honest RunFailed.
+            self.collect_artifacts(extra_results)
+            event_data = {"samples": self.manifest["samples"]}
+            if "completion" in self.manifest:
+                # ``completion`` alone is a privacy-reserved key because it can
+                # mean raw model output; the qualified name is accounting only.
+                event_data["completion_accounting"] = self.manifest["completion"]
+            self._emit("RunFinished", data=event_data, required=True)
             self.manifest["status"] = "finished"
             self.manifest["ended_at"] = utc_now()
             self.manifest["failure_reason"] = None
-            self.collect_artifacts(extra_results)
+            self._refresh_event_artifacts()
             self._terminal = True
             self._write()
             return self.manifest_path
@@ -856,16 +918,32 @@ class RunManager:
         with self._lock:
             if self._terminal:
                 return self.manifest_path
-            reason = self._sanitize_text(
-                error if isinstance(error, str) else f"{type(error).__name__}: {error}")
+            reason, private_reason = self._failure_summaries(error)
             if any(v is not None for v in (expected, completed, failed, honest_n)):
                 self.set_samples(expected=expected, completed=completed,
                                  failed=failed, honest_n=honest_n)
-            self._emit("RunFailed", data={"failure_reason": reason})
+            self._emit(
+                "RunFailed",
+                data={
+                    "failure_reason": reason,
+                    "failure_stage": self.manifest.get("failure_stage"),
+                    "failure_type": self.manifest.get("failure_type"),
+                },
+                private_data={"failure_detail": private_reason},
+                required=True,
+            )
             self.manifest["status"] = "failed"
             self.manifest["ended_at"] = utc_now()
             self.manifest["failure_reason"] = reason
-            self.collect_artifacts(extra_results)
+            try:
+                self.collect_artifacts(extra_results)
+            except Exception as artifact_error:
+                self.manifest["warnings"].append(
+                    "failed-run artifact collection failed: {}".format(
+                        type(artifact_error).__name__
+                    )
+                )
+            self._refresh_event_artifacts()
             self._terminal = True
             self._write()
             return self.manifest_path

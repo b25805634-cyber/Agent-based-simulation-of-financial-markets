@@ -17,9 +17,20 @@ Usage:
       --seeds 1 2 3 4 5 6 7 8 --out results_critsweep --workers 3
 """
 from __future__ import annotations
-import os, sys, json, argparse, subprocess
+import os, sys, json, subprocess
+from nmsim.managed_cli import (
+    BootstrapCLIError,
+    ManagedCLIError,
+    RaisingArgumentParser,
+    bootstrap_cli,
+    fail_cli,
+)
 from experiments.drive import _wait_for_endpoint, BAD_THRESHOLD, MAX_RETRIES
-from experiments.driver_utils import archive_rejected_result, set_driver_provenance
+from experiments.driver_utils import (
+    archive_rejected_result,
+    run_managed_driver_jobs,
+    set_driver_provenance,
+)
 
 
 def _label(m, ratio):
@@ -56,7 +67,10 @@ def _run(out, m, ratio, spread, maint, frac, seed, provider, total, model):
         p = subprocess.run(cmd, capture_output=True, text=True, env=env)
         if p.returncode != 0:
             last = ((p.stderr or p.stdout).strip().splitlines() or ["error"])[-1]
-            archive_rejected_result(path, f"subprocess exit {p.returncode}: {last}")
+            archive_rejected_result(
+                path,
+                f"subprocess exit {p.returncode}; details are in the managed driver private log",
+            )
             continue
         if _bad(path) <= BAD_THRESHOLD:
             return (f"{label}_s{seed}", True, f"{p.stdout.strip()} (attempt {attempt})")
@@ -65,8 +79,23 @@ def _run(out, m, ratio, spread, maint, frac, seed, provider, total, model):
     return (f"{label}_s{seed}", False, f"gave up: {last}")
 
 
-def main():
-    ap = argparse.ArgumentParser()
+def main(argv=None):
+    argv = list(sys.argv[1:] if argv is None else argv)
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_critsweep",
+            command_identity="experiments.critsweep",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+
+    ap = RaisingArgumentParser(allow_abbrev=False)
+    ap.add_argument("--version", action="version", version="experiments.critsweep phase-1.1b")
     ap.add_argument("--m", type=float, default=0.7)
     ap.add_argument("--levels", type=float, nargs="+", required=True,
                     help="leverage L centers, low→high strength (shallower trigger)")
@@ -79,26 +108,46 @@ def main():
     ap.add_argument("--total", type=int, default=30)
     ap.add_argument("--workers", type=int, default=3)
     ap.add_argument("--out", default="results_critsweep")
-    args = ap.parse_args()
-    os.makedirs(args.out, exist_ok=True)
+    try:
+        args = ap.parse_args(argv)
+    except (ManagedCLIError, OSError, ValueError) as error:
+        fail_cli(bootstrap, error, failure_stage="config_validation")
     set_driver_provenance(args.workers, "experiments.critsweep")
 
     jobs = [(L, s) for L in args.levels for s in args.seeds]
     print(f"critsweep temp=0 m={args.m:g} social=on levels(L)={args.levels} spread={args.spread} "
           f"maint={args.maint} frac={args.fraction}: {len(jobs)} runs (workers={args.workers})", flush=True)
 
-    fails, done = [], 0
-    from concurrent.futures import ThreadPoolExecutor, as_completed
-    with ThreadPoolExecutor(max_workers=args.workers) as ex:
-        futs = [ex.submit(_run, args.out, args.m, L, args.spread, args.maint, args.fraction,
-                          s, args.provider, args.total, args.model) for (L, s) in jobs]
-        for f in as_completed(futs):
-            label, ok, msg = f.result(); done += 1
-            print(f"[{done}/{len(jobs)}] {'OK ' if ok else 'FAIL'} {label}: {msg}", flush=True)
-            if not ok: fails.append((label, msg))
-    with open(os.path.join(args.out, "failures.log"), "a") as fh:
-        for label, msg in fails: fh.write(f"{label}: {msg}\n")
-    print(f"DONE. failures: {len(fails)}", flush=True)
+    failures, summary = run_managed_driver_jobs(
+        out_root=args.out,
+        command_identity="experiments.critsweep",
+        jobs=jobs,
+        workers=args.workers,
+        cell_name=lambda job: _label(args.m, job[0]),
+        seed_identity=lambda job: job[1],
+        is_healthy=lambda job: (
+            os.path.exists(
+                os.path.join(args.out, f"{_label(args.m, job[0])}_s{job[1]}.json")
+            )
+            and _bad(
+                os.path.join(args.out, f"{_label(args.m, job[0])}_s{job[1]}.json")
+            )
+            <= BAD_THRESHOLD
+        ),
+        run_job=lambda job: _run(
+            args.out,
+            args.m,
+            job[0],
+            args.spread,
+            args.maint,
+            args.fraction,
+            job[1],
+            args.provider,
+            args.total,
+            args.model,
+        ),
+    )
+    print(f"DONE. failures: {len(failures)}; driver summary: {summary}", flush=True)
 
 
 if __name__ == "__main__":
