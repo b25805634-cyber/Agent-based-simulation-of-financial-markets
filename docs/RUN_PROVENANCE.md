@@ -1,6 +1,6 @@
 # Run provenance、事件日志与 LLM Record/Replay
 
-本文描述 Phase 1–1.2A 的当前可执行接口。目标是审计一次已发生的运行，并在明确的源码、运行时配置和记录契约内重放；它不改变 Agent、Prompt、压力定价、社交传播、杠杆或统计公式。Phase 1.2A 在 Phase 1.1 生命周期基础上只新增 child-result 身份复用门、Provider capability provenance 和冻结的离线模型资格协议。各种 replay 与统计复现的边界见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)，本文不把它们统称为“完全可复现”。
+本文描述 Phase 1–1.2B-CX1 的当前可执行接口。目标是审计一次已发生的运行，并在明确的源码、运行时配置和记录契约内重放；它不改变 Agent、Prompt、压力定价、社交传播、杠杆或统计公式。Phase 1.2A 在 Phase 1.1 生命周期基础上新增 child-result 身份复用门、Provider capability provenance 和冻结的离线模型资格协议；Phase 1.2B-CX1 条件化增加实验性 CodexExec wrapper/schema/CLI 身份和逐调用安全 provenance，且未执行真实模型任务。各种 replay 与统计复现的边界见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)，本文不把它们统称为“完全可复现”。
 
 ## 快速使用
 
@@ -241,11 +241,22 @@ Manifest 不宣称真实 LLM 完全确定。Provider 返回合法的 `api-error`
 - config hash schema/classification、full/scientific/model-request/execution hashes 和 secret-free 规范摘要；
 - 原始 response 和 response hash。
 
+CodexExec 在不升级 recording schema 1.2 的前提下使用可选扩展：
+`model_config.provider_adapter_contract` 绑定 wrapper/schema/model/binary 静态身份，
+`model_config.provider_runtime_identity` 保留当时已探测的 CLI/auth/执行信息，
+且 request 中的 `provider_adapter_identity` 保存原生 Prompt hash 与
+`final_combined_input_hash`。只有 CodexExec 的 `model_request_config_summary`
+会添加 `_provider_adapter_contract`；其他 Provider 的已有 config hash 不变。
+
 1.2 不以“上述字段看似存在”代替正式验证。`validate_v12_metadata()` 在 Provider 调用前检查 fingerprint/parser/event/recording/config schema/hash 与脱敏摘要；collection validator 逐条重算 Prompt/response hash，并检查 envelope、type、request/order/batch 和全文件 compatibility/model identity。空 recording 在 constructor preflight 拒绝，`allow_append=True` 也被禁用，以保护历史文件。读取历史记录时不修改原文件，也不将 1.0/1.1 猜测或补齐为 1.2。
 
 记录 wrapper 位于现有 `CachingLLM` 外侧，因此 replay 覆盖完整的逻辑调用序列，包括当时由 cache 返回的响应；manifest 另记实际 Provider calls 和 cache hits。
 
 Replay 在 `run_sim` 和第一个 `RoundStarted` 之前构造 `ReplayLLM`：先按集中兼容矩阵分类明示 schema，且只有通过正式结构验证的完整 1.2 可进入 Strict Replay；再校验 config hash schema/classification、scientific/model-request hashes、source compatibility 和 resolved model config。Execution hash 差异只记录，不放松后续请求校验。进入仿真后，整批请求会逐项匹配 Agent、Persona、round、call/batch sequence/index/size、完整 Prompt hash 与模型配置，全部匹配后才一次性推进 cursor。匹配失败会指出 category/字段和安全 hash 摘要，不会输出完整 Prompt、credential 或 private rationale；失败不会部分消费 batch，也绝不会改为真实 Provider 调用。运行结束还会用 `assert_exhausted()` 拒绝少 round/少 Agent 的提前结束。
+
+CodexExec Replay 还会比较重算的 adapter/request 身份，但不执行
+Codex version/help/login probe，不启动子进程且 Provider calls 为 0。历史
+`provider_runtime_identity` 只表示原 Record 的探测结果。
 
 Preflight 错配时，run directory 和 `status=failed` manifest 已存在，`failure_stage=replay_preflight`，`RunFailed` 事件保存安全诊断，completion 中 round/decision/request 完成数为 0，`network_access=false`、Provider call 为 0，`outputs_complete=false`。`RunStarted` 是 run provenance 事件；配置错配时不会有任何 `RoundStarted` 或成功 canonical projection。
 

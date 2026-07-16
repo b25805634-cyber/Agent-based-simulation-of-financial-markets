@@ -337,7 +337,7 @@ def runtime_model_config(
         resolved = str(source.get("resolved_provider", source.get("provider", "mock")))
     elif requested == "auto":
         resolved = "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "mock"
-    elif requested in ("anthropic", "openai", "mock"):
+    elif requested in ("anthropic", "openai", "mock", "codex_exec"):
         resolved = requested
     else:
         # Preserve build_llm's existing unknown-provider compatibility behavior.
@@ -366,7 +366,7 @@ def runtime_model_config(
             or getattr(cfg, "openai_base_url", None)
         )
 
-    return canonical_model_config({
+    config = {
         "requested_provider": requested,
         "resolved_provider": resolved,
         "provider": resolved,
@@ -378,7 +378,28 @@ def runtime_model_config(
         # Endpoint identity affects which served model is reached, but the URL
         # itself may contain userinfo. Match its digest without persisting it.
         "endpoint_sha256": _sha256_text(str(endpoint)) if endpoint else None,
-    })
+    }
+    if resolved == "codex_exec" or requested == "codex_exec":
+        from .codex_exec import codex_static_adapter_identity
+
+        executable = os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex")
+        config["provider_adapter_contract"] = codex_static_adapter_identity(
+            executable,
+            model=None if model is None else str(model),
+        )
+        # Runtime capability/auth evidence is immutable historical provenance.
+        # Record mode obtains it from the already-probed adapter. Replay never
+        # constructs or probes Codex; it inherits the recorded snapshot while
+        # recomputing the static wrapper/schema/binary contract above.
+        if llm is not None:
+            identity_builder = _nested_attr(llm, "identity_snapshot")
+            if callable(identity_builder):
+                config["provider_runtime_identity"] = identity_builder()
+        elif source and requested == source_requested:
+            runtime_identity = source.get("provider_runtime_identity")
+            if isinstance(runtime_identity, Mapping):
+                config["provider_runtime_identity"] = dict(runtime_identity)
+    return canonical_model_config(config)
 
 
 def request_fingerprint(system: str, user: str) -> dict[str, str]:
@@ -571,6 +592,9 @@ class RecordingLLM(_ContextMixin):
                 "scientific_config_hash"
             ),
         }
+        adapter_identity = fingerprint.get("provider_adapter_identity")
+        if isinstance(adapter_identity, Mapping):
+            public["provider_adapter_request_identity"] = dict(adapter_identity)
         self.event_logger.emit(
             "LLMRequestRecorded",
             round_i=call["round"],
@@ -612,6 +636,14 @@ class RecordingLLM(_ContextMixin):
                 raise TypeError("LLM prompts must be (str, str) pairs")
             self._sequence += 1
             fingerprint = request_fingerprint(system, user)
+            if self.model_config.get("resolved_provider") == "codex_exec":
+                from .codex_exec import codex_request_identity
+
+                fingerprint["provider_adapter_identity"] = codex_request_identity(
+                    system,
+                    user,
+                    str(self.model_config.get("model") or ""),
+                )
             calls.append(
                 {
                     "sequence": self._sequence,
@@ -749,6 +781,23 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                     "non-string replay response at line {}".format(line_number)
                 )
             fingerprint = request_fingerprint(system, user)
+            record_model_config = canonical_model_config(
+                record.get("model_config", {})
+            )
+            if record_model_config.get("resolved_provider") == "codex_exec":
+                from .codex_exec import codex_request_identity
+
+                expected_adapter_identity = codex_request_identity(
+                    system,
+                    user,
+                    str(record_model_config.get("model") or ""),
+                )
+                if request.get("provider_adapter_identity") != expected_adapter_identity:
+                    raise ReplayMismatchError(
+                        "corrupt provider_adapter_request_identity at replay line {}".format(
+                            line_number
+                        )
+                    )
             for key, expected in fingerprint.items():
                 if request.get(key) != expected:
                     raise ReplayMismatchError(
@@ -758,7 +807,7 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                 raise ReplayMismatchError(
                     "corrupt response_hash at replay line {}".format(line_number)
                 )
-            record["model_config"] = canonical_model_config(record.get("model_config", {}))
+            record["model_config"] = record_model_config
             records.append(record)
     if not records:
         raise ReplayMismatchError(
@@ -1041,6 +1090,15 @@ class ReplayLLM(_ContextMixin):
                 raise TypeError("LLM prompts must be (str, str) pairs")
             sequence = self._cursor + index + 1
             fingerprint = request_fingerprint(system, user)
+            adapter_identity = None
+            if self.model_config.get("resolved_provider") == "codex_exec":
+                from .codex_exec import codex_request_identity
+
+                adapter_identity = codex_request_identity(
+                    system,
+                    user,
+                    str(self.model_config.get("model") or ""),
+                )
             self._emit_request(
                 sequence=sequence,
                 round_i=round_i,
@@ -1059,7 +1117,7 @@ class ReplayLLM(_ContextMixin):
                     )
                 )
             record = self._records[self._cursor + index]
-            comparisons = (
+            comparisons = [
                 ("sequence", record.get("sequence"), sequence),
                 ("round", record.get("round"), round_i),
                 ("batch_sequence", record.get("batch_sequence"), batch_sequence),
@@ -1073,7 +1131,15 @@ class ReplayLLM(_ContextMixin):
                     fingerprint["prompt_hash"],
                 ),
                 ("model_config", record.get("model_config"), self.model_config),
-            )
+            ]
+            if adapter_identity is not None:
+                comparisons.append(
+                    (
+                        "provider_adapter_request_identity",
+                        record["request"].get("provider_adapter_identity"),
+                        adapter_identity,
+                    )
+                )
             for field, recorded, requested in comparisons:
                 if recorded != requested:
                     # Prompt/model values are reported as hashes or structured

@@ -125,9 +125,9 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         (
             "bootstrap",
             "frozen fixture/rubric validation",
-            "Phase 1.2A provider guard",
+            "provider and explicit Codex real-use guard",
             "ManagedRunContext",
-            "48 qualification cases or dry-run",
+            "selected qualification cases or dry-run",
             "public/private export",
         ),
         (
@@ -136,7 +136,7 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
             "0600 private case records",
         ),
         PROVIDER_DIRECT, True,
-        "Not a market simulation. Phase 1.2A permits only Mock/Fake and rejects external providers before construction.",
+        "Not a market simulation. Mock/Fake are offline paths; experimental CodexExec requires explicit model/use/case guards, and dry-run constructs no Provider.",
     ),
 
     # Experiment-level drivers.  Their run-count lifecycle is managed at the

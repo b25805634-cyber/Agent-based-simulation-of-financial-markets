@@ -9,6 +9,7 @@ from contextlib import redirect_stderr, redirect_stdout
 import copy
 import io
 import json
+import os
 from pathlib import Path
 import socket
 import stat
@@ -46,6 +47,117 @@ class QualificationProtocolTests(unittest.TestCase):
             [case.case_id for case in self.cases],
             [case.case_id for case in rebuilt],
         )
+
+    def test_stable_subset_selection_is_independent_of_selector_order(self):
+        first = qualification.select_cases(
+            self.bundle,
+            self.cases,
+            provider_id="mock",
+            fixture_ids=[
+                "conflicting_neighbor_views",
+                "negative_news_price_unchanged",
+            ],
+            persona_ids=["value_institution", "retail_crowd"],
+            max_cases=3,
+        )
+        second = qualification.select_cases(
+            self.bundle,
+            list(reversed(self.cases)),
+            provider_id="mock",
+            fixture_ids=[
+                "negative_news_price_unchanged",
+                "conflicting_neighbor_views",
+                "conflicting_neighbor_views",
+            ],
+            persona_ids=["retail_crowd", "value_institution"],
+            max_cases=3,
+        )
+        self.assertEqual(
+            [case.case_id for case in first.cases],
+            [case.case_id for case in second.cases],
+        )
+        self.assertEqual(
+            first.metadata["selection_hash"], second.metadata["selection_hash"]
+        )
+        self.assertEqual(first.metadata["selected_case_count"], 3)
+        self.assertEqual(first.metadata["qualification_scope"], "subset_pilot")
+        self.assertFalse(first.metadata["is_full_qualification"])
+
+    def test_case_fixture_and_persona_filters_use_and_semantics(self):
+        target = next(
+            case
+            for case in self.cases
+            if case.persona_id == "retail_crowd"
+            and case.fixture_id == "neutral_placebo_news"
+        )
+        selected = qualification.select_cases(
+            self.bundle,
+            self.cases,
+            provider_id="mock",
+            case_ids=[target.case_id],
+            fixture_ids=[target.fixture_id],
+            persona_ids=[target.persona_id],
+        )
+        self.assertEqual([case.case_id for case in selected.cases], [target.case_id])
+        self.assertEqual(
+            selected.metadata["selected_fixture_ids"], ["neutral_placebo_news"]
+        )
+        self.assertEqual(
+            selected.metadata["selected_persona_ids"], ["retail_crowd"]
+        )
+
+    def test_codex_omitted_max_cases_defaults_to_one_but_mock_remains_48(self):
+        codex = qualification.select_cases(
+            self.bundle, self.cases, provider_id="codex_exec"
+        )
+        mock_selection = qualification.select_cases(
+            self.bundle, self.cases, provider_id="mock"
+        )
+        self.assertEqual(len(codex.cases), 1)
+        self.assertEqual(codex.metadata["effective_max_cases"], 1)
+        self.assertTrue(codex.metadata["max_cases_defaulted"])
+        self.assertEqual(len(mock_selection.cases), 48)
+        self.assertTrue(mock_selection.metadata["is_full_qualification"])
+
+    def test_selection_hash_binds_protocol_fixture_rubric_and_exact_cases(self):
+        first = qualification.select_cases(
+            self.bundle, self.cases, provider_id="mock", max_cases=1
+        )
+        second = qualification.select_cases(
+            self.bundle, self.cases, provider_id="mock", max_cases=2
+        )
+        self.assertNotEqual(
+            first.metadata["selection_hash"], second.metadata["selection_hash"]
+        )
+        for field in (
+            "protocol_hash",
+            "fixture_set_hash",
+            "rubric_hash",
+            "visibility_contract_hash",
+        ):
+            self.assertEqual(first.metadata[field], self.bundle[field])
+
+    def test_unknown_selector_and_invalid_case_cap_fail_closed(self):
+        with self.assertRaisesRegex(
+            qualification.QualificationProtocolError, "unknown qualification persona_id"
+        ):
+            qualification.select_cases(
+                self.bundle,
+                self.cases,
+                provider_id="mock",
+                persona_ids=["not_a_persona"],
+            )
+        for value in (0, 49):
+            with self.subTest(max_cases=value), self.assertRaisesRegex(
+                qualification.QualificationProtocolError,
+                "--max-cases must be between 1 and 48",
+            ):
+                qualification.select_cases(
+                    self.bundle,
+                    self.cases,
+                    provider_id="mock",
+                    max_cases=value,
+                )
 
     def test_fixture_order_does_not_change_fixture_set_hash(self):
         fixtures = self.bundle["observations"]["fixtures"]
@@ -313,6 +425,25 @@ class QualificationManagedCLITests(unittest.TestCase):
         self.assertEqual(raised.exception.code, 0)
         self.assertFalse(out.exists())
 
+    def test_codex_provider_and_static_identity_share_fake_executable_locator(self):
+        fake_binary = str(self.root / "fake-codex")
+        with mock.patch.dict(
+            os.environ, {"NMSIM_CODEX_EXECUTABLE": fake_binary}
+        ), mock.patch(
+            "nmsim.codex_exec.CodexExecLLM"
+        ) as provider_class, mock.patch(
+            "nmsim.codex_exec.codex_static_adapter_identity",
+            return_value={"provider": "codex_exec", "requested_model": "fake-model"},
+        ) as static_identity:
+            qualification._build_provider("codex_exec", 7, "fake-model")
+            qualification._codex_static_identity("fake-model")
+        provider_class.assert_called_once_with(
+            model="fake-model", binary=fake_binary
+        )
+        static_identity.assert_called_once_with(
+            binary=fake_binary, model="fake-model"
+        )
+
     def test_dry_run_never_constructs_provider_and_records_zero_calls(self):
         out = self.root / "dry"
         stdout = io.StringIO()
@@ -344,6 +475,500 @@ class QualificationManagedCLITests(unittest.TestCase):
         self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
         self.assertFalse(manifest["llm"]["runtime"]["network_access"])
         self.assertEqual(manifest["managed_context"]["run_kind"], "model_qualification")
+
+    @staticmethod
+    def _codex_capability_snapshot(*_args, **_kwargs):
+        return {
+            "capability_schema_version": "1.0",
+            "provider": {
+                "provider_id": "codex_exec",
+                "external_network_expected": True,
+                "experimental": True,
+            },
+        }
+
+    @staticmethod
+    def _codex_static_identity(_model):
+        return {
+            "provider": "codex_exec",
+            "requested_model": "fake-codex-model",
+            "binary_identity": {
+                "status": "available",
+                "name": "fake-codex",
+                "sha256": "a" * 64,
+            },
+            "codex_wrapper_protocol_version": "1.0",
+            "wrapper_source_hash": "b" * 64,
+            "decision_schema_version": "1.0",
+            "decision_schema_hash": "c" * 64,
+            "auth_probe_performed": False,
+            "subprocess_started": False,
+        }
+
+    def test_codex_dry_run_defaults_to_one_and_never_constructs_provider(self):
+        out = self.root / "codex-dry"
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("Codex provider constructed during dry-run"),
+        ) as build, mock.patch.object(
+            qualification,
+            "provider_capability_snapshot",
+            side_effect=self._codex_capability_snapshot,
+        ), mock.patch.object(
+            qualification,
+            "_codex_static_identity",
+            side_effect=self._codex_static_identity,
+        ), mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("network attempted during dry-run"),
+        ) as network, redirect_stdout(io.StringIO()):
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--dry-run",
+                    "--out",
+                    str(out),
+                ]
+            )
+        build.assert_not_called()
+        network.assert_not_called()
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        summary = _read_json(run_dir / "dry_run_summary.json")
+        self.assertEqual(summary["case_count"], 1)
+        self.assertEqual(summary["estimated_logical_requests"], 1)
+        self.assertTrue(summary["network_required"])
+        self.assertFalse(summary["network_access"])
+        self.assertEqual(summary["qualification_scope"], "subset_pilot")
+        self.assertRegex(summary["selection_hash"], r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            manifest["qualification"]["selection_hash"], summary["selection_hash"]
+        )
+        self.assertFalse(
+            summary["provider_static_identity"]["subprocess_started"]
+        )
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+        self.assertFalse(manifest["llm"]["runtime"]["network_access"])
+
+    def test_codex_real_use_guard_missing_is_managed_failure_before_construction(self):
+        out = self.root / "codex-unconfirmed"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("unconfirmed Codex provider constructed"),
+        ) as build, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("network attempted"),
+        ) as network, redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--out",
+                    str(out),
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--confirm-real-codex-usage", stderr.getvalue())
+        build.assert_not_called()
+        network.assert_not_called()
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "provider_setup")
+        self.assertEqual(manifest["qualification"]["case_count"], 1)
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+        self.assertFalse(manifest["llm"]["runtime"]["network_access"])
+        self.assertNotIn("RoundStarted", events)
+
+    def test_codex_requires_explicit_model_even_for_dry_run(self):
+        out = self.root / "codex-missing-model"
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("model-less Codex provider constructed"),
+        ) as build, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            qualification.main(
+                ["--provider", "codex_exec", "--dry-run", "--out", str(out)]
+            )
+        build.assert_not_called()
+        manifest = _read_json(_single_run(out) / "run_manifest.json")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "provider_setup")
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+
+    def test_unsafe_codex_model_is_managed_config_validation_failure(self):
+        out = self.root / "codex-unsafe-model"
+        stderr = io.StringIO()
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("unsafe model constructed a provider"),
+        ) as build, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("network attempted"),
+        ) as network, redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "unsafe model value",
+                    "--dry-run",
+                    "--out",
+                    str(out),
+                ]
+            )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertNotIn("unsafe model value", stderr.getvalue())
+        build.assert_not_called()
+        network.assert_not_called()
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "config_validation")
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+        self.assertFalse(manifest["llm"]["runtime"]["network_access"])
+        self.assertNotIn("RoundStarted", events)
+
+    def test_codex_more_than_one_case_requires_exact_second_confirmation(self):
+        for extra_args in (
+            [],
+            ["--confirm-case-count", "3"],
+        ):
+            with self.subTest(extra_args=extra_args):
+                out = self.root / ("count-" + str(len(extra_args)))
+                with mock.patch.object(
+                    qualification,
+                    "_build_provider",
+                    side_effect=AssertionError("unconfirmed count constructed provider"),
+                ) as build, redirect_stderr(io.StringIO()), self.assertRaises(
+                    SystemExit
+                ) as raised:
+                    qualification.main(
+                        [
+                            "--provider",
+                            "codex_exec",
+                            "--model",
+                            "fake-codex-model",
+                            "--confirm-real-codex-usage",
+                            "--max-cases",
+                            "2",
+                            "--out",
+                            str(out),
+                            *extra_args,
+                        ]
+                    )
+                self.assertEqual(raised.exception.code, 2)
+                build.assert_not_called()
+                manifest = _read_json(_single_run(out) / "run_manifest.json")
+                self.assertEqual(manifest["status"], "failed")
+                self.assertEqual(
+                    manifest["completion"]["provider_calls"]["attempted"], 0
+                )
+
+    def test_codex_real_use_requires_explicit_max_cases_even_when_default_is_one(self):
+        out = self.root / "codex-max-not-explicit"
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("Codex provider constructed without max-cases"),
+        ) as build, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--confirm-real-codex-usage",
+                    "--out",
+                    str(out),
+                ]
+            )
+        build.assert_not_called()
+        manifest = _read_json(_single_run(out) / "run_manifest.json")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "provider_setup")
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+
+    def test_codex_exact_guards_can_reach_only_a_patched_test_provider(self):
+        out = self.root / "codex-guarded-test-double"
+
+        class FakeCodexProvider(qualification.FakeTestProvider):
+            model = "fake-codex-model"
+
+            def __init__(self):
+                super().__init__(seed=7)
+                self.last_call_metadata = None
+                self.identities = []
+                self.usage_totals = {"input_tokens": 0, "output_tokens": 0}
+
+            def identity_snapshot(self):
+                return {
+                    "provider": "codex_exec",
+                    "requested_model": self.model,
+                    "codex_cli_version": "fake-1.0",
+                    "binary_identity": {"name": "fake-codex", "sha256": "a" * 64},
+                    "auth_mode": "chatgpt_managed_codex",
+                    "auth_verified": True,
+                    "private_rationale": "MUST_NOT_LEAK",
+                }
+
+            def set_request_identity(self, *, run_id=None, agent_id=None):
+                self.identities.append((run_id, agent_id))
+
+            def complete(self, system, user):
+                raw = super().complete(system, user)
+                self.usage_totals["input_tokens"] += 3
+                self.usage_totals["output_tokens"] += 2
+                self.last_call_metadata = {
+                    **self.identity_snapshot(),
+                    "production_system_prompt_hash": "b" * 64,
+                    "production_user_prompt_hash": "c" * 64,
+                    "final_combined_input_hash": "d" * 64,
+                    "final_response_hash": "e" * 64,
+                    "reported_model": self.model,
+                    "actual_model_verification": "verified",
+                    "tool_use_violation_count": 0,
+                    "usage": {"input_tokens": 3, "output_tokens": 2},
+                    "raw_stdout": "MUST_NOT_LEAK",
+                    "private_rationale": "MUST_NOT_LEAK",
+                }
+                return raw
+
+        fake = FakeCodexProvider()
+        with mock.patch.object(
+            qualification, "_build_provider", return_value=fake
+        ) as build, mock.patch.object(
+            qualification,
+            "provider_capability_snapshot",
+            side_effect=self._codex_capability_snapshot,
+        ), mock.patch.object(
+            qualification,
+            "_codex_static_identity",
+            side_effect=self._codex_static_identity,
+        ), mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("test double attempted network"),
+        ) as network, redirect_stdout(io.StringIO()):
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--confirm-real-codex-usage",
+                    "--max-cases",
+                    "2",
+                    "--confirm-case-count",
+                    "2",
+                    "--workers",
+                    "1",
+                    "--out",
+                    str(out),
+                ]
+            )
+        build.assert_called_once_with("codex_exec", 7, "fake-codex-model")
+        network.assert_not_called()
+        run_dir = _single_run(out)
+        summary = _read_json(run_dir / "qualification_summary.json")
+        manifest = _read_json(run_dir / "run_manifest.json")
+        self.assertEqual(summary["honest_n_cases"], 2)
+        self.assertEqual(summary["qualification_scope"], "subset_pilot")
+        self.assertEqual(manifest["qualification"]["workers"], 1)
+        self.assertTrue(manifest["qualification"]["real_codex_usage_confirmed"])
+        self.assertEqual(manifest["qualification"]["qualification_cases"]["completed"], 2)
+        self.assertEqual(len(fake.identities), 2)
+        self.assertTrue(all(identity[0] == manifest["run_id"] for identity in fake.identities))
+        self.assertEqual(len(manifest["qualification"]["provider_call_metadata"]), 2)
+        public_text = "\n".join(
+            (run_dir / filename).read_text(encoding="utf-8")
+            for filename in (
+                "run_manifest.json",
+                "events.jsonl",
+                "case_results.jsonl",
+                "qualification_summary.json",
+            )
+        )
+        self.assertNotIn("MUST_NOT_LEAK", public_text)
+        public_rows = [
+            json.loads(line)
+            for line in (run_dir / "case_results.jsonl").read_text().splitlines()
+        ]
+        self.assertEqual(
+            set(public_rows[0]["provider_identity"]),
+            {
+                "actual_model_verification",
+                "final_response_hash",
+                "reported_model",
+                "tool_use_violation_count",
+            },
+        )
+        private_rows = [
+            json.loads(line)
+            for line in (run_dir / "private_case_records.jsonl").read_text().splitlines()
+        ]
+        self.assertIn("production_system_prompt_hash", private_rows[0]["provider_call_metadata"])
+        self.assertNotIn("raw_stdout", private_rows[0]["provider_call_metadata"])
+
+    def test_codex_tool_use_failure_never_produces_a_decision(self):
+        out = self.root / "codex-tool-use"
+
+        class FakeToolUseError(RuntimeError):
+            code = "tool_use_violation"
+
+        class FakeToolUseProvider:
+            model = "fake-codex-model"
+            request_count = 0
+            response_count = 0
+            last_call_metadata = None
+
+            def set_request_identity(self, **_identity):
+                return None
+
+            def complete(self, _system, _user):
+                self.request_count += 1
+                self.last_call_metadata = {
+                    "provider": "codex_exec",
+                    "requested_model": self.model,
+                    "tool_use_violation_count": 1,
+                    "event_type_counts": {"command_execution": 1},
+                    "status": "failed",
+                    "error_code": "tool_use_violation",
+                    "private_rationale": "MUST_NOT_LEAK",
+                }
+                raise FakeToolUseError("safe test failure")
+
+        with mock.patch.object(
+            qualification, "_build_provider", return_value=FakeToolUseProvider()
+        ), mock.patch.object(
+            qualification,
+            "provider_capability_snapshot",
+            side_effect=self._codex_capability_snapshot,
+        ), mock.patch.object(
+            qualification,
+            "_codex_static_identity",
+            side_effect=self._codex_static_identity,
+        ), redirect_stdout(io.StringIO()), redirect_stderr(
+            io.StringIO()
+        ), self.assertRaises(SystemExit) as raised:
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--confirm-real-codex-usage",
+                    "--max-cases",
+                    "1",
+                    "--out",
+                    str(out),
+                ]
+            )
+        self.assertEqual(raised.exception.code, 1)
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        events = (run_dir / "events.jsonl").read_text(encoding="utf-8")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "provider_setup")
+        self.assertEqual(
+            manifest["qualification"]["failure"]["provider_error_code"],
+            "tool_use_violation",
+        )
+        self.assertEqual(manifest["qualification"]["honest_n_cases"], 0)
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 1)
+        self.assertEqual(manifest["completion"]["provider_calls"]["failed"], 1)
+        self.assertNotIn("AgentDecisionParsed", events)
+        self.assertNotIn("MUST_NOT_LEAK", events)
+        self.assertIn("QualificationCaseFailed", events)
+        self.assertIn("RunFailed", events)
+        self.assertFalse((run_dir / "case_results.jsonl").exists())
+        self.assertFalse((run_dir / "qualification_summary.json").exists())
+
+    def test_workers_other_than_one_rejected_before_provider_construction(self):
+        out = self.root / "workers-rejected"
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("provider constructed with workers > 1"),
+        ) as build, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            qualification.main(
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--workers",
+                    "2",
+                    "--out",
+                    str(out),
+                ]
+            )
+        build.assert_not_called()
+        manifest = _read_json(_single_run(out) / "run_manifest.json")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+
+    def test_cli_hard_case_cap_fails_during_managed_config_validation(self):
+        out = self.root / "hard-cap-rejected"
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("provider constructed beyond hard case cap"),
+        ) as build, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            qualification.main(
+                ["--provider", "mock", "--max-cases", "49", "--out", str(out)]
+            )
+        build.assert_not_called()
+        manifest = _read_json(_single_run(out) / "run_manifest.json")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "config_validation")
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+
+    def test_cli_selection_is_recorded_without_constructing_dry_run_provider(self):
+        out = self.root / "selected-dry"
+        target = qualification.build_cases(qualification.load_protocol_bundle())[0]
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("dry-run constructed provider"),
+        ) as build, redirect_stdout(io.StringIO()):
+            qualification.main(
+                [
+                    "--provider",
+                    "mock",
+                    "--dry-run",
+                    "--case-id",
+                    target.case_id,
+                    "--fixture-id",
+                    target.fixture_id,
+                    "--persona-id",
+                    target.persona_id,
+                    "--max-cases",
+                    "1",
+                    "--out",
+                    str(out),
+                ]
+            )
+        build.assert_not_called()
+        summary = _read_json(_single_run(out) / "dry_run_summary.json")
+        self.assertEqual(summary["case_count"], 1)
+        self.assertEqual(summary["selection"]["selected_case_ids"], [target.case_id])
+        self.assertEqual(summary["persona_count"], 1)
+        self.assertEqual(summary["fixture_count"], 1)
 
     def test_external_provider_is_managed_rejection_before_provider_or_network(self):
         out = self.root / "external-rejected"

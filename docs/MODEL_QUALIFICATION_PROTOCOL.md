@@ -78,16 +78,19 @@ contract hash; full Prompt remains private.
 
 ## Provider guard
 
-Phase 1.2A accepts only:
+The frozen Phase 1.2A protocol accepts these offline execution paths:
 
 - `mock`: the existing deterministic in-process MockLLM;
 - `fake_test_provider`: a deterministic qualification-only test double that is
   not registered with the production LLM factory.
 
-`anthropic`, `openai`, `auto`, and every unknown provider are rejected at
-`provider_setup` before provider construction. Rejection produces a failed
-managed manifest with zero Provider calls and `network_access=false`. There is
-no override in this phase.
+Phase 1.2B-CX1 additionally registers experimental `codex_exec`. It remains
+blocked unless an explicit model, real-usage confirmation, bounded case count
+and one worker satisfy the managed guard; counts above one need matching second
+confirmation. Dry-run is allowed without constructing the Provider and defaults
+to one selected case. `anthropic`, `openai`, `auto`, and every unknown provider
+remain rejected before construction. Rejection produces a failed managed
+manifest with zero Provider calls and `network_access=false`.
 
 Provider capability snapshots are descriptive provenance, not model-quality
 scores. In particular, a real provider must not be described as deterministic
@@ -174,6 +177,8 @@ and private rationale are written only to `0600` private files. A missing
 `public_take` remains empty: reasoning is never substituted for it. Public
 errors do not contain a full prompt or raw response.
 
-Phase 1.2A performs no external model call. CodexExec remains a possible future
-experimental Provider and does not replace MiniMax or any other Provider by
-default.
+Phase 1.2A performed no external model call. Phase 1.2B-CX1 implements the
+experimental CodexExec adapter and explicit subset/real-use guards, but uses
+fake executables only and performs no real Codex task. CodexExec does not
+replace MiniMax or any other Provider by default; see
+[CODEX_QUALIFICATION_RUNBOOK.md](CODEX_QUALIFICATION_RUNBOOK.md).

@@ -317,6 +317,20 @@ python3 -m nmsim.run \
 `--replay-from` 也可指向 `llm_records.jsonl`。无论源路径形式如何，strict 契约相同；不存在失败后调用真实 Provider 的路径。
 上述 Record 命令的新 `llm_records.jsonl` 只会写出 schema 1.2；历史 1.0/1.1 记录不会因为被读取而改写。
 
+### CodexExec 的条件化身份
+
+`provider=codex_exec` 时，`model_request_config_summary` 额外包含
+`_provider_adapter_contract`，将 wrapper/schema，请求模型与 Codex 可执行文件
+字节 hash 纳入 `model_request_config_hash`。该 key 只在 CodexExec 条件下
+存在，因此 Mock、Anthropic 和 OpenAI-compatible 的已有 hash 不变。
+
+Codex recording 的 `model_config` 同时保存静态 adapter contract 与历史
+runtime identity；每个 request 额外保存 `provider_adapter_identity`，其中
+包含原生 system/user Prompt hash 和 `final_combined_input_hash`。Replay 会重算
+当前静态/request 身份，但不构造 Provider、不执行 version/help/login probe、
+不读取认证文件、不启动 Codex 进程且不访问网络。源记录中的
+runtime/auth 信息只是历史证据，不表示 Replay 再次验证了当前登录。
+
 ## 适用边界与剩余风险
 
 - 指纹边界是显式维护的文件集合；若未来新增会影响科学行为的模块而未纳入清单，可能出现错误兼容。新增机制必须同时更新清单和测试。

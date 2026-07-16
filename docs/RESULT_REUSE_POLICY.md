@@ -193,6 +193,10 @@ second copy of the same runs.
 
 ## Scope and limitations
 
+- CodexExec 的 wrapper/schema/binary/requested-model 身份通过条件化
+  `_provider_adapter_contract` 进入 `model_request_config_hash`，因此正式 child
+  reuse 会在该信息不同时以 model-request 身份不匹配拒绝。这一
+  扩展不改变 Mock/Anthropic/OpenAI-compatible 的已有 config hash。
 - Policy 1.0 authenticates what the current manifest and hashes can represent;
   it does not prove the causal validity of the experiment.
 - A cryptographic match does not make a real Provider deterministic.

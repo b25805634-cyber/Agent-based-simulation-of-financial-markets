@@ -44,6 +44,21 @@ class ManagedRunLifecycleError(RuntimeError):
     """A managed lifecycle operation violated the context contract."""
 
 
+def _provider_in_wrapper_chain(value: Any, provider_id: str) -> Any:
+    """Find one adapter through Record/Cache wrappers without importing it."""
+
+    current = value
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if getattr(current, "kind", None) == provider_id and callable(
+            getattr(current, "identity_snapshot", None)
+        ):
+            return current
+        current = getattr(current, "inner", None)
+    return None
+
+
 def validate_run_id(run_id: Optional[str]) -> Optional[str]:
     """Validate a bootstrap run id without touching the filesystem."""
 
@@ -491,7 +506,7 @@ class ManagedRunContext:
     def prepare_llm(self, replay_from: Optional[str] = None):
         """Construct Record or Strict Replay before entering the simulation."""
 
-        from .llm import CostTracker, build_llm
+        from .llm import CachingLLM, CostTracker, build_llm
         from .provider_capabilities import provider_capability_snapshot
         from .recording import (
             RecordingLLM,
@@ -542,7 +557,36 @@ class ManagedRunContext:
             connection_limit = 0
         else:
             self.set_stage("provider_setup")
-            inner, tracker = build_llm(cfg)
+            requested_provider = str(
+                os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
+            ).strip().lower()
+            if requested_provider == "codex_exec":
+                from .codex_exec import CodexExecError, CodexExecLLM
+
+                requested_model = (
+                    os.environ.get("LLM_MODEL")
+                    or getattr(cfg, "model", "")
+                    or ""
+                )
+                if not str(requested_model).strip():
+                    raise CodexExecError(
+                        "model_not_available",
+                        "CodexExec requires an explicit requested model identity",
+                    )
+                tracker = CostTracker()
+                codex_provider = CodexExecLLM(
+                    model=str(requested_model),
+                    binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+                    project_root=self.repo_root,
+                    run_id=self.run_id,
+                )
+                inner = CachingLLM(
+                    codex_provider,
+                    tracker,
+                    enabled=bool(getattr(cfg, "cache_enabled", False)),
+                )
+            else:
+                inner, tracker = build_llm(cfg)
             model_config = runtime_model_config(cfg, llm=inner)
             resolved_provider = model_config.get("resolved_provider")
             capability_snapshot = (
@@ -566,13 +610,46 @@ class ManagedRunContext:
                 compatibility_metadata=self.replay_compatibility,
             )
             mode = "record"
-            network_access = getattr(llm, "kind", "mock") != "mock"
-            connection_limit = 40 if model_config.get("resolved_provider") == "openai" else None
+            codex_provider = _provider_in_wrapper_chain(inner, "codex_exec")
+            if codex_provider is not None:
+                network_access = bool(codex_provider.network_access)
+                connection_limit = 1
+                self.manifest["llm"]["codex_exec"] = {
+                    **codex_provider.identity_snapshot(),
+                    "last_call": None,
+                    "call_history": [],
+                    "usage_totals": dict(codex_provider.usage_totals),
+                    "provider_calls": {
+                        "attempted": 0,
+                        "succeeded": 0,
+                        "failed": 0,
+                    },
+                }
+            else:
+                network_access = getattr(llm, "kind", "mock") != "mock"
+                connection_limit = (
+                    40 if model_config.get("resolved_provider") == "openai" else None
+                )
 
         self.active_llm = llm
         self.tracker = tracker
         self.llm_mode = mode
         self.network_access = bool(network_access)
+        if mode == "replay" and model_config.get("resolved_provider") == "codex_exec":
+            # Historical probe/auth evidence is descriptive; this replay run
+            # performs no login check and starts no Codex subprocess.
+            self.manifest["llm"]["codex_exec"] = {
+                "provider_adapter_contract": model_config.get(
+                    "provider_adapter_contract"
+                ),
+                "recorded_runtime_identity": model_config.get(
+                    "provider_runtime_identity"
+                ),
+                "response_source": "replay",
+                "auth_checked_this_run": False,
+                "subprocess_started_this_run": False,
+                "provider_calls": {"attempted": 0, "succeeded": 0, "failed": 0},
+            }
         if capability_snapshot is not None:
             # Descriptive provenance only: this field is not part of recording
             # schema 1.2 or the Strict Replay compatibility contract.
@@ -586,7 +663,9 @@ class ManagedRunContext:
             cache_enabled=model_config.get("cache_enabled"),
             model_config=model_config,
             network_access=bool(network_access),
-            application_concurrency_limit=None,
+            application_concurrency_limit=(
+                1 if model_config.get("resolved_provider") == "codex_exec" else None
+            ),
             provider_connection_limit=connection_limit,
         )
         return llm, tracker
@@ -633,6 +712,31 @@ class ManagedRunContext:
         else:
             sources.update({"provider": 0, "cache": 0, "replay": 0})
             provider_calls.update({"attempted": 0, "succeeded": 0, "failed": 0})
+
+        codex_provider = _provider_in_wrapper_chain(llm, "codex_exec")
+        if codex_provider is not None and self.llm_mode == "record":
+            # A batch can stop part-way through on a fail-closed Codex case.
+            # The adapter's process counters are therefore more honest than
+            # inferring every provider call from the logical batch size.
+            provider_calls.update(
+                {
+                    "attempted": int(codex_provider.provider_calls_attempted),
+                    "succeeded": int(codex_provider.provider_calls_succeeded),
+                    "failed": int(codex_provider.provider_calls_failed),
+                }
+            )
+            self.network_access = bool(codex_provider.network_access)
+            codex_manifest = self.manifest["llm"].setdefault("codex_exec", {})
+            codex_manifest.update(codex_provider.identity_snapshot())
+            codex_manifest["last_call"] = redact_secrets(
+                dict(codex_provider.last_call_metadata or {})
+            )
+            codex_manifest["call_history"] = [
+                redact_secrets(dict(item))
+                for item in codex_provider.call_metadata_history
+            ]
+            codex_manifest["usage_totals"] = dict(codex_provider.usage_totals)
+            codex_manifest["provider_calls"] = dict(provider_calls)
 
         requests["failed"] = max(0, attempted - completed)
         if llm is not None or tracker is not None:

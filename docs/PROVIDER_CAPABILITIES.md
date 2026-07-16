@@ -1,10 +1,11 @@
 # Provider Capability Contract
 
-Phase 1.2A introduces a declarative description of the provider adapters that
-already exist in the repository. It does not add a provider, construct a
-client, read credentials, or make a network request. The implementation is
-[`nmsim/provider_capabilities.py`](../nmsim/provider_capabilities.py), and the
-capability schema version is `1.0`.
+Phase 1.2A introduced a declarative description of the provider adapters that
+already existed in the repository. Phase 1.2B-CX1 retains capability schema
+`1.0` and registers the new experimental local `CodexExecLLM` adapter without
+changing the existing Provider implementations or defaults. Capability lookup
+does not construct a client, read credentials, or make a network request. The
+registry is [`nmsim/provider_capabilities.py`](../nmsim/provider_capabilities.py).
 
 A capability record describes what the current nmsim adapter exposes. It is not
 a claim about every feature offered by an upstream service. In particular,
@@ -18,6 +19,7 @@ model is not automatically a more realistic market Agent.
 | `mock` | `MockLLM.kind = "mock"` in `nmsim/llm.py` | In-process Python | No | Deterministic only for the same local seed and call order |
 | `anthropic` | `AnthropicLLM.kind = "anthropic"` in `nmsim/llm.py` | Anthropic SDK over HTTPS | Yes | None |
 | `openai` | `OpenAILLM.kind = "openai"` in `nmsim/llm.py` | OpenAI-compatible SDK over HTTP(S) | Yes | None |
+| `codex_exec` | experimental adapter outside the scientific-fingerprint-covered `nmsim.llm`; local CLI 0.144.4 probe | Official Codex local CLI | Yes | None |
 | `fake_test_provider` | Phase 1.2 qualification protocol test double only | In-process test double | No | Defined by its fixture implementation |
 
 `openai` is the existing OpenAI-compatible transport family. The configured
@@ -28,6 +30,16 @@ implementation in the current code.
 `implementation_scope=qualification_test_only`. It is not accepted by
 `nmsim.llm.build_llm`, cannot be selected for a normal simulation, and exists
 only so the qualification protocol can be tested without a network.
+
+`codex_exec` is marked `experimental=true` and
+`implementation_scope=experimental_local_research`. It is not an HTTP/API
+Provider and does not read Codex authentication files. The user owns login in
+the official CLI; nmsim accepts only a sanitized ChatGPT-managed status. Its
+0.144.4 capability probe found structured JSON/output-schema flags but no
+native batch, temperature, seed, or direct all-tools-off switch. The adapter
+therefore uses one isolated subprocess at a time and rejects any tool-operation
+event. Full boundaries and probe evidence are in
+[CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md).
 
 `auto` is deliberately absent. It is a selection policy: the current factory
 resolves it to `anthropic` when the relevant environment credential is present
@@ -59,7 +71,9 @@ Every record contains:
 - `capability_schema_version`
 
 The record also carries conservative detail for temperature behavior, usage
-metadata behavior, and implementation scope.
+metadata behavior, implementation scope, wrapper-level async behavior,
+structured-output behavior, the reviewed probe basis, and optional concrete
+wrapper/output-schema versions and hashes.
 
 ## Conservative interpretation
 
@@ -95,6 +109,21 @@ ids and makes no determinism claim.
 `external_network_expected=true` means that an adapter uses a network transport;
 it does not assert that a configured endpoint is on the public Internet.
 
+### CodexExec
+
+CodexExec launches the locally installed official CLI with `shell=False`, an
+isolated temporary cwd, stdin Prompt delivery, ephemeral/read-only execution,
+JSON events and a versioned output schema. The CLI process is synchronous and
+does not batch; `async_behavior=wrapper_level_only` means only that nmsim may
+wait on a process through an outer wrapper. It must not be interpreted as
+native concurrency. Usage metadata is conditional on the CLI event stream,
+and no Provider response-id support is claimed without a task event probe.
+
+The observed CLI is agentic and technically has tools. Tool access is forbidden
+for this market adapter, so any command/file/MCP/web/image operation is a hard
+Provider failure even in read-only mode. Temperature and seed are both
+unsupported here, and no deterministic behavior is claimed.
+
 Record/Replay and cache support describe the existing nmsim wrappers. They are
 not assertions that the upstream provider offers these features natively.
 
@@ -121,10 +150,12 @@ not, by themselves, invalidate a Phase 1.1 schema 1.2 recording. Strict Replay
 continues to use its existing scientific, configuration, Prompt, Persona,
 request, and schema contracts.
 
-## Phase 1.2A boundary
+## Phase 1.2B-CX1 boundary
 
-This phase performs no real-provider qualification and no external request. It
-does not change `build_llm`, Provider fallback behavior, defaults, Prompts,
+This phase performs no real-provider qualification and no real Codex task. It
+does not change Provider defaults, Prompts,
 Personas, parsing, simulation behavior, recording schema 1.2, or the scientific
-fingerprint. A capability declaration only makes the existing adapter boundary
-auditable; it does not authorize use of that adapter.
+fingerprint. Fake-executable tests exercise the adapter without quota or
+network use. A capability declaration makes the boundary auditable; it does
+not authorize a real case. The explicit pilot controls are documented in
+[CODEX_QUALIFICATION_RUNBOOK.md](CODEX_QUALIFICATION_RUNBOOK.md).

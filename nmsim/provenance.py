@@ -626,6 +626,7 @@ class RunManager:
             "ConfigAliasConflictError",
             "ConfigContractError",
             "ConfigSchemaError",
+            "CodexExecError",
             "ReplayMismatchError",
             "RecordingSchemaValidationError",
             "UnknownConfigFieldError",

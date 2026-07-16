@@ -42,7 +42,7 @@ Management policies are more precise than a managed/unmanaged boolean:
 | nmsim.run.run(config, ...) | validated Config → same path as CLI | Managed high-level Python API with filesystem effects | Same as CLI | Direct record or offline replay | Yes, direct_managed; this is not the low-level library API |
 | python3 -m experiments.run_seed | argparse → Config assembly → ManagedRunContext → live `run_sim`, strict replay, or provider-free `--price-csv` historical analysis → export | Managed, but previously duplicated lifecycle/provider/export logic | Canonical result, recording/manifest/events and non-overwriting legacy flat JSON | Direct, replay, or none in historical CSV analysis | Yes, direct_managed; `--price-csv` uses `run_kind=analysis` and is not child-run reuse |
 | python3 -m experiments.capture_traces | argparse → Config → build_llm → bare run_sim → JSON | Unmanaged | Ordinary trace JSON containing private reasoning | Direct | Yes only after direct_managed; rationale must be a 0600 private artifact |
-| python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Phase 1.2A Provider guard → ManagedRunContext → 48 cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Direct interface, but Phase 1.2A permits only Mock/Fake; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
+| python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Provider/real-use guard → ManagedRunContext → selected cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Mock/Fake; experimental CodexExec only behind explicit future-use confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
 
 Evidence in the Phase 1.1A source:
 
@@ -132,14 +132,17 @@ combines six existing Personas with eight frozen Observation fixtures, yielding
 behavioral diagnostics; it does not prescribe one correct trading action,
 clear a market, create a price path, or contribute a simulation replicate.
 
-Phase 1.2A accepts only `provider=mock` and the in-process
-`fake_test_provider`. `--dry-run` validates and hashes all 48 cases without
-constructing a Provider; Provider calls remain zero and network access is
-false. External Provider ids are rejected before construction. Real-model
-qualification is intentionally deferred, and the capability registry is a
-descriptive adapter contract rather than a model-quality score. See
-[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md) and
-[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md).
+Mock and the in-process `fake_test_provider` remain offline paths. Phase
+1.2B-CX1 registers experimental `codex_exec` for a future explicitly authorized
+pilot, but a live case requires the Provider id, real-use confirmation, bounded
+case count (plus a matching count confirmation above one), and one worker.
+`--dry-run` constructs no Provider; Provider calls remain zero and network
+access is false. This phase runs only fake-executable tests and does not consume
+Codex quota. The capability registry is a descriptive adapter contract rather
+than a model-quality score. See
+[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md),
+[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md), and
+[CODEX_QUALIFICATION_RUNBOOK.md](CODEX_QUALIFICATION_RUNBOOK.md).
 
 ## Test and diagnostic entrypoints
 

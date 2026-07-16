@@ -61,6 +61,13 @@ class ProviderCapability:
     temperature_behavior: str = "unsupported"
     usage_metadata_behavior: str = "unavailable"
     implementation_scope: str = "production"
+    async_behavior: str = "adapter_defined"
+    structured_output_behavior: str = "unavailable"
+    capability_probe_basis: str = "repository_implementation_review"
+    wrapper_protocol_version: Optional[str] = None
+    wrapper_source_hash: Optional[str] = None
+    structured_output_schema_version: Optional[str] = None
+    structured_output_schema_hash: Optional[str] = None
 
     def __post_init__(self) -> None:
         if not _PROVIDER_ID_RE.fullmatch(self.provider_id):
@@ -86,11 +93,13 @@ class ProviderCapability:
         return asdict(self)
 
 
-# Evidence for these records lives in nmsim.llm:
+# Evidence for the stable production records lives in nmsim.llm:
 # - MockLLM.kind == "mock"
 # - AnthropicLLM.kind == "anthropic"
 # - OpenAILLM.kind == "openai" (OpenAI-compatible transport, including the
 #   configured vLLM/MiniMax endpoint)
+# CodexExec deliberately lives in nmsim.codex_exec so adding the experimental
+# adapter does not change the scientific-fingerprint-covered nmsim.llm module.
 # Record/replay and caching are application wrappers, not upstream API claims.
 _CAPABILITIES: dict[str, ProviderCapability] = {
     "mock": ProviderCapability(
@@ -156,6 +165,45 @@ _CAPABILITIES: dict[str, ProviderCapability] = {
         temperature_behavior="sent_on_each_request",
         usage_metadata_behavior="optional_with_local_token_estimate_fallback",
     ),
+    # Experimental local adapter for the official Codex CLI.  This record is
+    # intentionally based on the local 0.144.4 CLI probe rather than on an
+    # assumption about an upstream API.  Authentication remains owned by the
+    # separately installed CLI; nmsim never reads Codex credential files.
+    "codex_exec": ProviderCapability(
+        provider_id="codex_exec",
+        transport_type="local_cli",
+        external_network_expected=True,
+        authentication_mode="chatgpt_managed_codex_cli",
+        supports_batch=False,
+        # The probed CLI is one process per turn.  Any async interface is an
+        # nmsim wrapper around that synchronous process, never native batching.
+        supports_async=False,
+        supports_temperature=False,
+        supports_seed=False,
+        supports_structured_output=True,
+        supports_usage_metadata=True,
+        supports_provider_response_id=False,
+        supports_record_replay=True,
+        supports_cache=True,
+        tool_access="technically_available_but_forbidden_for_this_provider",
+        deterministic_claim="none",
+        recommended_concurrency=1,
+        experimental=True,
+        temperature_behavior="unsupported_by_cli_probe",
+        usage_metadata_behavior="conditional_json_event_metadata",
+        implementation_scope="experimental_local_research",
+        async_behavior="wrapper_level_only",
+        structured_output_behavior="json_event_stream_plus_output_schema",
+        capability_probe_basis="local_codex_cli_0.144.4_exec_help",
+        wrapper_protocol_version="1.0",
+        wrapper_source_hash=(
+            "41b989cc843d3a6fe961db9dfd97325e847c20564e609b62ed8acb2e3777be75"
+        ),
+        structured_output_schema_version="1.0",
+        structured_output_schema_hash=(
+            "42bf5bd6aad5ee671c47fe72be0043b8cdc06a8ae3809b4dea4a4334fe534886"
+        ),
+    ),
     # A protocol-test double for model qualification.  It is deliberately not
     # selectable through nmsim.llm.build_llm and cannot contact a network.
     "fake_test_provider": ProviderCapability(
@@ -184,6 +232,7 @@ _CAPABILITIES: dict[str, ProviderCapability] = {
 
 
 PRODUCTION_PROVIDER_IDS = frozenset({"mock", "anthropic", "openai"})
+EXPERIMENTAL_PROVIDER_IDS = frozenset({"codex_exec"})
 QUALIFICATION_TEST_PROVIDER_IDS = frozenset({"fake_test_provider"})
 
 
@@ -191,6 +240,7 @@ def registered_provider_ids(*, include_test_providers: bool = True) -> tuple[str
     """Return reviewed ids in deterministic order."""
 
     ids = set(PRODUCTION_PROVIDER_IDS)
+    ids.update(EXPERIMENTAL_PROVIDER_IDS)
     if include_test_providers:
         ids.update(QUALIFICATION_TEST_PROVIDER_IDS)
     return tuple(sorted(ids))
@@ -290,6 +340,7 @@ def provider_capability_snapshot(
 
 __all__ = [
     "CAPABILITY_SCHEMA_VERSION",
+    "EXPERIMENTAL_PROVIDER_IDS",
     "PRODUCTION_PROVIDER_IDS",
     "QUALIFICATION_TEST_PROVIDER_IDS",
     "ProviderCapability",

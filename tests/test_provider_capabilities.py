@@ -8,6 +8,7 @@ import unittest
 import nmsim.llm as llm_module
 from nmsim.provider_capabilities import (
     CAPABILITY_SCHEMA_VERSION,
+    EXPERIMENTAL_PROVIDER_IDS,
     PRODUCTION_PROVIDER_IDS,
     UnknownProviderCapabilityError,
     get_provider_capability,
@@ -28,6 +29,9 @@ class ProviderCapabilityTests(unittest.TestCase):
             and isinstance(getattr(value, "kind", None), str)
             and callable(getattr(value, "complete", None))
         }
+        # Scientific-fingerprint-covered nmsim.llm contains only the stable
+        # production adapters. Experimental adapters live in separate modules
+        # and are audited by their own tests without changing that allowlist.
         self.assertEqual(actual, set(PRODUCTION_PROVIDER_IDS))
         self.assertTrue(actual.issubset(set(registered_provider_ids())))
 
@@ -104,6 +108,52 @@ class ProviderCapabilityTests(unittest.TestCase):
         self.assertFalse(capability.external_network_expected)
         self.assertTrue(capability.experimental)
         self.assertEqual(capability.implementation_scope, "qualification_test_only")
+
+    def test_codex_exec_capability_is_local_cli_and_conservative(self):
+        from nmsim.codex_exec import (
+            CODEX_DECISION_SCHEMA_HASH,
+            CODEX_DECISION_SCHEMA_VERSION,
+            CODEX_WRAPPER_PROTOCOL_VERSION,
+            CODEX_WRAPPER_SOURCE_HASH,
+        )
+
+        self.assertIn("codex_exec", EXPERIMENTAL_PROVIDER_IDS)
+        self.assertNotIn("codex_exec", PRODUCTION_PROVIDER_IDS)
+        capability = get_provider_capability("codex_exec")
+        self.assertEqual(capability.transport_type, "local_cli")
+        self.assertTrue(capability.external_network_expected)
+        self.assertEqual(
+            capability.authentication_mode, "chatgpt_managed_codex_cli"
+        )
+        self.assertFalse(capability.supports_batch)
+        self.assertFalse(capability.supports_async)
+        self.assertEqual(capability.async_behavior, "wrapper_level_only")
+        self.assertFalse(capability.supports_temperature)
+        self.assertFalse(capability.supports_seed)
+        self.assertTrue(capability.supports_structured_output)
+        self.assertTrue(capability.supports_usage_metadata)
+        self.assertEqual(capability.deterministic_claim, "none")
+        self.assertEqual(capability.recommended_concurrency, 1)
+        self.assertTrue(capability.experimental)
+        self.assertEqual(
+            capability.tool_access,
+            "technically_available_but_forbidden_for_this_provider",
+        )
+        self.assertEqual(
+            capability.capability_probe_basis,
+            "local_codex_cli_0.144.4_exec_help",
+        )
+        self.assertEqual(
+            capability.wrapper_protocol_version, CODEX_WRAPPER_PROTOCOL_VERSION
+        )
+        self.assertEqual(capability.wrapper_source_hash, CODEX_WRAPPER_SOURCE_HASH)
+        self.assertEqual(
+            capability.structured_output_schema_version,
+            CODEX_DECISION_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            capability.structured_output_schema_hash, CODEX_DECISION_SCHEMA_HASH
+        )
 
     def test_endpoint_snapshot_is_stable_and_does_not_disclose_secrets(self):
         first = provider_capability_snapshot(

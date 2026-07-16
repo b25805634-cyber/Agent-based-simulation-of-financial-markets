@@ -12,6 +12,7 @@ import enum
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 from collections.abc import Mapping
 from typing import Any, Optional
@@ -330,6 +331,27 @@ def build_effective_config_contract(
     model_summary = {
         name: normalised[name] for name in categories[MODEL_REQUEST]
     }
+    # Provider-adapter identity is conditional so the established Mock,
+    # Anthropic and OpenAI-compatible hashes remain byte-for-byte stable.  The
+    # Codex CLI wrapper/schema/binary affect the logical request even though
+    # they are not Config dataclass fields, so they must be bound here rather
+    # than hidden in descriptive manifest metadata.
+    requested_provider = str(
+        os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
+    ).strip().lower()
+    if requested_provider == "codex_exec":
+        from .codex_exec import codex_static_adapter_identity
+
+        model_summary["_provider_adapter_contract"] = (
+            codex_static_adapter_identity(
+                os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+                model=(
+                    os.environ.get("LLM_MODEL")
+                    or getattr(cfg, "model", "")
+                    or None
+                ),
+            )
+        )
     execution_summary = {
         "config_fields": {
             name: normalised[name] for name in categories[EXECUTION]

@@ -298,7 +298,11 @@ def build_argparser():
         default=None,
         help="strict Config mapping JSON; CLI flags override canonical fields",
     )
-    p.add_argument("--provider", default=None, help="auto|mock|anthropic|openai")
+    p.add_argument(
+        "--provider",
+        default=None,
+        help="auto|mock|anthropic|openai|codex_exec (experimental local CLI)",
+    )
     p.add_argument("--model", default=None)
     p.add_argument("--base-url", default=None, help="OpenAI-compatible base_url")
     p.add_argument("--api-key", default=None, help="OpenAI-compatible api_key")

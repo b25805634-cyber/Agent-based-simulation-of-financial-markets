@@ -1,10 +1,11 @@
-"""Offline-safe model qualification protocol for Phase 1.2A.
+"""Offline-safe model qualification protocol with guarded Codex pilots.
 
 This is a managed experiment entrypoint, but it is deliberately not a market
 simulation.  It applies the existing Agent prompt builders and Decision parser
-to a frozen matrix of observations.  Phase 1.2A permits only ``MockLLM`` and an
-in-process deterministic test double; every external provider is rejected
-before provider construction.
+to a frozen matrix of observations.  ``MockLLM`` and an in-process
+deterministic test double remain the default offline paths.  The experimental
+``codex_exec`` path is available only behind explicit case-count and real-use
+guards; dry-runs never construct it.
 
 The protocol is diagnostic rather than normative: no fixture has one required
 trading action, and behavioral output is reported as distributions and
@@ -44,8 +45,11 @@ PROTOCOL_PATH = PROTOCOL_ROOT / "protocol.json"
 OBSERVATIONS_PATH = PROTOCOL_ROOT / "observations.json"
 RUBRIC_PATH = PROTOCOL_ROOT / "rubric.json"
 VISIBILITY_CONTRACT_PATH = PROTOCOL_ROOT / "visibility_contract.json"
-ALLOWED_PROVIDER_IDS = frozenset({"mock", "fake_test_provider"})
+ALLOWED_PROVIDER_IDS = frozenset({"mock", "fake_test_provider", "codex_exec"})
 QUALIFICATION_OUTPUT_SCHEMA_VERSION = "1.1"
+QUALIFICATION_SELECTION_SCHEMA_VERSION = "1.0"
+CODEX_DEFAULT_MAX_CASES = 1
+QUALIFICATION_MAX_CASES = 48
 _REQUIRED_DECISION_FIELDS = frozenset(
     {"quantity", "limit_price", "sentiment", "public_take"}
 )
@@ -56,6 +60,46 @@ _FALLBACK_MARKERS = frozenset(
         "parse-retries-exhausted; holding",
     }
 )
+_PUBLIC_CODEX_METADATA_FIELDS = frozenset(
+    {
+        "provider",
+        "experimental",
+        "codex_cli_version",
+        "binary_identity",
+        "requested_model",
+        "auth_mode",
+        "auth_verified",
+        "codex_wrapper_protocol_version",
+        "wrapper_source_hash",
+        "decision_schema_version",
+        "decision_schema_hash",
+        "execution_flags",
+        "sandbox_mode",
+        "ephemeral",
+        "strict_config",
+        "auth_probe_performed",
+        "subprocess_started",
+        "tool_access",
+        "production_system_prompt_hash",
+        "production_user_prompt_hash",
+        "final_combined_input_hash",
+        "request_sequence",
+        "batch_identity",
+        "isolated_cwd_identity",
+        "response_source",
+        "process_exit_code",
+        "latency_seconds",
+        "timeout",
+        "event_type_counts",
+        "tool_use_violation_count",
+        "usage",
+        "reported_model",
+        "actual_model_verification",
+        "final_response_hash",
+        "status",
+        "error_code",
+    }
+)
 
 
 class QualificationProtocolError(ValueError):
@@ -63,7 +107,7 @@ class QualificationProtocolError(ValueError):
 
 
 class QualificationProviderGuardError(ValueError):
-    """Phase 1.2A rejected an external or unreviewed provider before I/O."""
+    """Qualification rejected an unconfirmed/unreviewed provider before I/O."""
 
 
 @dataclass(frozen=True)
@@ -73,6 +117,14 @@ class QualificationCase:
     persona_id: str
     fixture_id: str
     fixture: Mapping[str, Any]
+
+
+@dataclass(frozen=True)
+class QualificationSelection:
+    """Stable, public-safe identity for one qualification case subset."""
+
+    cases: tuple[QualificationCase, ...]
+    metadata: Mapping[str, Any]
 
 
 class FakeTestProvider:
@@ -487,6 +539,190 @@ def build_cases(bundle: Mapping[str, Any]) -> list[QualificationCase]:
     return cases
 
 
+def _normalise_selector(values: Optional[Sequence[str]]) -> tuple[str, ...]:
+    """Return a deterministic selector set without accepting empty ids."""
+
+    normalised = tuple(sorted({str(value).strip() for value in (values or ())}))
+    if "" in normalised:
+        raise QualificationProtocolError("qualification selector ids must be non-empty")
+    return normalised
+
+
+def select_cases(
+    bundle: Mapping[str, Any],
+    cases: Sequence[QualificationCase],
+    *,
+    provider_id: str,
+    case_ids: Optional[Sequence[str]] = None,
+    fixture_ids: Optional[Sequence[str]] = None,
+    persona_ids: Optional[Sequence[str]] = None,
+    max_cases: Optional[int] = None,
+) -> QualificationSelection:
+    """Select a stable qualification subset and bind its exact identity.
+
+    Selector order and duplicate selector flags do not affect the result.  Case
+    order always follows the frozen protocol request order.  ``codex_exec`` is
+    the only provider whose omitted ``max_cases`` is narrowed: it defaults to
+    one case; existing Mock/Fake invocations continue to select all 48.
+    """
+
+    provider = str(provider_id).strip().lower()
+    requested_case_ids = _normalise_selector(case_ids)
+    requested_fixture_ids = _normalise_selector(fixture_ids)
+    requested_persona_ids = _normalise_selector(persona_ids)
+    ordered_cases = tuple(sorted(cases, key=lambda item: item.request_order))
+    if len(ordered_cases) != QUALIFICATION_MAX_CASES:
+        raise QualificationProtocolError(
+            "qualification protocol must expose exactly {} cases before selection".format(
+                QUALIFICATION_MAX_CASES
+            )
+        )
+
+    known = {
+        "case_id": {case.case_id for case in ordered_cases},
+        "fixture_id": {case.fixture_id for case in ordered_cases},
+        "persona_id": {case.persona_id for case in ordered_cases},
+    }
+    requested_by_field = {
+        "case_id": requested_case_ids,
+        "fixture_id": requested_fixture_ids,
+        "persona_id": requested_persona_ids,
+    }
+    for field, requested in requested_by_field.items():
+        unknown = sorted(set(requested) - known[field])
+        if unknown:
+            raise QualificationProtocolError(
+                "unknown qualification {} selector(s): {}".format(
+                    field, ", ".join(unknown)
+                )
+            )
+
+    if max_cases is None:
+        effective_max_cases = (
+            CODEX_DEFAULT_MAX_CASES
+            if provider == "codex_exec"
+            else QUALIFICATION_MAX_CASES
+        )
+        max_cases_defaulted = True
+    else:
+        effective_max_cases = int(max_cases)
+        max_cases_defaulted = False
+    if effective_max_cases < 1 or effective_max_cases > QUALIFICATION_MAX_CASES:
+        raise QualificationProtocolError(
+            "--max-cases must be between 1 and {}".format(QUALIFICATION_MAX_CASES)
+        )
+
+    filtered = [
+        case
+        for case in ordered_cases
+        if (not requested_case_ids or case.case_id in requested_case_ids)
+        and (not requested_fixture_ids or case.fixture_id in requested_fixture_ids)
+        and (not requested_persona_ids or case.persona_id in requested_persona_ids)
+    ]
+    selected = tuple(filtered[:effective_max_cases])
+    if not selected:
+        raise QualificationProtocolError(
+            "qualification selectors produced an empty case set"
+        )
+
+    def in_order(attribute: str) -> list[str]:
+        return list(dict.fromkeys(str(getattr(case, attribute)) for case in selected))
+
+    identity = {
+        "selection_schema_version": QUALIFICATION_SELECTION_SCHEMA_VERSION,
+        "protocol_version": bundle["protocol"]["protocol_version"],
+        "protocol_hash": bundle["protocol_hash"],
+        "fixture_set_hash": bundle["fixture_set_hash"],
+        "rubric_hash": bundle["rubric_hash"],
+        "visibility_contract_hash": bundle["visibility_contract_hash"],
+        "selected_cases": [
+            {
+                "case_id": case.case_id,
+                "request_order": case.request_order,
+                "persona_id": case.persona_id,
+                "fixture_id": case.fixture_id,
+                "fixture_input_hash": case.fixture["input_hash"],
+            }
+            for case in selected
+        ],
+    }
+    full_case_ids = [case.case_id for case in ordered_cases]
+    selected_case_ids = [case.case_id for case in selected]
+    metadata = {
+        "selection_schema_version": QUALIFICATION_SELECTION_SCHEMA_VERSION,
+        "selection_hash": stable_json_hash(identity),
+        "protocol_hash": bundle["protocol_hash"],
+        "fixture_set_hash": bundle["fixture_set_hash"],
+        "rubric_hash": bundle["rubric_hash"],
+        "visibility_contract_hash": bundle["visibility_contract_hash"],
+        "requested": {
+            "case_ids": list(requested_case_ids),
+            "fixture_ids": list(requested_fixture_ids),
+            "persona_ids": list(requested_persona_ids),
+            "max_cases": max_cases,
+        },
+        "effective_max_cases": effective_max_cases,
+        "max_cases_defaulted": max_cases_defaulted,
+        "full_protocol_case_count": len(ordered_cases),
+        "selected_case_count": len(selected),
+        "selected_case_ids": selected_case_ids,
+        "selected_fixture_ids": in_order("fixture_id"),
+        "selected_persona_ids": in_order("persona_id"),
+        "is_full_qualification": selected_case_ids == full_case_ids,
+        "qualification_scope": (
+            "complete_protocol"
+            if selected_case_ids == full_case_ids
+            else "subset_pilot"
+        ),
+    }
+    return QualificationSelection(cases=selected, metadata=metadata)
+
+
+def _validate_provider_execution_guard(
+    args: argparse.Namespace, selection: QualificationSelection
+) -> None:
+    """Fail before provider construction unless real Codex use is explicit."""
+
+    if args.provider not in ALLOWED_PROVIDER_IDS:
+        raise QualificationProviderGuardError(
+            "qualification forbids external provider or unreviewed provider {!r}; "
+            "allowed providers are codex_exec, fake_test_provider and mock".format(
+                args.provider
+            )
+        )
+    if int(args.workers) != 1:
+        raise QualificationProviderGuardError(
+            "model qualification requires --workers 1"
+        )
+    if args.provider != "codex_exec":
+        return
+    if not str(args.model or "").strip():
+        raise QualificationProviderGuardError(
+            "codex_exec qualification requires an explicit --model"
+        )
+    if args.dry_run:
+        return
+    if not args.confirm_real_codex_usage:
+        raise QualificationProviderGuardError(
+            "codex_exec requires --confirm-real-codex-usage"
+        )
+    if args.max_cases is None:
+        raise QualificationProviderGuardError(
+            "real codex_exec qualification requires an explicit --max-cases"
+        )
+    effective_max = int(selection.metadata["effective_max_cases"])
+    confirmation = args.confirm_case_count
+    if effective_max > 1 and confirmation != effective_max:
+        raise QualificationProviderGuardError(
+            "codex_exec --max-cases greater than 1 requires matching "
+            "--confirm-case-count"
+        )
+    if confirmation is not None and int(confirmation) != effective_max:
+        raise QualificationProviderGuardError(
+            "--confirm-case-count must equal the effective --max-cases value"
+        )
+
+
 def _agents_by_persona(seed: int) -> dict[str, Agent]:
     cfg = Config(provider="mock", seed=seed, n_llm_agents=6, n_noise_agents=0)
     agents = make_agents(cfg)
@@ -820,13 +1056,64 @@ def _write_jsonl_exclusive(
     os.chmod(path, mode)
 
 
-def _build_provider(provider_id: str, seed: int):
+def _safe_codex_metadata(value: Any) -> Optional[dict[str, Any]]:
+    """Whitelist public-safe Codex metadata; never copy arbitrary adapter state."""
+
+    if not isinstance(value, Mapping):
+        return None
+    return {
+        key: value[key]
+        for key in sorted(_PUBLIC_CODEX_METADATA_FIELDS)
+        if key in value
+    }
+
+
+def _codex_static_identity(model: str) -> dict[str, Any]:
+    """Build wrapper/schema/binary identity without probing auth or spawning Codex."""
+
+    from nmsim.codex_exec import codex_static_adapter_identity
+
+    return _safe_codex_metadata(
+        codex_static_adapter_identity(
+            binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+            model=model,
+        )
+    ) or {}
+
+
+def _case_provider_identity(metadata: Optional[Mapping[str, Any]]) -> Optional[dict]:
+    """Return the intentionally small identity/error projection for public rows."""
+
+    if not metadata:
+        return None
+    keys = (
+        "final_response_hash",
+        "reported_model",
+        "actual_model_verification",
+        "tool_use_violation_count",
+        "error_code",
+    )
+    return {key: metadata.get(key) for key in keys if key in metadata}
+
+
+def _build_provider(provider_id: str, seed: int, model: str = ""):
     if provider_id == "mock":
         return MockLLM(seed=seed)
     if provider_id == "fake_test_provider":
         return FakeTestProvider(seed=seed)
+    if provider_id == "codex_exec":
+        # Deliberately lazy: --dry-run and rejected guard paths must neither
+        # import nor construct the external CLI adapter.
+        from nmsim.codex_exec import CodexExecLLM
+
+        return CodexExecLLM(
+            model=model or "",
+            binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+        )
     raise QualificationProviderGuardError(
-        "Phase 1.2A qualification forbids external provider {!r}".format(provider_id)
+        "qualification forbids external or unreviewed provider {!r}".format(
+            provider_id
+        )
     )
 
 
@@ -836,6 +1123,7 @@ def _initialise_manifest(
     args: argparse.Namespace,
     bundle: Mapping[str, Any],
     cases: Sequence[QualificationCase],
+    selection: QualificationSelection,
     capability_snapshot: Optional[Mapping[str, Any]],
 ) -> None:
     resolved_model = (
@@ -843,7 +1131,7 @@ def _initialise_manifest(
         if args.provider == "fake_test_provider"
         else "mock"
         if args.provider == "mock"
-        else None
+        else args.model or None
     )
     completion = manager.manifest["completion"]
     completion["simulation_runs"].update(
@@ -882,12 +1170,23 @@ def _initialise_manifest(
         "fixture_count": len(bundle["observations"]["fixtures"]),
         "case_count": len(cases),
         "case_identity_hashes": [case.case_id for case in cases],
+        "selection": dict(selection.metadata),
+        "selection_hash": selection.metadata["selection_hash"],
+        "qualification_scope": selection.metadata["qualification_scope"],
+        "selected_persona_count": len(selection.metadata["selected_persona_ids"]),
+        "selected_fixture_count": len(selection.metadata["selected_fixture_ids"]),
         "provider_requested": args.provider,
         "provider_resolved": args.provider if args.provider in ALLOWED_PROVIDER_IDS else None,
         "model_requested": args.model or None,
         "model_resolved": resolved_model,
         "provider_capability_snapshot": dict(capability_snapshot or {}),
+        "provider_static_identity": {},
+        "provider_call_metadata": [],
         "dry_run": bool(args.dry_run),
+        "real_codex_usage_confirmed": bool(
+            args.provider == "codex_exec" and args.confirm_real_codex_usage
+        ),
+        "workers": int(args.workers),
         "network_access": False,
         "qualification_cases": {
             "unit": "qualification_cases",
@@ -910,14 +1209,23 @@ def _dry_run_summary(
     args: argparse.Namespace,
     bundle: Mapping[str, Any],
     cases: Sequence[QualificationCase],
+    selection: QualificationSelection,
 ) -> dict[str, Any]:
+    capability_snapshot = manager.manifest["qualification"].get(
+        "provider_capability_snapshot", {}
+    )
+    capability = capability_snapshot.get("provider", capability_snapshot)
     return {
         "run_id": manager.run_id,
         "run_kind": "model_qualification",
         "dry_run": True,
         "case_count": len(cases),
-        "persona_count": len(bundle["protocol"]["persona_ids"]),
-        "fixture_count": len(bundle["observations"]["fixtures"]),
+        "persona_count": len(selection.metadata["selected_persona_ids"]),
+        "fixture_count": len(selection.metadata["selected_fixture_ids"]),
+        "full_protocol_case_count": selection.metadata["full_protocol_case_count"],
+        "selection": dict(selection.metadata),
+        "selection_hash": selection.metadata["selection_hash"],
+        "qualification_scope": selection.metadata["qualification_scope"],
         "protocol_version": bundle["protocol"]["protocol_version"],
         "protocol_hash": bundle["protocol_hash"],
         "observation_protocol_version": bundle["observations"]["protocol_version"],
@@ -930,7 +1238,10 @@ def _dry_run_summary(
         "provider": args.provider,
         "model_requested": args.model or None,
         "model_resolved": manager.manifest["qualification"]["model_resolved"],
-        "network_required": False,
+        "provider_static_identity": manager.manifest["qualification"].get(
+            "provider_static_identity", {}
+        ),
+        "network_required": bool(capability.get("external_network_expected", False)),
         "estimated_logical_requests": len(cases),
         "provider_calls": 0,
         "network_access": False,
@@ -942,19 +1253,32 @@ def run_qualification(
     manager: ManagedRunContext,
     *,
     provider_id: str,
+    model: str,
     seed: int,
     bundle: Mapping[str, Any],
     cases: Sequence[QualificationCase],
 ) -> dict[str, Any]:
-    provider = _build_provider(provider_id, seed)
+    external_network_expected = provider_id == "codex_exec"
+    # Capability expectation and observed access are distinct.  Capability
+    # probing/auth setup is not a model request; the adapter flips its observed
+    # flag only when it actually starts an exec turn.
+    manager.network_access = False
+    provider = _build_provider(provider_id, seed, model)
     tracker = CostTracker()
     manager.active_llm = provider
     manager.tracker = tracker
     manager.llm_mode = "record"
-    manager.network_access = False
+    resolved_model = getattr(provider, "model", model or "mock")
+    manager.manifest["qualification"]["model_resolved"] = resolved_model
+    manager.manifest["qualification"]["network_access"] = False
+    identity_snapshot = getattr(provider, "identity_snapshot", None)
+    if callable(identity_snapshot):
+        manager.manifest["qualification"]["provider_runtime_identity"] = (
+            _safe_codex_metadata(identity_snapshot()) or {}
+        )
     manager.register_llm_runtime(
         provider=provider_id,
-        model=getattr(provider, "model", "mock"),
+        model=resolved_model,
         mode="model_qualification",
         cache_enabled=False,
         network_access=False,
@@ -971,6 +1295,9 @@ def run_qualification(
             0, qualification["planned"] - qualification["attempted"]
         )
         system, user = _build_prompt(case, agents[case.persona_id], provider_id)
+        set_request_identity = getattr(provider, "set_request_identity", None)
+        if callable(set_request_identity):
+            set_request_identity(run_id=manager.run_id, agent_id=case.persona_id)
         prompt_hash = hashlib.sha256(
             (system + "\0" + user).encode("utf-8")
         ).hexdigest()
@@ -992,6 +1319,13 @@ def run_qualification(
         except Exception as error:
             elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
             qualification["failed"] += 1
+            provider_metadata = _safe_codex_metadata(
+                getattr(provider, "last_call_metadata", None)
+            )
+            if provider_metadata is not None:
+                manager.manifest["qualification"]["provider_call_metadata"].append(
+                    provider_metadata
+                )
             failed = {
                 "case_id": case.case_id,
                 "request_order": case.request_order,
@@ -999,10 +1333,18 @@ def run_qualification(
                 "fixture_id": case.fixture_id,
                 "status": "provider_failed",
                 "provider_error_type": type(error).__name__,
+                "provider_error_code": getattr(error, "code", None),
+                "provider_identity": _case_provider_identity(provider_metadata),
                 "latency_ms": elapsed_ms,
             }
             public_results.append(failed)
-            private_results.append({**failed, "provider_error_detail": str(error)})
+            private_results.append(
+                {
+                    **failed,
+                    "provider_error_detail": str(error),
+                    "provider_call_metadata": provider_metadata,
+                }
+            )
             manager.events.emit(
                 "QualificationCaseFailed",
                 agent_id=case.persona_id,
@@ -1010,12 +1352,43 @@ def run_qualification(
                     "case_id": case.case_id,
                     "fixture_id": case.fixture_id,
                     "provider_error_type": type(error).__name__,
+                    "provider_error_code": getattr(error, "code", None),
+                    "provider_call_metadata": provider_metadata,
                 },
                 private_data={"provider_error_detail": str(error)},
             )
+            if provider_id == "codex_exec":
+                # Codex is an agentic CLI.  Any adapter failure (especially a
+                # tool event) invalidates the managed pilot rather than being
+                # aggregated into an apparently successful qualification.
+                qualification["skipped"] = max(
+                    0,
+                    qualification["planned"]
+                    - qualification["completed"]
+                    - qualification["failed"],
+                )
+                manager.manifest["qualification"]["honest_n_cases"] = (
+                    qualification["completed"]
+                )
+                manager.manifest["qualification"]["failure"] = dict(failed)
+                manager.manifest["honest_n_cases"] = qualification["completed"]
+                manager.manifest["honest_n_runs"] = 0
+                manager.sync_llm_accounting(provider, tracker)
+                manager.manifest["qualification"]["network_access"] = bool(
+                    getattr(provider, "network_access", False)
+                )
+                manager._write()
+                raise
             continue
         elapsed_ms = round((time.perf_counter() - started) * 1000.0, 3)
         response_hash = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        provider_metadata = _safe_codex_metadata(
+            getattr(provider, "last_call_metadata", None)
+        )
+        if provider_metadata is not None:
+            manager.manifest["qualification"]["provider_call_metadata"].append(
+                provider_metadata
+            )
         manager.events.emit(
             "LLMResponseRecorded",
             agent_id=case.persona_id,
@@ -1024,6 +1397,7 @@ def run_qualification(
                 "fixture_id": case.fixture_id,
                 "source": "provider",
                 "response_hash": response_hash,
+                "provider_call_metadata": provider_metadata,
             },
             private_data={"raw_response": raw},
         )
@@ -1038,6 +1412,7 @@ def run_qualification(
                 ),
                 "source_fixture_hash": case.fixture["input_hash"],
                 "visibility_contract_hash": bundle["visibility_contract_hash"],
+                "provider_identity": _case_provider_identity(provider_metadata),
             }
         )
         public["latency_ms"] = elapsed_ms
@@ -1048,6 +1423,7 @@ def run_qualification(
                 "prompt_hash": prompt_hash,
                 "response_hash": response_hash,
                 "latency_ms": elapsed_ms,
+                "provider_call_metadata": provider_metadata,
             }
         )
         public_results.append(public)
@@ -1064,6 +1440,7 @@ def run_qualification(
                 "limit_price": public["limit_price"],
                 "sentiment": public["sentiment"],
                 "public_take": public["public_take"],
+                "provider_call_metadata": provider_metadata,
             },
             private_data={"private_rationale": private["parsed_decision"]["rationale"]},
         )
@@ -1079,6 +1456,8 @@ def run_qualification(
     manager.manifest["honest_n_cases"] = qualification["completed"]
     manager.manifest["honest_n_runs"] = 0
     manager.sync_llm_accounting(provider, tracker)
+    actual_network_access = bool(getattr(provider, "network_access", False))
+    manager.manifest["qualification"]["network_access"] = actual_network_access
     aggregate = aggregate_results(public_results)
     aggregate["engineering"]["provider_failure_count"] = qualification["failed"]
     summary = {
@@ -1095,6 +1474,11 @@ def run_qualification(
             "visibility_contract_version"
         ],
         "visibility_contract_hash": bundle["visibility_contract_hash"],
+        "selection": dict(manager.manifest["qualification"]["selection"]),
+        "selection_hash": manager.manifest["qualification"]["selection_hash"],
+        "qualification_scope": manager.manifest["qualification"][
+            "qualification_scope"
+        ],
         "provider": provider_id,
         "model_requested": manager.manifest["qualification"]["model_requested"],
         "model_resolved": manager.manifest["qualification"]["model_resolved"],
@@ -1120,8 +1504,13 @@ def run_qualification(
         },
         "honest_n_cases": qualification["completed"],
         "honest_n_runs": 0,
-        "network_access": False,
-        "token_usage": None,
+        "network_access": actual_network_access,
+        "external_network_expected": external_network_expected,
+        "token_usage": (
+            dict(getattr(provider, "usage_totals"))
+            if isinstance(getattr(provider, "usage_totals", None), Mapping)
+            else None
+        ),
         "metrics": aggregate,
         "case_results_file": "case_results.jsonl",
         "private_case_records_file": "private_case_records.jsonl",
@@ -1140,6 +1529,13 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--model", default="")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--case-id", action="append", default=[])
+    parser.add_argument("--fixture-id", action="append", default=[])
+    parser.add_argument("--persona-id", action="append", default=[])
+    parser.add_argument("--max-cases", type=int, default=None)
+    parser.add_argument("--confirm-real-codex-usage", action="store_true")
+    parser.add_argument("--confirm-case-count", type=int, default=None)
+    parser.add_argument("--workers", type=int, default=1)
     parser.add_argument("--out", default="qualification_results")
     parser.add_argument("--run-id", default=None)
     return parser
@@ -1162,8 +1558,22 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     try:
         args = build_argparser().parse_args(args_list)
         args.provider = str(args.provider).strip().lower()
+        if args.provider == "codex_exec" and str(args.model or "").strip():
+            from nmsim.codex_exec import validate_codex_model_identity
+
+            args.model = validate_codex_model_identity(args.model)
         bundle = load_protocol_bundle()
-        cases = build_cases(bundle)
+        all_cases = build_cases(bundle)
+        selection = select_cases(
+            bundle,
+            all_cases,
+            provider_id=args.provider,
+            case_ids=args.case_id,
+            fixture_ids=args.fixture_id,
+            persona_ids=args.persona_id,
+            max_cases=args.max_cases,
+        )
+        cases = list(selection.cases)
     except (ManagedCLIError, OSError, QualificationProtocolError, ValueError) as error:
         fail_cli(bootstrap, error, failure_stage="config_validation")
 
@@ -1196,35 +1606,45 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     try:
         with manager:
             manager.set_stage("provider_setup")
-            if args.provider not in ALLOWED_PROVIDER_IDS:
+            try:
+                _validate_provider_execution_guard(args, selection)
+            except QualificationProviderGuardError:
                 _initialise_manifest(
                     manager,
                     args=args,
                     bundle=bundle,
                     cases=cases,
+                    selection=selection,
                     capability_snapshot=None,
                 )
-                raise QualificationProviderGuardError(
-                    "Phase 1.2A qualification forbids external provider {!r}; "
-                    "allowed providers are fake_test_provider and mock".format(
-                        args.provider
-                    )
-                )
+                raise
             capability = provider_capability_snapshot(args.provider)
             _initialise_manifest(
                 manager,
                 args=args,
                 bundle=bundle,
                 cases=cases,
+                selection=selection,
                 capability_snapshot=capability,
             )
-            manager.register_llm_runtime(
-                provider=args.provider,
-                model=args.model or (
+            if args.provider == "codex_exec":
+                manager.manifest["qualification"]["provider_static_identity"] = (
+                    _codex_static_identity(args.model)
+                )
+                manager._write()
+            preliminary_model = (
+                args.model
+                or (
                     "fixture-defined-test-double-v1"
                     if args.provider == "fake_test_provider"
                     else "mock"
-                ),
+                    if args.provider == "mock"
+                    else None
+                )
+            )
+            manager.register_llm_runtime(
+                provider=args.provider,
+                model=preliminary_model,
                 mode="qualification_dry_run" if args.dry_run else "model_qualification",
                 cache_enabled=False,
                 network_access=False,
@@ -1232,7 +1652,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             manager.set_stage("result_export" if args.dry_run else "provider_setup")
             if args.dry_run:
-                summary = _dry_run_summary(manager, args, bundle, cases)
+                summary = _dry_run_summary(
+                    manager, args, bundle, cases, selection
+                )
                 _write_json_exclusive(manager.run_dir / "dry_run_summary.json", summary)
                 manager.finish()
                 print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
@@ -1241,6 +1663,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             payload = run_qualification(
                 manager,
                 provider_id=args.provider,
+                model=args.model,
                 seed=args.seed,
                 bundle=bundle,
                 cases=cases,
@@ -1265,6 +1688,12 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     except QualificationProviderGuardError as error:
         print(str(error), file=sys.stderr)
         raise SystemExit(2)
+    except Exception as error:
+        if args.provider == "codex_exec":
+            code = getattr(error, "code", type(error).__name__)
+            print("codex_exec qualification failed: {}".format(code), file=sys.stderr)
+            raise SystemExit(1) from None
+        raise
 
 
 if __name__ == "__main__":
@@ -1277,7 +1706,9 @@ __all__ = [
     "OBSERVATIONS_PATH",
     "PROTOCOL_PATH",
     "QUALIFICATION_OUTPUT_SCHEMA_VERSION",
+    "QUALIFICATION_SELECTION_SCHEMA_VERSION",
     "QualificationCase",
+    "QualificationSelection",
     "QualificationProtocolError",
     "QualificationProviderGuardError",
     "RUBRIC_PATH",
@@ -1291,5 +1722,6 @@ __all__ = [
     "load_protocol_bundle",
     "main",
     "run_qualification",
+    "select_cases",
     "stable_json_hash",
 ]

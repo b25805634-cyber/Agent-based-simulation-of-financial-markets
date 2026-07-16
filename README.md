@@ -28,6 +28,7 @@ refactored into the typed `nmsim/` package and extended through Tasks 1–3.
 | `entrypoints.py` | auditable registry of official, diagnostic, library and unsupported execution surfaces. |
 | `result_reuse.py` | versioned child-run identity and artifact-integrity gate for formal experiment resume. |
 | `provider_capabilities.py` | conservative, secret-free capability descriptions for reviewed Provider adapters; it does not construct a Provider or score model quality. |
+| `codex_exec.py` | experimental local adapter for official `codex exec`; isolated subprocess, structured output, tool-event rejection, no credential-file access. |
 | `sim.py` | the round loop tying it all together. |
 | `run.py` | CLI entry point → CSVs, plots, cost print. |
 
@@ -107,9 +108,12 @@ hashed `legacy_unverified_input`; that is analysis input, not child-run reuse.
 behavioral diagnostics before any real-model sampling; it is not a
 single-correct-action test, creates no price trajectory, and contributes zero
 simulation `honest_n_runs`. Phase 1.2A permits only Mock and the internal Fake
-test double and rejects external Providers before construction. Provider
-capability snapshots describe adapter behavior and network/auth boundaries;
-they do not establish model quality, realism, or deterministic responses.
+test double by default. Phase 1.2B-CX1 adds experimental `codex_exec`, but a
+future live qualification requires an explicit model, real-usage confirmation,
+an explicit bounded case count, and one worker; dry-run constructs no Provider.
+Provider capability snapshots describe adapter behavior and network/auth
+boundaries; they do not establish model quality, realism, or deterministic
+responses.
 
 See [`docs/RUN_PROVENANCE.md`](docs/RUN_PROVENANCE.md) for schemas and replay,
 [`docs/MANAGED_RUN_LIFECYCLE.md`](docs/MANAGED_RUN_LIFECYCLE.md) for startup and
@@ -119,6 +123,10 @@ for units and honest-N. Phase 1.2A's exact boundaries are in
 [`docs/RESULT_REUSE_POLICY.md`](docs/RESULT_REUSE_POLICY.md),
 [`docs/PROVIDER_CAPABILITIES.md`](docs/PROVIDER_CAPABILITIES.md), and
 [`docs/MODEL_QUALIFICATION_PROTOCOL.md`](docs/MODEL_QUALIFICATION_PROTOCOL.md).
+The experimental Codex CLI boundary and future quota-guarded pilot procedure
+are documented in [`docs/CODEX_EXEC_PROVIDER.md`](docs/CODEX_EXEC_PROVIDER.md)
+and [`docs/CODEX_QUALIFICATION_RUNBOOK.md`](docs/CODEX_QUALIFICATION_RUNBOOK.md).
+Phase 1.2B-CX1 uses fake executables only and runs no real Codex model task.
 
 `nmsim.sim.run_sim` remains a low-level in-memory library API. Tests and
 diagnostics may explicitly use `NullRunContext`, but those results are not

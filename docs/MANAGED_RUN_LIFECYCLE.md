@@ -178,7 +178,7 @@ Batch driver 的 parent `ManagedRunContext` 在启动 child 前使用
 ## Model qualification 生命周期
 
 `experiments.model_qualification` 使用同一个 managed 终态机，但
-`run_kind=model_qualification` 且不调用 `run_sim`。Phase 1.2A 只允许 Mock 和 qualification-only Fake；外部 Provider 在构造前以 `provider_setup` 失败，Provider call 为 0、`network_access=false`。`--dry-run` 同样不构造 Provider，只固化 protocol/fixture/rubric identity 和 48-case 计划。
+`run_kind=model_qualification` 且不调用 `run_sim`。Mock 和 qualification-only Fake 保持离线路径；Phase 1.2B-CX1 仅为实验性 CodexExec 增加显式 model、真实使用确认、case-count 二次确认和单 worker 保护。未满足保护或选择其他外部 Provider 时，在构造前以 `provider_setup` 失败，Provider call 为 0、`network_access=false`。`--dry-run` 不构造 Provider；Mock/Fake 固化完整 48-case 计划，CodexExec 默认只固化 1-case pilot 选择及其 hash。
 
 完成的 Mock qualification 把 case 计入 logical request/decision 以及独立的 `qualification_cases`，但 `simulation_runs=0`、`rounds=0`、`honest_n_runs=0`。公共 case/aggregate 文件不含 private rationale；完整 Prompt、raw response 和 rationale 只进入 `0600` 私有文件。该协议不是“唯一正确动作”测试，也不代替统计验证。
 
