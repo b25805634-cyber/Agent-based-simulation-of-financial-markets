@@ -532,6 +532,12 @@ class ManagedRunContext:
             source_config = recorded_model_config(replay_from)
             model_config = runtime_model_config(cfg, recorded=source_config)
             resolved_provider = model_config.get("resolved_provider")
+            adapter_contract = model_config.get("provider_adapter_contract")
+            codex_reasoning_effort = (
+                adapter_contract.get("reasoning_effort")
+                if isinstance(adapter_contract, Mapping)
+                else None
+            )
             capability_snapshot = (
                 None
                 if resolved_provider in (None, "", "none")
@@ -541,6 +547,18 @@ class ManagedRunContext:
                         os.environ.get("OPENAI_BASE_URL")
                         or getattr(cfg, "openai_base_url", None)
                         if resolved_provider == "openai"
+                        else None
+                    ),
+                    model=(
+                        str(model_config.get("model"))
+                        if resolved_provider == "codex_exec"
+                        and model_config.get("model") is not None
+                        else None
+                    ),
+                    reasoning_effort=(
+                        str(codex_reasoning_effort)
+                        if resolved_provider == "codex_exec"
+                        and codex_reasoning_effort is not None
                         else None
                     ),
                 )
@@ -561,7 +579,11 @@ class ManagedRunContext:
                 os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
             ).strip().lower()
             if requested_provider == "codex_exec":
-                from .codex_exec import CodexExecError, CodexExecLLM
+                from .codex_exec import (
+                    CodexExecError,
+                    CodexExecLLM,
+                    codex_reasoning_effort_from_environment,
+                )
 
                 requested_model = (
                     os.environ.get("LLM_MODEL")
@@ -573,9 +595,19 @@ class ManagedRunContext:
                         "model_not_available",
                         "CodexExec requires an explicit requested model identity",
                     )
+                reasoning_effort = (
+                    getattr(cfg, "codex_reasoning_effort", None)
+                    or codex_reasoning_effort_from_environment()
+                )
+                if reasoning_effort is None:
+                    raise CodexExecError(
+                        "model_not_available",
+                        "CodexExec requires an explicit reasoning effort",
+                    )
                 tracker = CostTracker()
                 codex_provider = CodexExecLLM(
                     model=str(requested_model),
+                    reasoning_effort=reasoning_effort,
                     binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
                     project_root=self.repo_root,
                     run_id=self.run_id,
@@ -589,6 +621,12 @@ class ManagedRunContext:
                 inner, tracker = build_llm(cfg)
             model_config = runtime_model_config(cfg, llm=inner)
             resolved_provider = model_config.get("resolved_provider")
+            adapter_contract = model_config.get("provider_adapter_contract")
+            codex_reasoning_effort = (
+                adapter_contract.get("reasoning_effort")
+                if isinstance(adapter_contract, Mapping)
+                else None
+            )
             capability_snapshot = (
                 None
                 if resolved_provider in (None, "", "none")
@@ -598,6 +636,18 @@ class ManagedRunContext:
                         os.environ.get("OPENAI_BASE_URL")
                         or getattr(cfg, "openai_base_url", None)
                         if resolved_provider == "openai"
+                        else None
+                    ),
+                    model=(
+                        str(model_config.get("model"))
+                        if resolved_provider == "codex_exec"
+                        and model_config.get("model") is not None
+                        else None
+                    ),
+                    reasoning_effort=(
+                        str(codex_reasoning_effort)
+                        if resolved_provider == "codex_exec"
+                        and codex_reasoning_effort is not None
                         else None
                     ),
                 )
@@ -648,6 +698,13 @@ class ManagedRunContext:
                 "response_source": "replay",
                 "auth_checked_this_run": False,
                 "subprocess_started_this_run": False,
+                "provider_transport_network_expected": True,
+                "provider_transport_network_declared_or_observed": (
+                    "not_observed_replay"
+                ),
+                "agent_tool_network_enabled": False,
+                "tool_calls_observed": 0,
+                "network_access": False,
                 "provider_calls": {"attempted": 0, "succeeded": 0, "failed": 0},
             }
         if capability_snapshot is not None:

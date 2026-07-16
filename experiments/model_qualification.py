@@ -67,8 +67,10 @@ _PUBLIC_CODEX_METADATA_FIELDS = frozenset(
         "codex_cli_version",
         "binary_identity",
         "requested_model",
+        "reasoning_effort",
         "auth_mode",
         "auth_verified",
+        "forced_login_method",
         "codex_wrapper_protocol_version",
         "wrapper_source_hash",
         "decision_schema_version",
@@ -77,9 +79,29 @@ _PUBLIC_CODEX_METADATA_FIELDS = frozenset(
         "sandbox_mode",
         "ephemeral",
         "strict_config",
+        "tool_surface_contract",
+        "tool_surface_contract_hash",
+        "tool_surface_verified",
+        "capability_probe_method",
         "auth_probe_performed",
         "subprocess_started",
+        "model_turn_subprocess_started",
+        "real_use_ready",
+        "real_use_readiness",
+        "real_use_missing_requirements",
         "tool_access",
+        "provider_transport_network_expected",
+        "provider_transport_network_declared_or_observed",
+        "agent_tool_network_enabled",
+        "web_search_mode",
+        "shell_tool_enabled",
+        "unified_exec_enabled",
+        "apps_enabled",
+        "view_image_enabled",
+        "history_persistence",
+        "agent_reasoning_events_hidden",
+        "show_raw_agent_reasoning",
+        "personality",
         "production_system_prompt_hash",
         "production_user_prompt_hash",
         "final_combined_input_hash",
@@ -92,6 +114,9 @@ _PUBLIC_CODEX_METADATA_FIELDS = frozenset(
         "timeout",
         "event_type_counts",
         "tool_use_violation_count",
+        "tool_calls_observed",
+        "reasoning_event_count",
+        "effective_config_anomaly",
         "usage",
         "reported_model",
         "actual_model_verification",
@@ -696,12 +721,16 @@ def _validate_provider_execution_guard(
         )
     if args.provider != "codex_exec":
         return
+    if args.dry_run:
+        return
     if not str(args.model or "").strip():
         raise QualificationProviderGuardError(
             "codex_exec qualification requires an explicit --model"
         )
-    if args.dry_run:
-        return
+    if not str(args.reasoning_effort or "").strip():
+        raise QualificationProviderGuardError(
+            "codex_exec qualification requires an explicit --reasoning-effort"
+        )
     if not args.confirm_real_codex_usage:
         raise QualificationProviderGuardError(
             "codex_exec requires --confirm-real-codex-usage"
@@ -1068,7 +1097,9 @@ def _safe_codex_metadata(value: Any) -> Optional[dict[str, Any]]:
     }
 
 
-def _codex_static_identity(model: str) -> dict[str, Any]:
+def _codex_static_identity(
+    model: str, reasoning_effort: Optional[str]
+) -> dict[str, Any]:
     """Build wrapper/schema/binary identity without probing auth or spawning Codex."""
 
     from nmsim.codex_exec import codex_static_adapter_identity
@@ -1076,7 +1107,8 @@ def _codex_static_identity(model: str) -> dict[str, Any]:
     return _safe_codex_metadata(
         codex_static_adapter_identity(
             binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
-            model=model,
+            model=model or None,
+            reasoning_effort=reasoning_effort or None,
         )
     ) or {}
 
@@ -1091,12 +1123,18 @@ def _case_provider_identity(metadata: Optional[Mapping[str, Any]]) -> Optional[d
         "reported_model",
         "actual_model_verification",
         "tool_use_violation_count",
+        "tool_calls_observed",
         "error_code",
     )
     return {key: metadata.get(key) for key in keys if key in metadata}
 
 
-def _build_provider(provider_id: str, seed: int, model: str = ""):
+def _build_provider(
+    provider_id: str,
+    seed: int,
+    model: str = "",
+    reasoning_effort: str = "",
+):
     if provider_id == "mock":
         return MockLLM(seed=seed)
     if provider_id == "fake_test_provider":
@@ -1108,6 +1146,7 @@ def _build_provider(provider_id: str, seed: int, model: str = ""):
 
         return CodexExecLLM(
             model=model or "",
+            reasoning_effort=reasoning_effort or "",
             binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
         )
     raise QualificationProviderGuardError(
@@ -1178,6 +1217,7 @@ def _initialise_manifest(
         "provider_requested": args.provider,
         "provider_resolved": args.provider if args.provider in ALLOWED_PROVIDER_IDS else None,
         "model_requested": args.model or None,
+        "reasoning_effort_requested": args.reasoning_effort or None,
         "model_resolved": resolved_model,
         "provider_capability_snapshot": dict(capability_snapshot or {}),
         "provider_static_identity": {},
@@ -1188,6 +1228,12 @@ def _initialise_manifest(
         ),
         "workers": int(args.workers),
         "network_access": False,
+        "provider_transport_network_expected": args.provider == "codex_exec",
+        "provider_transport_network_declared_or_observed": (
+            "declared_expected" if args.provider == "codex_exec" else "not_expected"
+        ),
+        "agent_tool_network_enabled": False,
+        "tool_calls_observed": 0,
         "qualification_cases": {
             "unit": "qualification_cases",
             "planned": len(cases),
@@ -1237,6 +1283,7 @@ def _dry_run_summary(
         "visibility_contract_hash": bundle["visibility_contract_hash"],
         "provider": args.provider,
         "model_requested": args.model or None,
+        "reasoning_effort_requested": args.reasoning_effort or None,
         "model_resolved": manager.manifest["qualification"]["model_resolved"],
         "provider_static_identity": manager.manifest["qualification"].get(
             "provider_static_identity", {}
@@ -1245,6 +1292,12 @@ def _dry_run_summary(
         "estimated_logical_requests": len(cases),
         "provider_calls": 0,
         "network_access": False,
+        "provider_transport_network_expected": args.provider == "codex_exec",
+        "provider_transport_network_declared_or_observed": (
+            "declared_expected" if args.provider == "codex_exec" else "not_expected"
+        ),
+        "agent_tool_network_enabled": False,
+        "tool_calls_observed": 0,
         "output_directory": str(manager.run_dir),
     }
 
@@ -1257,13 +1310,16 @@ def run_qualification(
     seed: int,
     bundle: Mapping[str, Any],
     cases: Sequence[QualificationCase],
+    reasoning_effort: str = "",
 ) -> dict[str, Any]:
     external_network_expected = provider_id == "codex_exec"
     # Capability expectation and observed access are distinct.  Capability
     # probing/auth setup is not a model request; the adapter flips its observed
     # flag only when it actually starts an exec turn.
     manager.network_access = False
-    provider = _build_provider(provider_id, seed, model)
+    provider = _build_provider(
+        provider_id, seed, model, reasoning_effort=reasoning_effort
+    )
     tracker = CostTracker()
     manager.active_llm = provider
     manager.tracker = tracker
@@ -1271,6 +1327,10 @@ def run_qualification(
     resolved_model = getattr(provider, "model", model or "mock")
     manager.manifest["qualification"]["model_resolved"] = resolved_model
     manager.manifest["qualification"]["network_access"] = False
+    manager.manifest["qualification"][
+        "provider_transport_network_declared_or_observed"
+    ] = "declared_expected" if external_network_expected else "not_expected"
+    manager.manifest["qualification"]["agent_tool_network_enabled"] = False
     identity_snapshot = getattr(provider, "identity_snapshot", None)
     if callable(identity_snapshot):
         manager.manifest["qualification"]["provider_runtime_identity"] = (
@@ -1377,6 +1437,21 @@ def run_qualification(
                 manager.manifest["qualification"]["network_access"] = bool(
                     getattr(provider, "network_access", False)
                 )
+                manager.manifest["qualification"][
+                    "provider_transport_network_declared_or_observed"
+                ] = (
+                    "process_started_network_not_observed"
+                    if getattr(provider, "model_turn_process_started", False)
+                    else "declared_expected"
+                    if external_network_expected
+                    else "not_expected"
+                )
+                manager.manifest["qualification"]["tool_calls_observed"] = sum(
+                    int(item.get("tool_calls_observed", 0))
+                    for item in manager.manifest["qualification"][
+                        "provider_call_metadata"
+                    ]
+                )
                 manager._write()
                 raise
             continue
@@ -1458,6 +1533,19 @@ def run_qualification(
     manager.sync_llm_accounting(provider, tracker)
     actual_network_access = bool(getattr(provider, "network_access", False))
     manager.manifest["qualification"]["network_access"] = actual_network_access
+    manager.manifest["qualification"][
+        "provider_transport_network_declared_or_observed"
+    ] = (
+        "process_started_network_not_observed"
+        if getattr(provider, "model_turn_process_started", False)
+        else "declared_expected"
+        if external_network_expected
+        else "not_expected"
+    )
+    manager.manifest["qualification"]["tool_calls_observed"] = sum(
+        int(item.get("tool_calls_observed", 0))
+        for item in manager.manifest["qualification"]["provider_call_metadata"]
+    )
     aggregate = aggregate_results(public_results)
     aggregate["engineering"]["provider_failure_count"] = qualification["failed"]
     summary = {
@@ -1481,6 +1569,9 @@ def run_qualification(
         ],
         "provider": provider_id,
         "model_requested": manager.manifest["qualification"]["model_requested"],
+        "reasoning_effort_requested": manager.manifest["qualification"][
+            "reasoning_effort_requested"
+        ],
         "model_resolved": manager.manifest["qualification"]["model_resolved"],
         "provider_capability_snapshot": manager.manifest["qualification"][
             "provider_capability_snapshot"
@@ -1506,6 +1597,14 @@ def run_qualification(
         "honest_n_runs": 0,
         "network_access": actual_network_access,
         "external_network_expected": external_network_expected,
+        "provider_transport_network_expected": external_network_expected,
+        "provider_transport_network_declared_or_observed": manager.manifest[
+            "qualification"
+        ]["provider_transport_network_declared_or_observed"],
+        "agent_tool_network_enabled": False,
+        "tool_calls_observed": manager.manifest["qualification"][
+            "tool_calls_observed"
+        ],
         "token_usage": (
             dict(getattr(provider, "usage_totals"))
             if isinstance(getattr(provider, "usage_totals", None), Mapping)
@@ -1527,6 +1626,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version="model-qualification 1.1")
     parser.add_argument("--provider", default="mock")
     parser.add_argument("--model", default="")
+    parser.add_argument("--reasoning-effort", default="")
     parser.add_argument("--seed", type=int, default=7)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--case-id", action="append", default=[])
@@ -1558,10 +1658,18 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     try:
         args = build_argparser().parse_args(args_list)
         args.provider = str(args.provider).strip().lower()
-        if args.provider == "codex_exec" and str(args.model or "").strip():
-            from nmsim.codex_exec import validate_codex_model_identity
+        if args.provider == "codex_exec":
+            from nmsim.codex_exec import (
+                validate_codex_model_identity,
+                validate_codex_reasoning_effort,
+            )
 
-            args.model = validate_codex_model_identity(args.model)
+            if str(args.model or "").strip():
+                args.model = validate_codex_model_identity(args.model)
+            if str(args.reasoning_effort or "").strip():
+                args.reasoning_effort = validate_codex_reasoning_effort(
+                    args.reasoning_effort
+                )
         bundle = load_protocol_bundle()
         all_cases = build_cases(bundle)
         selection = select_cases(
@@ -1586,6 +1694,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         cache_enabled=False,
         out_dir=args.out,
     )
+    if args.provider == "codex_exec":
+        cfg.codex_reasoning_effort = args.reasoning_effort or None
     manager = ManagedRunContext.create(
         cfg,
         out_root=args.out,
@@ -1618,7 +1728,11 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                     capability_snapshot=None,
                 )
                 raise
-            capability = provider_capability_snapshot(args.provider)
+            capability = provider_capability_snapshot(
+                args.provider,
+                model=args.model or None,
+                reasoning_effort=args.reasoning_effort or None,
+            )
             _initialise_manifest(
                 manager,
                 args=args,
@@ -1629,7 +1743,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             if args.provider == "codex_exec":
                 manager.manifest["qualification"]["provider_static_identity"] = (
-                    _codex_static_identity(args.model)
+                    _codex_static_identity(args.model, args.reasoning_effort or None)
                 )
                 manager._write()
             preliminary_model = (
@@ -1664,6 +1778,7 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 manager,
                 provider_id=args.provider,
                 model=args.model,
+                reasoning_effort=args.reasoning_effort,
                 seed=args.seed,
                 bundle=bundle,
                 cases=cases,

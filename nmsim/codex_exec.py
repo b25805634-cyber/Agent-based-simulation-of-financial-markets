@@ -25,12 +25,14 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from typing import Any, Iterable, Mapping, Optional, Sequence
+from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 
 
 CODEX_EXEC_PROVIDER_ID = "codex_exec"
 CODEX_WRAPPER_PROTOCOL_VERSION = "1.0"
 CODEX_DECISION_SCHEMA_VERSION = "1.0"
+CODEX_TOOL_SURFACE_CONTRACT_VERSION = "1.0"
+CODEX_REASONING_EFFORT_ENV = "NMSIM_CODEX_REASONING_EFFORT"
 
 _SCHEMA_PATH = (
     pathlib.Path(__file__).resolve().parent
@@ -61,6 +63,7 @@ This is a market-role decision task, not a coding task.
 """
 
 _REQUIRED_EXEC_FLAGS = (
+    "--config",
     "--strict-config",
     "--ephemeral",
     "--sandbox",
@@ -73,6 +76,52 @@ _REQUIRED_EXEC_FLAGS = (
     "--color",
     "--model",
     "--cd",
+)
+_REQUIRED_APP_SERVER_FLAGS = ("--strict-config", "--listen")
+_ALLOWED_REASONING_EFFORTS = frozenset(
+    {"minimal", "low", "medium", "high", "xhigh"}
+)
+
+# These settings are passed explicitly on every real Codex turn.  They are
+# also validated, without submitting a model task, through the CLI's strict
+# app-server config parser.  `tools.view_image` is deliberately retained even
+# on CLI versions that do not yet recognize it: inability to validate any
+# required control makes real use fail closed.
+_NO_TOOLS_CONFIG_ITEMS: tuple[tuple[str, Any], ...] = (
+    ("forced_login_method", "chatgpt"),
+    ("approval_policy", "never"),
+    ("sandbox_mode", "read-only"),
+    ("web_search", "disabled"),
+    ("history.persistence", "none"),
+    ("hide_agent_reasoning", True),
+    ("show_raw_agent_reasoning", False),
+    ("personality", "none"),
+    ("features.shell_tool", False),
+    ("features.unified_exec", False),
+    ("features.apps", False),
+    ("tools.view_image", False),
+    ("tools.web_search", False),
+    ("mcp_servers", {}),
+    ("features.browser_use", False),
+    ("features.browser_use_external", False),
+    ("features.browser_use_full_cdp_access", False),
+    ("features.computer_use", False),
+    ("features.image_generation", False),
+    ("features.in_app_browser", False),
+    ("features.enable_mcp_apps", False),
+    ("features.plugins", False),
+    ("features.remote_plugin", False),
+    ("features.plugin_sharing", False),
+    ("features.hooks", False),
+    ("features.skill_mcp_dependency_install", False),
+    ("features.tool_call_mcp_elicitation", False),
+    ("features.request_permissions_tool", False),
+    ("features.multi_agent", False),
+    ("features.shell_snapshot", False),
+    ("allow_login_shell", False),
+    ("feedback.enabled", False),
+    ("analytics.enabled", False),
+    ("check_for_update_on_startup", False),
 )
 
 _ALLOWED_TOP_LEVEL_EVENTS = frozenset(
@@ -94,15 +143,32 @@ _ALLOWED_ITEM_TYPES = frozenset({"reasoning", "agent_message", "message"})
 _PROHIBITED_EVENT_TYPES = frozenset(
     {
         "command_execution",
+        "exec_command_begin",
+        "exec_command_output",
+        "exec_command_end",
+        "shell",
+        "shell_command",
+        "unified_exec",
         "file_change",
+        "file_read",
+        "file_write",
+        "apply_patch",
+        "patch_apply",
         "mcp_tool_call",
         "mcp_call",
+        "app_call",
+        "connector_call",
         "web_search",
         "web_search_call",
+        "browser_use",
         "image_generation",
         "image_tool_call",
+        "view_image",
         "tool_call",
         "computer_use",
+        "permission_request",
+        "request_permissions",
+        "privilege_escalation",
         "external_action",
     }
 )
@@ -178,12 +244,87 @@ def _canonical_json(value: Any) -> str:
     )
 
 
+def _toml_cli_value(value: Any) -> str:
+    """Serialize the reviewed scalar/empty-table config values for ``-c``."""
+
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, str):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, Mapping) and not value:
+        return "{}"
+    raise TypeError("unsupported Codex CLI config value type")
+
+
+def validate_codex_reasoning_effort(reasoning_effort: str) -> str:
+    """Return a reviewed explicit reasoning-effort value."""
+
+    if not isinstance(reasoning_effort, str) or not reasoning_effort.strip():
+        raise ValueError("CodexExec requires an explicit reasoning effort")
+    normalised = reasoning_effort.strip().lower()
+    if normalised not in _ALLOWED_REASONING_EFFORTS:
+        raise ValueError(
+            "CodexExec reasoning effort must be one of {}".format(
+                ", ".join(sorted(_ALLOWED_REASONING_EFFORTS))
+            )
+        )
+    return normalised
+
+
+def codex_reasoning_effort_from_environment(
+    environment: Optional[Mapping[str, str]] = None,
+) -> Optional[str]:
+    source = os.environ if environment is None else environment
+    value = source.get(CODEX_REASONING_EFFORT_ENV)
+    if value is None or not str(value).strip():
+        return None
+    return validate_codex_reasoning_effort(str(value))
+
+
+def codex_tool_surface_contract(
+    *, reasoning_effort: Optional[str] = None
+) -> dict[str, Any]:
+    """Return the stable no-tools request contract, without probing the CLI."""
+
+    effort = (
+        None
+        if reasoning_effort is None
+        else validate_codex_reasoning_effort(reasoning_effort)
+    )
+    config = {key: value for key, value in _NO_TOOLS_CONFIG_ITEMS}
+    if effort is not None:
+        config["model_reasoning_effort"] = effort
+    return {
+        "contract_version": CODEX_TOOL_SURFACE_CONTRACT_VERSION,
+        "required_config": config,
+        "provider_transport_network_expected": True,
+        "agent_tool_network_enabled": False,
+        "web_search_mode": "disabled",
+        "shell_tool_enabled": False,
+        "unified_exec_enabled": False,
+        "apps_enabled": False,
+        "view_image_enabled": False,
+        "history_persistence": "none",
+        "agent_reasoning_events_hidden": True,
+        "show_raw_agent_reasoning": False,
+        "personality": "none",
+        "approval_policy": "never",
+        "sandbox_mode": "read-only",
+        "forced_login_method": "chatgpt",
+        "ephemeral": True,
+        "reasoning_effort": effort,
+    }
+
+
 def _schema_bytes() -> bytes:
     return _SCHEMA_PATH.read_bytes()
 
 
 CODEX_DECISION_SCHEMA_HASH = _sha256_bytes(_schema_bytes())
 CODEX_WRAPPER_SOURCE_HASH = _sha256_text(_WRAPPER_TEMPLATE)
+CODEX_TOOL_SURFACE_CONTRACT_HASH = _sha256_text(
+    _canonical_json(codex_tool_surface_contract())
+)
 
 
 class CodexExecError(RuntimeError):
@@ -213,6 +354,9 @@ class CodexCapabilityProbe:
     auth_mode: str
     auth_verified: bool
     supported_exec_flags: tuple[str, ...]
+    supported_config_keys: tuple[str, ...]
+    tool_surface_verified: bool
+    capability_probe_method: str
 
     def to_dict(self) -> dict[str, Any]:
         return {
@@ -224,6 +368,9 @@ class CodexCapabilityProbe:
             "auth_mode": self.auth_mode,
             "auth_verified": self.auth_verified,
             "supported_exec_flags": list(self.supported_exec_flags),
+            "supported_config_keys": list(self.supported_config_keys),
+            "tool_surface_verified": self.tool_surface_verified,
+            "capability_probe_method": self.capability_probe_method,
         }
 
 
@@ -322,6 +469,7 @@ def _run_limited_process(
     timeout_seconds: float,
     stdout_limit: int,
     stderr_limit: int,
+    on_process_started: Optional[Callable[[], None]] = None,
 ) -> _ProcessResult:
     """Run an argv-only subprocess with independently bounded output pipes."""
 
@@ -339,12 +487,18 @@ def _run_limited_process(
         )
     except FileNotFoundError as error:
         raise CodexExecError(
-            "codex_binary_missing", "Codex CLI executable disappeared before launch"
+            "codex_binary_missing",
+            "Codex CLI executable disappeared before launch",
+            public_metadata={"process_started": False},
         ) from error
     except OSError as error:
         raise CodexExecError(
-            "subprocess_nonzero_exit", "Codex CLI process could not be launched"
+            "subprocess_nonzero_exit",
+            "Codex CLI process could not be launched",
+            public_metadata={"process_started": False},
         ) from error
+    if on_process_started is not None:
+        on_process_started()
 
     buffers = {"stdout": bytearray(), "stderr": bytearray()}
     limit_exceeded = threading.Event()
@@ -421,6 +575,7 @@ def _run_limited_process(
             public_metadata={
                 "process_exit_code": int(process.returncode or 0),
                 "latency_seconds": latency,
+                "process_started": True,
             },
         )
     if timed_out:
@@ -431,6 +586,7 @@ def _run_limited_process(
                 "timeout_seconds": timeout_seconds,
                 "process_exit_code": int(process.returncode or 0),
                 "latency_seconds": latency,
+                "process_started": True,
             },
         )
     return _ProcessResult(
@@ -469,33 +625,85 @@ def _classify_nonzero(result: _ProcessResult) -> CodexExecError:
     )
 
 
+def _effective_config_items(
+    reasoning_effort: Optional[str],
+) -> tuple[tuple[str, Any], ...]:
+    items = list(_NO_TOOLS_CONFIG_ITEMS)
+    if reasoning_effort is not None:
+        items.append(
+            (
+                "model_reasoning_effort",
+                validate_codex_reasoning_effort(reasoning_effort),
+            )
+        )
+    return tuple(items)
+
+
+def _config_assignment(key: str, value: Any) -> str:
+    return "{}={}".format(key, _toml_cli_value(value))
+
+
+def _config_argv(items: Iterable[tuple[str, Any]]) -> list[str]:
+    argv: list[str] = []
+    for key, value in items:
+        argv.extend(["-c", _config_assignment(key, value)])
+    return argv
+
+
+def _feature_states(text: str) -> dict[str, bool]:
+    states: dict[str, bool] = {}
+    for raw_line in text.splitlines():
+        match = re.match(r"^\s*([A-Za-z0-9_.-]+)\s+\S+\s+(true|false)\s*$", raw_line)
+        if match is not None:
+            states[match.group(1)] = match.group(2) == "true"
+    return states
+
+
 def probe_codex_cli(
     binary: os.PathLike[str] | str = "codex",
     *,
+    reasoning_effort: Optional[str] = None,
     timeout_seconds: float = 10.0,
     environment: Optional[Mapping[str, str]] = None,
     temp_root: Optional[os.PathLike[str] | str] = None,
 ) -> CodexCapabilityProbe:
-    """Probe only version/help/login status; never submit a model task."""
+    """Validate safe CLI controls and auth without submitting a model task."""
 
     executable = _resolve_executable(binary)
-    env = sanitized_subprocess_environment(environment)
+    auth_env = sanitized_subprocess_environment(environment)
+    config_items = _effective_config_items(reasoning_effort)
     with tempfile.TemporaryDirectory(
         prefix="nmsim-codex-probe-",
         dir=None if temp_root is None else os.fspath(temp_root),
     ) as temporary:
         cwd = pathlib.Path(temporary)
+        isolated_home = cwd / "codex-home"
+        isolated_home.mkdir(mode=0o700)
+        probe_env = dict(auth_env)
+        probe_env["CODEX_HOME"] = str(isolated_home)
 
-        def run(args: Sequence[str]) -> _ProcessResult:
+        def run(
+            args: Sequence[str], *, use_managed_auth: bool = False
+        ) -> _ProcessResult:
             return _run_limited_process(
                 [str(executable), *args],
                 stdin=b"",
                 cwd=cwd,
-                env=env,
+                env=auth_env if use_managed_auth else probe_env,
                 timeout_seconds=timeout_seconds,
                 stdout_limit=256 * 1024,
                 stderr_limit=64 * 1024,
             )
+
+        def run_tool_surface(args: Sequence[str]) -> _ProcessResult:
+            try:
+                return run(args)
+            except CodexExecError as error:
+                raise CodexExecError(
+                    "codex_tool_surface_cannot_be_disabled",
+                    "Codex no-tools capability validation did not complete safely",
+                    public_metadata={"probe_failure_code": error.code},
+                ) from error
 
         version_result = run(["--version"])
         if version_result.returncode != 0:
@@ -528,7 +736,97 @@ def probe_codex_cli(
                 public_metadata={"missing_flags": sorted(missing_flags)},
             )
 
-        auth_result = run(["login", "status"])
+        app_server_help = run_tool_surface(["app-server", "--help"])
+        app_server_help_text = "{}\n{}".format(
+            _decode_bounded(app_server_help.stdout),
+            _decode_bounded(app_server_help.stderr),
+        )
+        missing_probe_flags = [
+            flag
+            for flag in _REQUIRED_APP_SERVER_FLAGS
+            if flag not in app_server_help_text
+        ]
+        if app_server_help.returncode != 0 or missing_probe_flags:
+            raise CodexExecError(
+                "codex_tool_surface_cannot_be_disabled",
+                "Codex CLI cannot strictly validate the required no-tools configuration",
+                public_metadata={"missing_probe_flags": sorted(missing_probe_flags)},
+            )
+
+        validation = run_tool_surface(
+            [
+                "app-server",
+                "--strict-config",
+                "--listen",
+                "stdio://",
+                *_config_argv(config_items),
+            ]
+        )
+        validation_text = "{}\n{}".format(
+            _decode_bounded(validation.stdout),
+            _decode_bounded(validation.stderr),
+        )
+        reported_unsupported = sorted(
+            key
+            for key, _value in config_items
+            if key.lower() in validation_text.lower()
+        )
+        unsupported: list[str] = []
+        if validation.returncode != 0:
+            # Strict config parsing may stop after the first error. Diagnose
+            # every reviewed key on the failure path so provenance never
+            # overstates what the installed CLI accepted.
+            for key, value in config_items:
+                single = run_tool_surface(
+                    [
+                        "app-server",
+                        "--strict-config",
+                        "--listen",
+                        "stdio://",
+                        "-c",
+                        _config_assignment(key, value),
+                    ]
+                )
+                if single.returncode != 0:
+                    unsupported.append(key)
+        if validation.returncode != 0:
+            raise CodexExecError(
+                "codex_tool_surface_cannot_be_disabled",
+                "Codex CLI cannot validate every required no-tools control",
+                public_metadata={
+                    "unsupported_controls": sorted(unsupported)
+                    or reported_unsupported
+                    or ["<strict-config-validation-failed>"]
+                },
+            )
+
+        feature_result = run_tool_surface(
+            ["features", "list", *_config_argv(config_items)]
+        )
+        feature_text = "{}\n{}".format(
+            _decode_bounded(feature_result.stdout),
+            _decode_bounded(feature_result.stderr),
+        )
+        feature_states = _feature_states(feature_text)
+        unconfirmed_features = sorted(
+            key
+            for key, expected in config_items
+            if key.startswith("features.")
+            and (
+                key.removeprefix("features.") not in feature_states
+                or feature_states[key.removeprefix("features.")] is not bool(expected)
+            )
+        )
+        if feature_result.returncode != 0 or unconfirmed_features:
+            raise CodexExecError(
+                "codex_tool_surface_cannot_be_disabled",
+                "Codex CLI did not confirm the requested disabled feature states",
+                public_metadata={
+                    "unconfirmed_feature_controls": unconfirmed_features
+                },
+            )
+
+        auth_result = run(["login", "status"], use_managed_auth=True)
         auth_text = "{}\n{}".format(
             _decode_bounded(auth_result.stdout), _decode_bounded(auth_result.stderr)
         )
@@ -557,6 +855,11 @@ def probe_codex_cli(
         auth_mode="chatgpt_managed_codex",
         auth_verified=True,
         supported_exec_flags=tuple(sorted(_REQUIRED_EXEC_FLAGS)),
+        supported_config_keys=tuple(sorted(key for key, _value in config_items)),
+        tool_surface_verified=True,
+        capability_probe_method=(
+            "isolated_CODEX_HOME_app_server_strict_config_plus_features_list"
+        ),
     )
 
 
@@ -564,6 +867,7 @@ def codex_static_adapter_identity(
     binary: os.PathLike[str] | str = "codex",
     *,
     model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> dict[str, Any]:
     """Return replay/reuse identity without running Codex or checking auth.
 
@@ -575,6 +879,12 @@ def codex_static_adapter_identity(
 
     if model is not None:
         model = validate_codex_model_identity(model)
+    effort = (
+        None
+        if reasoning_effort is None
+        else validate_codex_reasoning_effort(reasoning_effort)
+    )
+    tool_surface = codex_tool_surface_contract(reasoning_effort=effort)
 
     requested = os.fspath(binary)
     try:
@@ -597,16 +907,46 @@ def codex_static_adapter_identity(
         "provider": CODEX_EXEC_PROVIDER_ID,
         "experimental": True,
         "requested_model": model,
+        "reasoning_effort": effort,
         "binary_identity": binary_identity,
         "codex_wrapper_protocol_version": CODEX_WRAPPER_PROTOCOL_VERSION,
         "wrapper_source_hash": CODEX_WRAPPER_SOURCE_HASH,
         "decision_schema_version": CODEX_DECISION_SCHEMA_VERSION,
         "decision_schema_hash": CODEX_DECISION_SCHEMA_HASH,
+        "tool_surface_contract": tool_surface,
+        "tool_surface_contract_hash": _sha256_text(
+            _canonical_json(tool_surface)
+        ),
         "sandbox_mode": "read-only",
         "ephemeral": True,
         "strict_config": True,
+        "provider_transport_network_expected": True,
+        "provider_transport_network_declared_or_observed": "declared_expected",
+        "agent_tool_network_enabled": False,
+        "web_search_mode": "disabled",
+        "shell_tool_enabled": False,
+        "unified_exec_enabled": False,
+        "apps_enabled": False,
+        "view_image_enabled": False,
+        "history_persistence": "none",
+        "agent_reasoning_events_hidden": True,
         "auth_probe_performed": False,
         "subprocess_started": False,
+        "model_turn_subprocess_started": False,
+        "real_use_ready": False,
+        "real_use_readiness": (
+            "requires_runtime_tool_surface_and_auth_probe"
+            if model and effort
+            else "missing_explicit_request_identity"
+        ),
+        "real_use_missing_requirements": [
+            name
+            for name, present in (
+                ("model", bool(model)),
+                ("reasoning_effort", bool(effort)),
+            )
+            if not present
+        ],
     }
 
 
@@ -620,16 +960,32 @@ def build_codex_wrapper(system: str, user: str) -> str:
     )
 
 
-def codex_request_identity(system: str, user: str, model: str) -> dict[str, Any]:
+def codex_request_identity(
+    system: str,
+    user: str,
+    model: str,
+    *,
+    reasoning_effort: Optional[str] = None,
+) -> dict[str, Any]:
     model = validate_codex_model_identity(model)
+    effort = (
+        None
+        if reasoning_effort is None
+        else validate_codex_reasoning_effort(reasoning_effort)
+    )
     wrapper = build_codex_wrapper(system, user)
+    tool_surface = codex_tool_surface_contract(reasoning_effort=effort)
     return {
         "provider": CODEX_EXEC_PROVIDER_ID,
         "requested_model": model,
+        "reasoning_effort": effort,
         "codex_wrapper_protocol_version": CODEX_WRAPPER_PROTOCOL_VERSION,
         "wrapper_source_hash": CODEX_WRAPPER_SOURCE_HASH,
         "decision_schema_version": CODEX_DECISION_SCHEMA_VERSION,
         "decision_schema_hash": CODEX_DECISION_SCHEMA_HASH,
+        "tool_surface_contract_hash": _sha256_text(
+            _canonical_json(tool_surface)
+        ),
         "production_system_prompt_hash": _sha256_text(system),
         "production_user_prompt_hash": _sha256_text(user),
         "final_combined_input_hash": _sha256_text(wrapper),
@@ -648,21 +1004,65 @@ def _all_type_values(value: Any) -> Iterable[str]:
 
 
 def _is_prohibited_type(event_type: str) -> bool:
-    normalized = event_type.strip().lower().replace("-", "_")
+    normalized = (
+        event_type.strip()
+        .lower()
+        .replace("-", "_")
+        .replace(".", "_")
+        .replace("/", "_")
+    )
     if normalized in _PROHIBITED_EVENT_TYPES:
         return True
     return any(
         marker in normalized
         for marker in (
             "command_execution",
+            "exec_command",
+            "shell_command",
+            "unified_exec",
             "file_change",
-            "mcp_",
+            "file_read",
+            "file_write",
+            "apply_patch",
+            "patch_apply",
+            "mcp",
+            "app_call",
+            "connector_call",
             "web_search",
+            "browser_use",
             "image_tool",
+            "view_image",
+            "image_generation",
             "tool_call",
             "computer_use",
+            "permission_request",
+            "request_permissions",
+            "privilege_escalation",
         )
     )
+
+
+def _reasoning_text_present(event: Mapping[str, Any]) -> bool:
+    """Detect CLI reasoning prose without returning or persisting its content."""
+
+    event_type = str(event.get("type") or "")
+    item = event.get("item")
+    is_reasoning = event_type == "reasoning" or (
+        isinstance(item, Mapping) and item.get("type") == "reasoning"
+    )
+    if not is_reasoning:
+        return False
+    sources: list[Mapping[str, Any]] = [event]
+    if isinstance(item, Mapping):
+        sources.append(item)
+    for source in sources:
+        for key in ("text", "content", "summary", "reasoning", "message"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                return True
+            if isinstance(value, list) and value:
+                return True
+    return False
 
 
 def _extract_agent_message(event: Mapping[str, Any]) -> Optional[str]:
@@ -711,6 +1111,7 @@ def parse_codex_json_events(stdout: bytes | str) -> dict[str, Any]:
     usage: dict[str, int] = {}
     final_messages: list[str] = []
     reported_model: Optional[str] = None
+    reasoning_event_count = 0
     saw_event = False
     for line_number, raw_line in enumerate(text.splitlines(), 1):
         if not raw_line.strip():
@@ -757,6 +1158,22 @@ def parse_codex_json_events(stdout: bytes | str) -> dict[str, Any]:
                     "Codex emitted an unsupported non-tool item event",
                     public_metadata={"event_type": event_type},
                 )
+        if event_type == "reasoning" or (
+            isinstance(event.get("item"), Mapping)
+            and event["item"].get("type") == "reasoning"
+        ):
+            reasoning_event_count += 1
+            if _reasoning_text_present(event):
+                raise CodexExecError(
+                    "codex_reasoning_visibility_violation",
+                    "Codex emitted reasoning content despite hidden-reasoning controls",
+                    public_metadata={
+                        "event_type": _safe_public_label(
+                            event_type, "event-type"
+                        ),
+                        "effective_config_anomaly": True,
+                    },
+                )
         counts[event_type] = counts.get(event_type, 0) + 1
         message = _extract_agent_message(event)
         if message is not None:
@@ -777,6 +1194,7 @@ def parse_codex_json_events(stdout: bytes | str) -> dict[str, Any]:
         "usage": usage,
         "final_messages": final_messages,
         "reported_model": reported_model,
+        "reasoning_event_count": reasoning_event_count,
     }
 
 
@@ -893,6 +1311,7 @@ class CodexExecLLM:
         self,
         *,
         model: str,
+        reasoning_effort: str,
         binary: os.PathLike[str] | str = "codex",
         timeout_seconds: float = 120.0,
         max_stdout_bytes: int = 1024 * 1024,
@@ -907,6 +1326,7 @@ class CodexExecLLM:
         probe: Optional[CodexCapabilityProbe] = None,
     ) -> None:
         model = validate_codex_model_identity(model)
+        reasoning_effort = validate_codex_reasoning_effort(reasoning_effort)
         if timeout_seconds <= 0:
             raise ValueError("timeout_seconds must be positive")
         for name, value in (
@@ -918,6 +1338,7 @@ class CodexExecLLM:
             if value <= 0:
                 raise ValueError("{} must be positive".format(name))
         self.model = model
+        self.reasoning_effort = reasoning_effort
         self.binary_path = _resolve_executable(binary)
         self.timeout_seconds = float(timeout_seconds)
         self.max_stdout_bytes = int(max_stdout_bytes)
@@ -937,6 +1358,8 @@ class CodexExecLLM:
         self.provider_calls_succeeded = 0
         self.provider_calls_failed = 0
         self.network_access = False
+        self.model_turn_process_started = False
+        self.agent_tool_network_enabled = False
         self.last_call_metadata: Optional[dict[str, Any]] = None
         self.call_metadata_history: list[dict[str, Any]] = []
         self.usage_totals = {
@@ -947,6 +1370,7 @@ class CodexExecLLM:
         }
         self.probe = probe or probe_codex_cli(
             self.binary_path,
+            reasoning_effort=self.reasoning_effort,
             timeout_seconds=min(self.timeout_seconds, 10.0),
             environment=self._source_environment,
             temp_root=self._temp_root,
@@ -955,6 +1379,22 @@ class CodexExecLLM:
             raise CodexExecError(
                 "unsupported_codex_cli_version",
                 "Codex CLI binary identity changed after capability probing",
+            )
+        required_keys = {
+            key for key, _value in _effective_config_items(self.reasoning_effort)
+        }
+        if (
+            not self.probe.tool_surface_verified
+            or not required_keys.issubset(set(self.probe.supported_config_keys))
+        ):
+            raise CodexExecError(
+                "codex_tool_surface_cannot_be_disabled",
+                "Codex no-tools capability probe did not verify every required control",
+                public_metadata={
+                    "unverified_controls": sorted(
+                        required_keys - set(self.probe.supported_config_keys)
+                    )
+                },
             )
 
     @property
@@ -974,6 +1414,9 @@ class CodexExecLLM:
             self._agent_id = _safe_identifier(agent_id, "agent")
 
     def identity_snapshot(self) -> dict[str, Any]:
+        tool_surface = codex_tool_surface_contract(
+            reasoning_effort=self.reasoning_effort
+        )
         return {
             "provider": CODEX_EXEC_PROVIDER_ID,
             "experimental": True,
@@ -983,16 +1426,43 @@ class CodexExecLLM:
                 "sha256": self.probe.binary_sha256,
             },
             "requested_model": self.model,
+            "reasoning_effort": self.reasoning_effort,
             "auth_mode": self.probe.auth_mode,
             "auth_verified": self.probe.auth_verified,
             "codex_wrapper_protocol_version": CODEX_WRAPPER_PROTOCOL_VERSION,
             "wrapper_source_hash": CODEX_WRAPPER_SOURCE_HASH,
             "decision_schema_version": CODEX_DECISION_SCHEMA_VERSION,
             "decision_schema_hash": CODEX_DECISION_SCHEMA_HASH,
+            "tool_surface_contract": tool_surface,
+            "tool_surface_contract_hash": _sha256_text(
+                _canonical_json(tool_surface)
+            ),
             "execution_flags": self._normalized_execution_flags(),
             "sandbox_mode": "read-only",
             "ephemeral": True,
-            "tool_access": "technically_available_but_forbidden_for_this_provider",
+            "strict_config": True,
+            "auth_probe_performed": True,
+            "forced_login_method": "chatgpt",
+            "capability_probe_method": self.probe.capability_probe_method,
+            "tool_surface_verified": self.probe.tool_surface_verified,
+            "tool_access": "disabled_by_explicit_config_and_monitored",
+            "provider_transport_network_expected": True,
+            "provider_transport_network_declared_or_observed": (
+                "process_started_network_not_observed"
+                if self.model_turn_process_started
+                else "declared_expected"
+            ),
+            "agent_tool_network_enabled": False,
+            "web_search_mode": "disabled",
+            "shell_tool_enabled": False,
+            "unified_exec_enabled": False,
+            "apps_enabled": False,
+            "view_image_enabled": False,
+            "history_persistence": "none",
+            "agent_reasoning_events_hidden": True,
+            "show_raw_agent_reasoning": False,
+            "personality": "none",
+            "model_turn_subprocess_started": self.model_turn_process_started,
         }
 
     def _normalized_execution_flags(self) -> list[str]:
@@ -1009,6 +1479,8 @@ class CodexExecLLM:
             "--output-last-message=<isolated-output>",
             "--color=never",
             "--model=<requested-model>",
+            "--config=<reviewed-no-tools-contract>",
+            "--config=model_reasoning_effort=<explicit>",
             "--cd=<isolated-cwd>",
             "stdin=-",
         ]
@@ -1035,6 +1507,7 @@ class CodexExecLLM:
             "never",
             "--model",
             self.model,
+            *_config_argv(_effective_config_items(self.reasoning_effort)),
             "--cd",
             str(cwd),
             "-",
@@ -1055,6 +1528,9 @@ class CodexExecLLM:
             "timeout": False,
             "event_type_counts": {},
             "tool_use_violation_count": 0,
+            "tool_calls_observed": 0,
+            "reasoning_event_count": 0,
+            "effective_config_anomaly": False,
             "usage": {},
             "reported_model": None,
             "actual_model_verification": "unavailable",
@@ -1069,7 +1545,12 @@ class CodexExecLLM:
             raise CodexExecError(
                 "input_too_large", "Combined Codex input exceeded the configured limit"
             )
-        request_identity = codex_request_identity(system, user, self.model)
+        request_identity = codex_request_identity(
+            system,
+            user,
+            self.model,
+            reasoning_effort=self.reasoning_effort,
+        )
         with self._lock, _GLOBAL_CODEX_EXEC_LOCK:
             self._request_sequence += 1
             prefix = "nmsim-codex-{}-{}-".format(self._run_id, self._agent_id)
@@ -1099,7 +1580,18 @@ class CodexExecLLM:
                 self.last_call_metadata = metadata
                 self.call_metadata_history.append(metadata)
                 self.provider_calls_attempted += 1
-                self.network_access = True
+                metadata["provider_transport_network_declared_or_observed"] = (
+                    "declared_expected_process_launch_pending"
+                )
+
+                def mark_model_turn_process_started() -> None:
+                    self.model_turn_process_started = True
+                    self.network_access = True
+                    metadata[
+                        "provider_transport_network_declared_or_observed"
+                    ] = "process_started_network_not_observed"
+                    metadata["model_turn_subprocess_started"] = True
+
                 try:
                     result = _run_limited_process(
                         argv,
@@ -1109,6 +1601,7 @@ class CodexExecLLM:
                         timeout_seconds=self.timeout_seconds,
                         stdout_limit=self.max_stdout_bytes,
                         stderr_limit=self.max_stderr_bytes,
+                        on_process_started=mark_model_turn_process_started,
                     )
                     metadata["process_exit_code"] = result.returncode
                     metadata["latency_seconds"] = result.latency_seconds
@@ -1117,6 +1610,9 @@ class CodexExecLLM:
                     parsed_events = parse_codex_json_events(result.stdout)
                     metadata["event_type_counts"] = parsed_events["event_type_counts"]
                     metadata["usage"] = parsed_events["usage"]
+                    metadata["reasoning_event_count"] = parsed_events[
+                        "reasoning_event_count"
+                    ]
                     reported_model = parsed_events["reported_model"]
                     metadata["reported_model"] = (
                         _safe_public_label(reported_model, "model")
@@ -1202,9 +1698,13 @@ class CodexExecLLM:
                         metadata["timeout"] = True
                     if error.code == "tool_use_violation":
                         metadata["tool_use_violation_count"] = 1
+                        metadata["tool_calls_observed"] = 1
                         metadata["event_type_counts"] = {
                             str(error.public_metadata.get("event_type", "unknown")): 1
                         }
+                    if error.code == "codex_reasoning_visibility_violation":
+                        metadata["effective_config_anomaly"] = True
+                        metadata["reasoning_event_count"] = 1
                     if "process_exit_code" in error.public_metadata:
                         metadata["process_exit_code"] = error.public_metadata[
                             "process_exit_code"
@@ -1213,6 +1713,18 @@ class CodexExecLLM:
                         metadata["latency_seconds"] = error.public_metadata[
                             "latency_seconds"
                         ]
+                    if error.public_metadata.get("process_started") is True:
+                        self.model_turn_process_started = True
+                        self.network_access = True
+                        metadata[
+                            "provider_transport_network_declared_or_observed"
+                        ] = "process_started_network_not_observed"
+                    elif error.public_metadata.get("process_started") is False:
+                        self.network_access = False
+                        metadata["model_turn_subprocess_started"] = False
+                        metadata[
+                            "provider_transport_network_declared_or_observed"
+                        ] = "declared_expected_process_launch_failed"
                     raise
                 except BaseException as error:
                     self.provider_calls_failed += 1
@@ -1238,6 +1750,9 @@ __all__ = [
     "CODEX_DECISION_SCHEMA_HASH",
     "CODEX_DECISION_SCHEMA_VERSION",
     "CODEX_EXEC_PROVIDER_ID",
+    "CODEX_REASONING_EFFORT_ENV",
+    "CODEX_TOOL_SURFACE_CONTRACT_HASH",
+    "CODEX_TOOL_SURFACE_CONTRACT_VERSION",
     "CODEX_WRAPPER_PROTOCOL_VERSION",
     "CODEX_WRAPPER_SOURCE_HASH",
     "CodexCapabilityProbe",
@@ -1245,10 +1760,13 @@ __all__ = [
     "CodexExecLLM",
     "build_codex_wrapper",
     "codex_request_identity",
+    "codex_reasoning_effort_from_environment",
     "codex_static_adapter_identity",
+    "codex_tool_surface_contract",
     "parse_codex_json_events",
     "probe_codex_cli",
     "sanitized_subprocess_environment",
     "validate_codex_model_identity",
+    "validate_codex_reasoning_effort",
     "validate_codex_decision",
 ]

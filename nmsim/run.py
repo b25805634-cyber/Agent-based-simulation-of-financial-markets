@@ -304,6 +304,11 @@ def build_argparser():
         help="auto|mock|anthropic|openai|codex_exec (experimental local CLI)",
     )
     p.add_argument("--model", default=None)
+    p.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="explicit CodexExec reasoning effort: minimal|low|medium|high|xhigh",
+    )
     p.add_argument("--base-url", default=None, help="OpenAI-compatible base_url")
     p.add_argument("--api-key", default=None, help="OpenAI-compatible api_key")
     p.add_argument("--max-tokens", type=int, default=None,
@@ -344,6 +349,12 @@ def cfg_from_args(args) -> Config:
     cfg = Config.from_dict(_config_mapping(args.config_json)) if args.config_json else Config()
     if args.provider is not None: cfg.provider = args.provider
     if args.model is not None: cfg.model = args.model
+    if args.reasoning_effort is not None:
+        from .codex_exec import validate_codex_reasoning_effort
+
+        cfg.codex_reasoning_effort = validate_codex_reasoning_effort(
+            args.reasoning_effort
+        )
     if args.base_url is not None: cfg.openai_base_url = args.base_url
     if args.api_key is not None: cfg.openai_api_key = args.api_key
     if args.max_tokens is not None: cfg.max_tokens = args.max_tokens

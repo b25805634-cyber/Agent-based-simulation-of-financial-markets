@@ -491,6 +491,28 @@ class RunManager:
             **scientific_compatibility,
             **config_contract,
         }
+        provider_request_options: dict[str, Any] = {}
+        adapter_contract = config_contract.get(
+            "model_request_config_summary", {}
+        ).get("_provider_adapter_contract")
+        if isinstance(adapter_contract, Mapping):
+            provider_request_options["codex_exec"] = {
+                "schema_version": "1.0",
+                "classification": (
+                    "provider_specific_model_request_options_outside_Config"
+                ),
+                "requested_model": adapter_contract.get("requested_model"),
+                "reasoning_effort": adapter_contract.get("reasoning_effort"),
+                "tool_surface_contract_hash": adapter_contract.get(
+                    "tool_surface_contract_hash"
+                ),
+                "decision_schema_hash": adapter_contract.get(
+                    "decision_schema_hash"
+                ),
+                "wrapper_source_hash": adapter_contract.get(
+                    "wrapper_source_hash"
+                ),
+            }
 
         initial = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
@@ -522,6 +544,16 @@ class RunManager:
                 "use_cheap_model": bool(getattr(cfg, "use_cheap_model", False)),
                 "mode": None,
                 "record_source": None,
+                **(
+                    {
+                        "provider_request_options": provider_request_options,
+                        "provider_request_options_sha256": _stable_json_hash(
+                            provider_request_options
+                        ),
+                    }
+                    if provider_request_options
+                    else {}
+                ),
             },
             "execution": {
                 "worker_count": max(1, int(requested_worker_count)),

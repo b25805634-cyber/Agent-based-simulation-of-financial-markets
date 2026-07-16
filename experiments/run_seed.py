@@ -182,6 +182,11 @@ def build_argparser():
     p.add_argument("--seed", type=int, required=True)
     p.add_argument("--provider", default="openai")
     p.add_argument("--model", default=None, help="override served model id (e.g. HiggsAI)")
+    p.add_argument(
+        "--reasoning-effort",
+        default=None,
+        help="explicit CodexExec reasoning effort: minimal|low|medium|high|xhigh",
+    )
     p.add_argument("--out", default="results")
     # ---- 2x2 condition controls (the social channel is toggled cleanly; price
     #      visibility is always on, so only the social channel differs) ----
@@ -242,6 +247,12 @@ def config_from_args(args):
     cfg.out_dir = args.out
     if args.model:
         cfg.model = args.model
+    if args.reasoning_effort is not None:
+        from nmsim.codex_exec import validate_codex_reasoning_effort
+
+        cfg.codex_reasoning_effort = validate_codex_reasoning_effort(
+            args.reasoning_effort
+        )
     cfg.social_enabled = (args.social == "on")
     cfg.social_weight = args.gain            # only matters when social_enabled (binary in real path)
     if args.arm is not None:                 # ablation arms: social on, real news, vary the mic

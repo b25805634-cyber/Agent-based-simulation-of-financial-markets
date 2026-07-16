@@ -3,7 +3,10 @@ from __future__ import annotations
 
 import json
 import inspect
+import os
+import pathlib
 import unittest
+from unittest import mock
 
 import nmsim.llm as llm_module
 from nmsim.provider_capabilities import (
@@ -137,11 +140,11 @@ class ProviderCapabilityTests(unittest.TestCase):
         self.assertTrue(capability.experimental)
         self.assertEqual(
             capability.tool_access,
-            "technically_available_but_forbidden_for_this_provider",
+            "disabled_by_required_runtime_preflight_with_jsonl_defense",
         )
         self.assertEqual(
             capability.capability_probe_basis,
-            "local_codex_cli_0.144.4_exec_help",
+            "runtime_strict_config_and_feature_preflight_plus_exec_help",
         )
         self.assertEqual(
             capability.wrapper_protocol_version, CODEX_WRAPPER_PROTOCOL_VERSION
@@ -154,6 +157,84 @@ class ProviderCapabilityTests(unittest.TestCase):
         self.assertEqual(
             capability.structured_output_schema_hash, CODEX_DECISION_SCHEMA_HASH
         )
+        profile = capability.security_profile
+        self.assertIsNotNone(profile)
+        assert profile is not None
+        self.assertTrue(profile["runtime_strict_preflight_required"])
+        self.assertEqual(
+            profile["local_real_use_readiness_claim"],
+            "not_asserted_by_registry",
+        )
+        self.assertTrue(profile["provider_transport_network_expected"])
+        self.assertFalse(profile["agent_tool_network_enabled"])
+        self.assertEqual(
+            profile["reasoning_effort_requirement"], "explicit_for_real_use"
+        )
+        controls = profile["required_effective_controls"]
+        self.assertEqual(controls["forced_login_method"], "chatgpt")
+        self.assertEqual(controls["approval_policy"], "never")
+        self.assertEqual(controls["sandbox_mode"], "read-only")
+        self.assertEqual(controls["web_search_mode"], "disabled")
+        self.assertFalse(controls["shell_tool_enabled"])
+        self.assertFalse(controls["unified_exec_enabled"])
+        self.assertFalse(controls["apps_enabled"])
+        self.assertFalse(controls["view_image_enabled"])
+        self.assertEqual(controls["history_persistence"], "none")
+        self.assertTrue(controls["agent_reasoning_events_hidden"])
+        self.assertFalse(controls["raw_agent_reasoning_visible"])
+        self.assertEqual(controls["personality"], "none")
+
+    def test_codex_snapshot_binds_secret_free_static_adapter_contract(self):
+        missing_binary = pathlib.Path(
+            "/definitely/missing/nmsim-codex-capability-test"
+        )
+        with mock.patch.dict(
+            os.environ,
+            {"NMSIM_CODEX_EXECUTABLE": str(missing_binary)},
+            clear=False,
+        ):
+            snapshot = provider_capability_snapshot("codex_exec")
+
+        adapter = snapshot["provider_adapter_contract"]
+        self.assertEqual(adapter["provider"], "codex_exec")
+        self.assertIsNone(adapter["requested_model"])
+        self.assertIsNone(adapter["reasoning_effort"])
+        self.assertTrue(adapter["provider_transport_network_expected"])
+        self.assertFalse(adapter["agent_tool_network_enabled"])
+        self.assertIn("tool_surface_contract", adapter)
+        self.assertRegex(adapter["tool_surface_contract_hash"], r"^[0-9a-f]{64}$")
+        self.assertRegex(
+            snapshot["capability_snapshot_sha256"], r"^[0-9a-f]{64}$"
+        )
+        encoded = json.dumps(snapshot, sort_keys=True).lower()
+        for forbidden in (
+            "api_key",
+            "authorization",
+            "bearer ",
+            "access_token",
+            "refresh_token",
+            "cookie",
+            "private_rationale",
+        ):
+            self.assertNotIn(forbidden, encoded)
+
+    def test_codex_security_extension_does_not_change_other_provider_snapshots(self):
+        expected_hashes = {
+            "mock": "71404a68eb4debc98a5aaf9e565bf3023b1f659031ece4d0b789eccdd5b2c139",
+            "anthropic": "69021e8d6c46ff10b4a4da5c56be98cef805f82eea9193bbbb6f1e9dcf6acc8f",
+            "openai": "3b7969c2fb18d7121684e324ccba2909cab5832ce36d219c4b8744d0aae03553",
+            "fake_test_provider": (
+                "cf8cc87213d8600722bd7c302fec7a94b7f387474337eadea30e6e231bf806e7"
+            ),
+        }
+        for provider_id, expected_hash in expected_hashes.items():
+            with self.subTest(provider=provider_id):
+                snapshot = provider_capability_snapshot(provider_id)
+                self.assertNotIn("provider_adapter_contract", snapshot)
+                self.assertNotIn("security_profile", snapshot["provider"])
+                self.assertEqual(
+                    snapshot["capability_snapshot_sha256"], expected_hash
+                )
 
     def test_endpoint_snapshot_is_stable_and_does_not_disclose_secrets(self):
         first = provider_capability_snapshot(

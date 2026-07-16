@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import hashlib
 import json
+import os
 import re
 from typing import Any, Optional
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -68,6 +69,7 @@ class ProviderCapability:
     wrapper_source_hash: Optional[str] = None
     structured_output_schema_version: Optional[str] = None
     structured_output_schema_hash: Optional[str] = None
+    security_profile: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if not _PROVIDER_ID_RE.fullmatch(self.provider_id):
@@ -90,7 +92,13 @@ class ProviderCapability:
     def to_dict(self) -> dict[str, Any]:
         """Return a stable JSON-compatible snapshot with no runtime secrets."""
 
-        return asdict(self)
+        payload = asdict(self)
+        # This optional extension is omitted rather than serialized as null so
+        # adding the Codex-only policy does not change any established
+        # Mock/Anthropic/OpenAI-compatible capability snapshot or hash.
+        if self.security_profile is None:
+            payload.pop("security_profile", None)
+        return payload
 
 
 # Evidence for the stable production records lives in nmsim.llm:
@@ -185,7 +193,7 @@ _CAPABILITIES: dict[str, ProviderCapability] = {
         supports_provider_response_id=False,
         supports_record_replay=True,
         supports_cache=True,
-        tool_access="technically_available_but_forbidden_for_this_provider",
+        tool_access="disabled_by_required_runtime_preflight_with_jsonl_defense",
         deterministic_claim="none",
         recommended_concurrency=1,
         experimental=True,
@@ -194,7 +202,9 @@ _CAPABILITIES: dict[str, ProviderCapability] = {
         implementation_scope="experimental_local_research",
         async_behavior="wrapper_level_only",
         structured_output_behavior="json_event_stream_plus_output_schema",
-        capability_probe_basis="local_codex_cli_0.144.4_exec_help",
+        capability_probe_basis=(
+            "runtime_strict_config_and_feature_preflight_plus_exec_help"
+        ),
         wrapper_protocol_version="1.0",
         wrapper_source_hash=(
             "41b989cc843d3a6fe961db9dfd97325e847c20564e609b62ed8acb2e3777be75"
@@ -203,6 +213,35 @@ _CAPABILITIES: dict[str, ProviderCapability] = {
         structured_output_schema_hash=(
             "42bf5bd6aad5ee671c47fe72be0043b8cdc06a8ae3809b4dea4a4334fe534886"
         ),
+        security_profile={
+            "security_profile_version": "1.0",
+            # This registry declares the required effective policy. It does
+            # not claim that any installed CLI/binary has passed the runtime
+            # probe; CodexExec must verify every control before a real turn.
+            "runtime_strict_preflight_required": True,
+            "local_real_use_readiness_claim": "not_asserted_by_registry",
+            "provider_transport_network_expected": True,
+            "provider_transport_network_declared_or_observed": (
+                "runtime_observation_required"
+            ),
+            "agent_tool_network_enabled": False,
+            "required_effective_controls": {
+                "forced_login_method": "chatgpt",
+                "approval_policy": "never",
+                "sandbox_mode": "read-only",
+                "web_search_mode": "disabled",
+                "shell_tool_enabled": False,
+                "unified_exec_enabled": False,
+                "apps_enabled": False,
+                "view_image_enabled": False,
+                "history_persistence": "none",
+                "agent_reasoning_events_hidden": True,
+                "raw_agent_reasoning_visible": False,
+                "personality": "none",
+            },
+            "reasoning_effort_requirement": "explicit_for_real_use",
+            "jsonl_tool_event_detection": "defense_in_depth",
+        },
     ),
     # A protocol-test double for model qualification.  It is deliberately not
     # selectable through nmsim.llm.build_llm and cannot contact a network.
@@ -321,7 +360,11 @@ def _endpoint_identity(endpoint: Optional[str]) -> dict[str, Any]:
 
 
 def provider_capability_snapshot(
-    provider_id: str, *, endpoint: Optional[str] = None
+    provider_id: str,
+    *,
+    endpoint: Optional[str] = None,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
 ) -> dict[str, Any]:
     """Build a stable, auditable and secret-free capability snapshot."""
 
@@ -331,6 +374,16 @@ def provider_capability_snapshot(
         "provider": capability,
         "endpoint_identity": _endpoint_identity(endpoint),
     }
+    if capability["provider_id"] == "codex_exec":
+        # Bind the exact versioned wrapper/schema/no-tools policy and local
+        # executable byte identity without probing auth or starting Codex.
+        from .codex_exec import codex_static_adapter_identity
+
+        snapshot["provider_adapter_contract"] = codex_static_adapter_identity(
+            os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+            model=model,
+            reasoning_effort=reasoning_effort,
+        )
     canonical = json.dumps(
         snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")

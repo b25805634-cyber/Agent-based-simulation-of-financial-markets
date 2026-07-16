@@ -7,6 +7,12 @@ changing the existing Provider implementations or defaults. Capability lookup
 does not construct a client, read credentials, or make a network request. The
 registry is [`nmsim/provider_capabilities.py`](../nmsim/provider_capabilities.py).
 
+The sealed Phase 1.2A reference is
+`phase1.2a-model-foundation-v1` at
+`a358a940c618b505fa3996d4e6acd22f617c6edf`; the earlier
+`3594909b9cf72d97a835539770ba32486090d71f` commit is an ancestor, not the
+sealed tag target.
+
 A capability record describes what the current nmsim adapter exposes. It is not
 a claim about every feature offered by an upstream service. In particular,
 Provider Capability is not a model-quality score, and a more capable language
@@ -36,9 +42,11 @@ only so the qualification protocol can be tested without a network.
 Provider and does not read Codex authentication files. The user owns login in
 the official CLI; nmsim accepts only a sanitized ChatGPT-managed status. Its
 0.144.4 capability probe found structured JSON/output-schema flags but no
-native batch, temperature, seed, or direct all-tools-off switch. The adapter
-therefore uses one isolated subprocess at a time and rejects any tool-operation
-event. Full boundaries and probe evidence are in
+native batch, temperature, seed, or single all-tools-off switch. The adapter
+therefore requires explicit config overrides to disable the complete reviewed
+tool surface before launch and retains JSONL rejection as a second defence.
+The local strict probe rejects `tools.view_image`, so this installed CLI is
+currently ineligible for a real turn. Full boundaries and probe evidence are in
 [CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md).
 
 `auto` is deliberately absent. It is a selection policy: the current factory
@@ -75,6 +83,20 @@ metadata behavior, implementation scope, wrapper-level async behavior,
 structured-output behavior, the reviewed probe basis, and optional concrete
 wrapper/output-schema versions and hashes.
 
+For CodexExec, the safe snapshot additionally declares the reviewed effective
+tool/network contract: Provider-transport networking is expected; Agent-tool
+networking is disabled; Web search is disabled; shell, unified execution,
+Apps, and image viewing are disabled; history persistence is `none`; CLI
+reasoning events are hidden; approval is `never`; sandboxing is read-only; and
+personality is `none`. These are adapter requirements, not claims that a real
+turn has already demonstrated the upstream behavior.
+
+Runtime fields such as
+`provider_transport_network_declared_or_observed` and
+`tool_calls_observed` are per-run provenance rather than timeless registry
+facts. They may be included alongside the declared capability snapshot in a
+managed manifest, but must not be confused with static capability claims.
+
 ## Conservative interpretation
 
 ### Mock
@@ -106,8 +128,10 @@ uses the existing local token estimate. The current client pool is bounded to
 adapter-level concurrency recommendation. It does not expose provider response
 ids and makes no determinism claim.
 
-`external_network_expected=true` means that an adapter uses a network transport;
-it does not assert that a configured endpoint is on the public Internet.
+`external_network_expected=true` means that an adapter uses a Provider
+transport that may require networking; it does not assert that a configured
+endpoint is on the public Internet. It also says nothing about whether the
+model Agent can use Web search, Apps, MCP, or another networked tool.
 
 ### CodexExec
 
@@ -119,10 +143,26 @@ wait on a process through an outer wrapper. It must not be interpreted as
 native concurrency. Usage metadata is conditional on the CLI event stream,
 and no Provider response-id support is claimed without a task event probe.
 
-The observed CLI is agentic and technically has tools. Tool access is forbidden
-for this market adapter, so any command/file/MCP/web/image operation is a hard
-Provider failure even in read-only mode. Temperature and seed are both
-unsupported here, and no deterministic behavior is claimed.
+The observed CLI is agentic and technically has tools. `read-only` is only a
+sandbox policy and is not equivalent to no-tools. The market adapter must
+actively set forced ChatGPT login, approval `never`, Web search disabled,
+history persistence `none`, hidden CLI reasoning, personality `none`,
+shell/unified-exec/Apps/image tools disabled, and feedback/update checks
+disabled. If a required control is unsupported, it fails before the real turn
+with `codex_tool_surface_cannot_be_disabled`.
+
+The current 0.144.4 strict probe does not recognize `tools.view_image`, so real
+turns remain blocked. If a future reviewed CLI accepts the full control set,
+JSONL command/file/patch/MCP/App/Web/image/computer/permission events still
+cause a hard `tool_use_violation`; that detection is defence in depth.
+Temperature and seed are unsupported, and no deterministic behavior is
+claimed.
+
+Provider-service networking and Agent-tool networking are separate provenance
+dimensions. A valid future Codex call may have
+`provider_transport_network_expected=true` while still requiring
+`agent_tool_network_enabled=false`. The compatibility `network_access` value
+cannot express both facts on its own.
 
 Record/Replay and cache support describe the existing nmsim wrappers. They are
 not assertions that the upstream provider offers these features natively.
@@ -150,6 +190,14 @@ not, by themselves, invalidate a Phase 1.1 schema 1.2 recording. Strict Replay
 continues to use its existing scientific, configuration, Prompt, Persona,
 request, and schema contracts.
 
+For CodexExec, the immutable no-tools settings, explicit model and reasoning
+effort, CLI/binary, wrapper, and Decision schema are also copied into the
+Codex-specific model-request identity. A change there must reject strict replay
+or result reuse even though ordinary capability-document wording does not.
+Reasoning effort remains a separately hashed Provider request option outside
+the frozen scientific Config dataclass; the strict gate uses
+`model_request_config_hash`.
+
 ## Phase 1.2B-CX1 boundary
 
 This phase performs no real-provider qualification and no real Codex task. It
@@ -159,3 +207,7 @@ fingerprint. Fake-executable tests exercise the adapter without quota or
 network use. A capability declaration makes the boundary auditable; it does
 not authorize a real case. The explicit pilot controls are documented in
 [CODEX_QUALIFICATION_RUNBOOK.md](CODEX_QUALIFICATION_RUNBOOK.md).
+
+`history.persistence=none` and reasoning hiding are configured requirements,
+not empirically verified claims about a real upstream turn. Actual Codex model
+turns remain zero.

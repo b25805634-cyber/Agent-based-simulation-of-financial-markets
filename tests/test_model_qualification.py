@@ -435,13 +435,15 @@ class QualificationManagedCLITests(unittest.TestCase):
             "nmsim.codex_exec.codex_static_adapter_identity",
             return_value={"provider": "codex_exec", "requested_model": "fake-model"},
         ) as static_identity:
-            qualification._build_provider("codex_exec", 7, "fake-model")
-            qualification._codex_static_identity("fake-model")
+            qualification._build_provider(
+                "codex_exec", 7, "fake-model", reasoning_effort="low"
+            )
+            qualification._codex_static_identity("fake-model", "low")
         provider_class.assert_called_once_with(
-            model="fake-model", binary=fake_binary
+            model="fake-model", reasoning_effort="low", binary=fake_binary
         )
         static_identity.assert_called_once_with(
-            binary=fake_binary, model="fake-model"
+            binary=fake_binary, model="fake-model", reasoning_effort="low"
         )
 
     def test_dry_run_never_constructs_provider_and_records_zero_calls(self):
@@ -488,7 +490,7 @@ class QualificationManagedCLITests(unittest.TestCase):
         }
 
     @staticmethod
-    def _codex_static_identity(_model):
+    def _codex_static_identity(_model, _reasoning_effort=None):
         return {
             "provider": "codex_exec",
             "requested_model": "fake-codex-model",
@@ -503,6 +505,8 @@ class QualificationManagedCLITests(unittest.TestCase):
             "decision_schema_hash": "c" * 64,
             "auth_probe_performed": False,
             "subprocess_started": False,
+            "real_use_ready": False,
+            "reasoning_effort": _reasoning_effort,
         }
 
     def test_codex_dry_run_defaults_to_one_and_never_constructs_provider(self):
@@ -530,6 +534,8 @@ class QualificationManagedCLITests(unittest.TestCase):
                     "codex_exec",
                     "--model",
                     "fake-codex-model",
+                    "--reasoning-effort",
+                    "low",
                     "--dry-run",
                     "--out",
                     str(out),
@@ -573,6 +579,8 @@ class QualificationManagedCLITests(unittest.TestCase):
                     "codex_exec",
                     "--model",
                     "fake-codex-model",
+                    "--reasoning-effort",
+                    "low",
                     "--out",
                     str(out),
                 ]
@@ -591,21 +599,55 @@ class QualificationManagedCLITests(unittest.TestCase):
         self.assertFalse(manifest["llm"]["runtime"]["network_access"])
         self.assertNotIn("RoundStarted", events)
 
-    def test_codex_requires_explicit_model_even_for_dry_run(self):
-        out = self.root / "codex-missing-model"
+    def test_codex_real_use_requires_explicit_reasoning_effort(self):
+        out = self.root / "codex-missing-effort"
+        stderr = io.StringIO()
         with mock.patch.object(
             qualification,
             "_build_provider",
-            side_effect=AssertionError("model-less Codex provider constructed"),
-        ) as build, redirect_stderr(io.StringIO()), self.assertRaises(SystemExit):
+            side_effect=AssertionError("effort-less Codex provider constructed"),
+        ) as build, redirect_stderr(stderr), self.assertRaises(SystemExit) as raised:
             qualification.main(
-                ["--provider", "codex_exec", "--dry-run", "--out", str(out)]
+                [
+                    "--provider",
+                    "codex_exec",
+                    "--model",
+                    "fake-codex-model",
+                    "--confirm-real-codex-usage",
+                    "--max-cases",
+                    "1",
+                    "--out",
+                    str(out),
+                ]
             )
+        self.assertEqual(raised.exception.code, 2)
+        self.assertIn("--reasoning-effort", stderr.getvalue())
         build.assert_not_called()
         manifest = _read_json(_single_run(out) / "run_manifest.json")
         self.assertEqual(manifest["status"], "failed")
         self.assertEqual(manifest["failure_stage"], "provider_setup")
         self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+        self.assertFalse(manifest["llm"]["runtime"]["network_access"])
+
+    def test_codex_dry_run_can_report_missing_model_and_effort_without_provider(self):
+        out = self.root / "codex-missing-model"
+        with mock.patch.object(
+            qualification,
+            "_build_provider",
+            side_effect=AssertionError("model-less Codex provider constructed"),
+        ) as build, redirect_stdout(io.StringIO()):
+            qualification.main(
+                ["--provider", "codex_exec", "--dry-run", "--out", str(out)]
+            )
+        build.assert_not_called()
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        summary = _read_json(run_dir / "dry_run_summary.json")
+        self.assertEqual(manifest["status"], "finished")
+        self.assertEqual(manifest["completion"]["provider_calls"]["attempted"], 0)
+        self.assertIsNone(summary["model_requested"])
+        self.assertIsNone(summary["reasoning_effort_requested"])
+        self.assertFalse(summary["provider_static_identity"]["real_use_ready"])
 
     def test_unsafe_codex_model_is_managed_config_validation_failure(self):
         out = self.root / "codex-unsafe-model"
@@ -663,6 +705,8 @@ class QualificationManagedCLITests(unittest.TestCase):
                             "codex_exec",
                             "--model",
                             "fake-codex-model",
+                            "--reasoning-effort",
+                            "low",
                             "--confirm-real-codex-usage",
                             "--max-cases",
                             "2",
@@ -692,6 +736,8 @@ class QualificationManagedCLITests(unittest.TestCase):
                     "codex_exec",
                     "--model",
                     "fake-codex-model",
+                    "--reasoning-effort",
+                    "low",
                     "--confirm-real-codex-usage",
                     "--out",
                     str(out),
@@ -770,6 +816,8 @@ class QualificationManagedCLITests(unittest.TestCase):
                     "codex_exec",
                     "--model",
                     "fake-codex-model",
+                    "--reasoning-effort",
+                    "low",
                     "--confirm-real-codex-usage",
                     "--max-cases",
                     "2",
@@ -781,7 +829,12 @@ class QualificationManagedCLITests(unittest.TestCase):
                     str(out),
                 ]
             )
-        build.assert_called_once_with("codex_exec", 7, "fake-codex-model")
+        build.assert_called_once_with(
+            "codex_exec",
+            7,
+            "fake-codex-model",
+            reasoning_effort="low",
+        )
         network.assert_not_called()
         run_dir = _single_run(out)
         summary = _read_json(run_dir / "qualification_summary.json")
@@ -871,6 +924,8 @@ class QualificationManagedCLITests(unittest.TestCase):
                     "codex_exec",
                     "--model",
                     "fake-codex-model",
+                    "--reasoning-effort",
+                    "low",
                     "--confirm-real-codex-usage",
                     "--max-cases",
                     "1",

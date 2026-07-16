@@ -340,7 +340,10 @@ def build_effective_config_contract(
         os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
     ).strip().lower()
     if requested_provider == "codex_exec":
-        from .codex_exec import codex_static_adapter_identity
+        from .codex_exec import (
+            codex_reasoning_effort_from_environment,
+            codex_static_adapter_identity,
+        )
 
         model_summary["_provider_adapter_contract"] = (
             codex_static_adapter_identity(
@@ -349,6 +352,10 @@ def build_effective_config_contract(
                     os.environ.get("LLM_MODEL")
                     or getattr(cfg, "model", "")
                     or None
+                ),
+                reasoning_effort=(
+                    getattr(cfg, "codex_reasoning_effort", None)
+                    or codex_reasoning_effort_from_environment()
                 ),
             )
         )

@@ -279,6 +279,14 @@ def _nested_attr(value: Any, name: str) -> Any:
     return None
 
 
+def _codex_reasoning_effort(model_config: Mapping[str, Any]) -> Optional[str]:
+    contract = model_config.get("provider_adapter_contract")
+    if not isinstance(contract, Mapping):
+        return None
+    value = contract.get("reasoning_effort")
+    return str(value) if isinstance(value, str) and value else None
+
+
 def model_config_from_llm(
     llm: Any, overrides: Optional[Mapping[str, Any]] = None
 ) -> dict[str, Any]:
@@ -380,12 +388,22 @@ def runtime_model_config(
         "endpoint_sha256": _sha256_text(str(endpoint)) if endpoint else None,
     }
     if resolved == "codex_exec" or requested == "codex_exec":
-        from .codex_exec import codex_static_adapter_identity
+        from .codex_exec import (
+            codex_reasoning_effort_from_environment,
+            codex_static_adapter_identity,
+        )
 
         executable = os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex")
+        reasoning_effort = _nested_attr(llm, "reasoning_effort")
+        if reasoning_effort is None:
+            reasoning_effort = (
+                getattr(cfg, "codex_reasoning_effort", None)
+                or codex_reasoning_effort_from_environment()
+            )
         config["provider_adapter_contract"] = codex_static_adapter_identity(
             executable,
             model=None if model is None else str(model),
+            reasoning_effort=reasoning_effort,
         )
         # Runtime capability/auth evidence is immutable historical provenance.
         # Record mode obtains it from the already-probed adapter. Replay never
@@ -643,6 +661,7 @@ class RecordingLLM(_ContextMixin):
                     system,
                     user,
                     str(self.model_config.get("model") or ""),
+                    reasoning_effort=_codex_reasoning_effort(self.model_config),
                 )
             calls.append(
                 {
@@ -791,6 +810,7 @@ def _load_records(path: pathlib.Path) -> list[dict[str, Any]]:
                     system,
                     user,
                     str(record_model_config.get("model") or ""),
+                    reasoning_effort=_codex_reasoning_effort(record_model_config),
                 )
                 if request.get("provider_adapter_identity") != expected_adapter_identity:
                     raise ReplayMismatchError(
@@ -1098,6 +1118,7 @@ class ReplayLLM(_ContextMixin):
                     system,
                     user,
                     str(self.model_config.get("model") or ""),
+                    reasoning_effort=_codex_reasoning_effort(self.model_config),
                 )
             self._emit_request(
                 sequence=sequence,
