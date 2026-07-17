@@ -81,6 +81,10 @@ _PUBLIC_CODEX_METADATA_FIELDS = frozenset(
         "strict_config",
         "tool_surface_contract",
         "tool_surface_contract_hash",
+        "control_mapping_schema_version",
+        "control_mapping_policy_hash",
+        "control_mapping_hash",
+        "control_matrix",
         "tool_surface_verified",
         "capability_probe_method",
         "auth_probe_performed",
@@ -97,6 +101,7 @@ _PUBLIC_CODEX_METADATA_FIELDS = frozenset(
         "shell_tool_enabled",
         "unified_exec_enabled",
         "apps_enabled",
+        "memories_enabled",
         "view_image_enabled",
         "history_persistence",
         "agent_reasoning_events_hidden",
@@ -1102,11 +1107,14 @@ def _codex_static_identity(
 ) -> dict[str, Any]:
     """Build wrapper/schema/binary identity without probing auth or spawning Codex."""
 
-    from nmsim.codex_exec import codex_static_adapter_identity
+    from nmsim.codex_exec import (
+        codex_binary_from_environment,
+        codex_static_adapter_identity,
+    )
 
     return _safe_codex_metadata(
         codex_static_adapter_identity(
-            binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+            binary=codex_binary_from_environment(),
             model=model or None,
             reasoning_effort=reasoning_effort or None,
         )
@@ -1142,12 +1150,12 @@ def _build_provider(
     if provider_id == "codex_exec":
         # Deliberately lazy: --dry-run and rejected guard paths must neither
         # import nor construct the external CLI adapter.
-        from nmsim.codex_exec import CodexExecLLM
+        from nmsim.codex_exec import CodexExecLLM, codex_binary_from_environment
 
         return CodexExecLLM(
             model=model or "",
             reasoning_effort=reasoning_effort or "",
-            binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+            binary=codex_binary_from_environment(),
         )
     raise QualificationProviderGuardError(
         "qualification forbids external or unreviewed provider {!r}".format(

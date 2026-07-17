@@ -389,11 +389,12 @@ def runtime_model_config(
     }
     if resolved == "codex_exec" or requested == "codex_exec":
         from .codex_exec import (
+            codex_binary_from_environment,
             codex_reasoning_effort_from_environment,
             codex_static_adapter_identity,
         )
 
-        executable = os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex")
+        executable = codex_binary_from_environment()
         reasoning_effort = _nested_attr(llm, "reasoning_effort")
         if reasoning_effort is None:
             reasoning_effort = (

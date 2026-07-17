@@ -17,6 +17,10 @@ The sealed Phase 1.2A foundation is
 At the time of sealing, the local `codex-cli 0.144.4` strict config probe
 rejects `tools.view_image`. The real-use gate is therefore closed and this
 runbook is a future protocol, not an executable authorization.
+The same rejection was reproduced on isolated official 0.144.5 and
+0.145.0-alpha.16 runtimes; see
+[CODEX_RUNTIME_COMPATIBILITY.md](CODEX_RUNTIME_COMPATIBILITY.md). No reviewed
+version-specific alias exists.
 
 ## Before any quota-consuming run
 
@@ -38,6 +42,11 @@ runbook is a future protocol, not an executable authorization.
 7. Confirm that every required no-tools config key passes the current CLI's
    non-task strict probe. `read-only` alone is insufficient. If any control,
    including `tools.view_image`, is unsupported, stop before Provider launch.
+
+For a reviewed side-by-side runtime, set
+`CODEX_EXEC_BINARY=/absolute/path/to/codex`. The older
+`NMSIM_CODEX_EXECUTABLE` name is retained only for compatibility. Do not set
+both to different paths.
 
 Do not set `OPENAI_API_KEY` or `CODEX_API_KEY` for this adapter. The subprocess
 sanitizes conflicting variables regardless, and API-key auth is rejected.
@@ -158,10 +167,10 @@ The qualification continues to enforce Phase 1.2A visibility and privacy:
 
 Before a turn, the Provider must actively set forced ChatGPT login, approval
 `never`, read-only sandboxing, disabled Web search/shell/unified-exec/Apps/image
-tools, `history.persistence=none`, hidden CLI reasoning, personality `none`,
-disabled feedback and update checks. If the current CLI cannot confirm every
-control, the run fails with `codex_tool_surface_cannot_be_disabled`. Read-only
-is not a no-tools guarantee.
+tools and memories, `history.persistence=none`, hidden CLI reasoning,
+personality `none`, disabled feedback and update checks. If the current CLI
+cannot confirm every control, the run fails with
+`codex_tool_surface_cannot_be_disabled`. Read-only is not a no-tools guarantee.
 
 After launch, JSONL inspection remains the second defence. Any command,
 file-change, `apply_patch`, MCP, App/connector, Web, image, computer-use,
@@ -244,7 +253,9 @@ Do not continue to a larger stage until the failure is explained, tested with
 the fake executable where possible, and explicitly reviewed.
 
 The installed 0.144.4 CLI currently meets the stop condition because
-`tools.view_image` is not recognized by the strict probe. No one-case smoke,
-12-case pilot, or 48-case qualification may start until that gap has a reviewed
-fail-closed resolution. This phase did not run a real turn and did not
-empirically validate upstream history persistence.
+`tools.view_image` is not recognized by the strict parser, before effective
+readback can confirm it disabled. Side-by-side stable
+0.144.5 and prerelease 0.145.0-alpha.16 have the same limitation. No one-case
+smoke, 12-case pilot, or 48-case qualification may start until that gap has a
+reviewed fail-closed resolution. This phase did not run a real turn and did
+not empirically validate upstream history persistence.

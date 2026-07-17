@@ -506,6 +506,12 @@ class RunManager:
                 "tool_surface_contract_hash": adapter_contract.get(
                     "tool_surface_contract_hash"
                 ),
+                "control_mapping_schema_version": adapter_contract.get(
+                    "control_mapping_schema_version"
+                ),
+                "control_mapping_policy_hash": adapter_contract.get(
+                    "control_mapping_policy_hash"
+                ),
                 "decision_schema_hash": adapter_contract.get(
                     "decision_schema_hash"
                 ),

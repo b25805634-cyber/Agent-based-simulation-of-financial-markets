@@ -11,7 +11,7 @@ must not be exposed as a service. A more capable model is not automatically a
 more realistic market Agent, and Codex is an agentic coding environment rather
 than a neutral text-completion transport.
 
-## Frozen local capability evidence
+## Frozen and current local capability evidence
 
 Phase 1.2B-CX1 used only non-task CLI probes. No model task was submitted.
 The sealed Phase 1.2A reference is
@@ -28,6 +28,12 @@ implementation commit and must not be substituted for the sealed tag identity.
 | `codex login status` | ChatGPT-managed login was reported; raw status is not persisted |
 | `codex exec --help` | supports the flags listed below |
 | strict no-tools config probe | all required controls except `tools.view_image` were recognized; `tools.view_image` was rejected by local CLI 0.144.4 |
+
+The runtime-compatibility investigation also installed official
+`@openai/codex` 0.144.5 and 0.145.0-alpha.16 side by side, without changing
+the daily binary. Both reject the same canonical key. Exact paths, byte hashes,
+per-key results, and error attribution are in
+[CODEX_RUNTIME_COMPATIBILITY.md](CODEX_RUNTIME_COMPATIBILITY.md).
 
 The observed `exec` help exposes `--strict-config`, `-m/--model`,
 `-s/--sandbox` with `read-only`, `workspace-write`, and `danger-full-access`,
@@ -51,10 +57,11 @@ CLI is **not eligible to start a real Codex turn**. The adapter must return
 Nothing in this document authorizes dropping that control or relying only on
 post-hoc event detection.
 
-These observations describe local CLI version 0.144.4 only. Runtime probing is
-fail-closed: missing required flags, an unparseable version, an unsupported
-authentication mode, or a changed event contract must stop before a model
-request rather than silently weakening isolation.
+The original evidence describes local CLI 0.144.4; the same blocker was
+reproduced on side-by-side stable 0.144.5 and prerelease 0.145.0-alpha.16.
+Runtime probing is fail-closed: missing required flags, an unparseable version,
+an unsupported authentication mode, or a changed event contract must stop
+before a model request rather than silently weakening isolation.
 
 ## Capability registry entry
 
@@ -139,6 +146,7 @@ codex exec --strict-config --ephemeral --sandbox read-only --ignore-user-config
   -c features.shell_tool=false
   -c features.unified_exec=false
   -c features.apps=false
+  -c features.memories=false
   -c tools.view_image=false
   -c feedback.enabled=false
   -c check_for_update_on_startup=false
@@ -149,17 +157,32 @@ The versioned contract also sets `tools.web_search=false`, `mcp_servers={}`,
 and disables the reviewed browser/computer/image-generation/in-app-browser,
 MCP Apps, plugins/remote plugins/plugin sharing, hooks, skill MCP dependency
 installation, MCP elicitation, permission-request, multi-agent,
-shell-snapshot, login-shell, and analytics feature switches. The authoritative
-ordered key/value set is `_NO_TOOLS_CONFIG_ITEMS` in
+shell-snapshot, login-shell, and analytics feature switches. Top-level
+`web_search="disabled"` is the authoritative Web-tool control:
+`tools.web_search=false` parses on the investigated runtimes but normalizes to
+`null` in no-model `config/read`, so it is recorded as supplementary rather
+than readiness evidence. The authoritative ordered controls are
+`_NO_TOOLS_CONTROL_SPECS` in
 `nmsim/codex_exec.py`; prose summaries are not a substitute for that identity.
 
 This is explanatory notation, not a shell command. The implementation passes
-each token separately. Every flag and config key must be accepted by the
-current strict capability probe before the executable may receive a market
-Prompt. Unsupported controls are not silently omitted. In particular, the
+each token separately. Every flag and config key must pass the strict parser
+and match no-model `config/read`; feature controls must also match
+`features list` before the executable may receive a market Prompt. Parse-only
+acceptance is insufficient, and unsupported or ineffective controls are not
+silently omitted. In particular, the
 installed 0.144.4 rejection of `tools.view_image` currently prevents a real
-turn. Run ids, Agent ids, and temporary filename components are sanitized
-before use.
+turn; side-by-side 0.144.5 and 0.145.0-alpha.16 do not remove that blocker.
+Run ids, Agent ids, and temporary filename components are sanitized before use.
+
+`CODEX_EXEC_BINARY` selects an explicit side-by-side runtime.
+`NMSIM_CODEX_EXECUTABLE` remains a compatibility alias; conflicting values
+fail before Provider setup. Runtime paths do not enter scientific Config. The
+resolved binary hash, static canonical-to-actual mapping policy, wrapper,
+schema, model, and reasoning effort enter pre-execution request identity. A
+successful runtime snapshot additionally records CLI-reported version and the
+resolved mapping hash; current pre-execution child reuse relies on binary bytes
+rather than independently re-probing that version.
 
 `--ignore-user-config` and explicit overrides prevent a permissive user config
 from reopening these surfaces. `--ephemeral` and
@@ -215,8 +238,11 @@ explicit reasoning effort, wrapper version/hash, Decision-schema version/hash,
 executable name/status and binary-byte hash, read-only sandbox,
 ephemeral/strict-config state, forced ChatGPT login mode, approval policy,
 personality, history/reasoning visibility settings, and the complete no-tools
-configuration. It also records explicit facts that no auth probe or subprocess
-was performed while creating the static identity.
+configuration. The no-tools contract is now version `1.1` and includes the
+static mapping-policy hash and `features.memories=false`. A successful runtime
+probe additionally records the exact CLI-version-specific mapping hash and
+per-control verification matrix. It also records explicit facts that no auth
+probe or subprocess was performed while creating the static identity.
 
 This extension is conditional. Mock, Anthropic, and OpenAI-compatible runs do
 not receive the extra key, so their established model-request hashes remain
@@ -304,16 +330,18 @@ without a subprocess and compares them with the recording.
 
 Strict replay must match the existing recording schema 1.2 identities plus the
 Codex wrapper, Decision output schema, requested/resolved model, reasoning
-effort, CLI/binary identity, and full no-tools effective configuration encoded
-by the model-request contract. A mismatch fails closed and never falls through
-to a live process. Changing ordinary documentation alone must not invalidate
-replay.
+effort, binary-byte/static-policy identity, and full no-tools configuration
+encoded by the model-request contract. Recorded runtime CLI/mapping evidence is
+preserved without probing the local CLI during Replay. A mismatch fails closed
+and never falls through to a live process. Changing ordinary documentation
+alone must not invalidate replay.
 
 ## Error taxonomy
 
 The adapter distinguishes at least:
 
 - `codex_binary_missing`
+- `codex_binary_configuration_conflict`
 - `unsupported_codex_cli_version`
 - `codex_tool_surface_cannot_be_disabled`
 - `codex_not_authenticated`
@@ -336,15 +364,22 @@ API-key fallback, or a non-official endpoint. Completion and honest-N retain
 the actual failed count.
 
 The capability probe checks every option and effective config control that the
-adapter intends to pass, including `--color`. The installed 0.144.4 help and
-fake runtime tests confirm stdin prompt delivery using positional `-`, but its
-strict config probe rejects `tools.view_image`. Therefore the current real-use
-gate remains closed. A future CLI may become eligible only after the complete
-control set passes the non-task probe and reviewed fake-executable tests.
+adapter intends to pass, including `--color`. It reports
+`project_probe_rejected_key`, `codex_cli_rejected_key`,
+`invocation_syntax_error`, and `unsupported_in_installed_version` separately
+inside the safe compatibility matrix while retaining the stable outer
+`codex_tool_surface_cannot_be_disabled` failure. The investigated runtimes
+reject `tools.view_image`; no reviewed alias exists. Therefore the current
+real-use gate remains closed. A future CLI may become eligible only after the
+complete control set passes strict parsing, effective `config/read`, feature
+readback, explicit model/reasoning guards, and reviewed fake-executable tests.
 
 ## Phase boundary
 
-Phase 1.2B-CX1 adds and tests the adapter with a fake executable only. It makes
-no real Codex model call, consumes no ChatGPT Pro quota, changes no default
-Provider, and changes no market, Agent, social, leverage, validation, Prompt,
-Persona, recording-schema, or scientific-fingerprint semantics.
+Phase 1.2B-CX1 added the adapter with a fake executable. The runtime
+compatibility follow-up adds only parser attribution, side-by-side runtime
+selection, mandatory-control integrity, and Provider-specific identity
+evidence. It makes no real Codex model call, consumes no ChatGPT Pro quota,
+changes no default Provider, and changes no market, Agent, social, leverage,
+validation, Prompt, Persona, recording-schema, or scientific-fingerprint
+semantics.

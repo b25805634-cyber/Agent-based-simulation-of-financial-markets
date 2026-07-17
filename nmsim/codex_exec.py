@@ -17,6 +17,7 @@ import json
 import math
 import os
 import pathlib
+import queue
 import re
 import shutil
 import signal
@@ -31,8 +32,11 @@ from typing import Any, Callable, Iterable, Mapping, Optional, Sequence
 CODEX_EXEC_PROVIDER_ID = "codex_exec"
 CODEX_WRAPPER_PROTOCOL_VERSION = "1.0"
 CODEX_DECISION_SCHEMA_VERSION = "1.0"
-CODEX_TOOL_SURFACE_CONTRACT_VERSION = "1.0"
+CODEX_TOOL_SURFACE_CONTRACT_VERSION = "1.1"
+CODEX_CONTROL_MAPPING_SCHEMA_VERSION = "1.0"
 CODEX_REASONING_EFFORT_ENV = "NMSIM_CODEX_REASONING_EFFORT"
+CODEX_EXEC_BINARY_ENV = "CODEX_EXEC_BINARY"
+LEGACY_CODEX_EXEC_BINARY_ENV = "NMSIM_CODEX_EXECUTABLE"
 
 _SCHEMA_PATH = (
     pathlib.Path(__file__).resolve().parent
@@ -82,47 +86,123 @@ _ALLOWED_REASONING_EFFORTS = frozenset(
     {"minimal", "low", "medium", "high", "xhigh"}
 )
 
+@dataclass(frozen=True)
+class CodexControlSpec:
+    """One canonical no-tools control and its required verification method."""
+
+    canonical_key: str
+    requested_value: Any
+    verification_method: str
+    required_for_real_use: bool = True
+
+
 # These settings are passed explicitly on every real Codex turn.  They are
 # also validated, without submitting a model task, through the CLI's strict
-# app-server config parser.  `tools.view_image` is deliberately retained even
-# on CLI versions that do not yet recognize it: inability to validate any
-# required control makes real use fail closed.
-_NO_TOOLS_CONFIG_ITEMS: tuple[tuple[str, Any], ...] = (
-    ("forced_login_method", "chatgpt"),
-    ("approval_policy", "never"),
-    ("sandbox_mode", "read-only"),
-    ("web_search", "disabled"),
-    ("history.persistence", "none"),
-    ("hide_agent_reasoning", True),
-    ("show_raw_agent_reasoning", False),
-    ("personality", "none"),
-    ("features.shell_tool", False),
-    ("features.unified_exec", False),
-    ("features.apps", False),
-    ("tools.view_image", False),
-    ("tools.web_search", False),
-    ("mcp_servers", {}),
-    ("features.browser_use", False),
-    ("features.browser_use_external", False),
-    ("features.browser_use_full_cdp_access", False),
-    ("features.computer_use", False),
-    ("features.image_generation", False),
-    ("features.in_app_browser", False),
-    ("features.enable_mcp_apps", False),
-    ("features.plugins", False),
-    ("features.remote_plugin", False),
-    ("features.plugin_sharing", False),
-    ("features.hooks", False),
-    ("features.skill_mcp_dependency_install", False),
-    ("features.tool_call_mcp_elicitation", False),
-    ("features.request_permissions_tool", False),
-    ("features.multi_agent", False),
-    ("features.shell_snapshot", False),
-    ("allow_login_shell", False),
-    ("feedback.enabled", False),
-    ("analytics.enabled", False),
-    ("check_for_update_on_startup", False),
+# app-server config parser and ``config/read``. Feature flags receive an
+# additional effective-state readback through ``codex features list``.
+# ``tools.view_image`` is deliberately
+# retained even on CLI versions that do not yet recognize it: inability to
+# validate any required control makes real use fail closed.
+_REVIEWED_NO_TOOLS_CONTROL_CONTRACT: tuple[CodexControlSpec, ...] = (
+    CodexControlSpec("forced_login_method", "chatgpt", "config_read"),
+    CodexControlSpec("approval_policy", "never", "config_read"),
+    CodexControlSpec("sandbox_mode", "read-only", "config_read"),
+    CodexControlSpec("web_search", "disabled", "config_read"),
+    CodexControlSpec("history.persistence", "none", "config_read"),
+    CodexControlSpec("hide_agent_reasoning", True, "config_read"),
+    CodexControlSpec("show_raw_agent_reasoning", False, "config_read"),
+    CodexControlSpec("personality", "none", "config_read"),
+    CodexControlSpec("features.shell_tool", False, "features_list_and_config_read"),
+    CodexControlSpec(
+        "features.unified_exec", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec("features.apps", False, "features_list_and_config_read"),
+    CodexControlSpec(
+        "features.memories", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec("tools.view_image", False, "config_read"),
+    # Top-level ``web_search=disabled`` is the effective network-tool control.
+    # The legacy boolean parses on current CLIs but normalizes to null in
+    # config/read, so it is supplementary rather than readiness evidence.
+    CodexControlSpec(
+        "tools.web_search",
+        False,
+        "config_read_supplementary",
+        required_for_real_use=False,
+    ),
+    CodexControlSpec("mcp_servers", {}, "config_read"),
+    CodexControlSpec(
+        "features.browser_use", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.browser_use_external", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.browser_use_full_cdp_access",
+        False,
+        "features_list_and_config_read",
+    ),
+    CodexControlSpec(
+        "features.computer_use", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.image_generation", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.in_app_browser", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.enable_mcp_apps", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec("features.plugins", False, "features_list_and_config_read"),
+    CodexControlSpec(
+        "features.remote_plugin", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.plugin_sharing", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec("features.hooks", False, "features_list_and_config_read"),
+    CodexControlSpec(
+        "features.skill_mcp_dependency_install",
+        False,
+        "features_list_and_config_read",
+    ),
+    CodexControlSpec(
+        "features.tool_call_mcp_elicitation",
+        False,
+        "features_list_and_config_read",
+    ),
+    CodexControlSpec(
+        "features.request_permissions_tool",
+        False,
+        "features_list_and_config_read",
+    ),
+    CodexControlSpec(
+        "features.multi_agent", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec(
+        "features.shell_snapshot", False, "features_list_and_config_read"
+    ),
+    CodexControlSpec("allow_login_shell", False, "config_read"),
+    CodexControlSpec("feedback.enabled", False, "config_read"),
+    CodexControlSpec("analytics.enabled", False, "config_read"),
+    CodexControlSpec("check_for_update_on_startup", False, "config_read"),
 )
+
+# The active list is kept separate from the immutable reviewed contract so
+# integrity checks and tests detect accidental value/method/required changes,
+# not merely missing key names.
+_NO_TOOLS_CONTROL_SPECS = _REVIEWED_NO_TOOLS_CONTROL_CONTRACT
+
+_NO_TOOLS_CONFIG_ITEMS: tuple[tuple[str, Any], ...] = tuple(
+    (spec.canonical_key, spec.requested_value)
+    for spec in _NO_TOOLS_CONTROL_SPECS
+)
+
+# No released runtime has a reviewed alias for a canonical control today.
+# Future mappings must be exact-version entries; wildcard or prefix matching is
+# deliberately forbidden.
+_VERSION_SPECIFIC_CONFIG_KEY_MAP: Mapping[str, Mapping[str, str]] = {}
 
 _ALLOWED_TOP_LEVEL_EVENTS = frozenset(
     {
@@ -294,15 +374,38 @@ def codex_tool_surface_contract(
     config = {key: value for key, value in _NO_TOOLS_CONFIG_ITEMS}
     if effort is not None:
         config["model_reasoning_effort"] = effort
+    mapping_policy = {
+        "schema_version": CODEX_CONTROL_MAPPING_SCHEMA_VERSION,
+        "exact_version_mappings": {
+            version: {
+                key: value for key, value in sorted(mapping.items())
+            }
+            for version, mapping in sorted(
+                _VERSION_SPECIFIC_CONFIG_KEY_MAP.items()
+            )
+        },
+    }
     return {
         "contract_version": CODEX_TOOL_SURFACE_CONTRACT_VERSION,
         "required_config": config,
+        "control_verification": {
+            spec.canonical_key: {
+                "verification_method": spec.verification_method,
+                "required_for_real_use": spec.required_for_real_use,
+            }
+            for spec in _NO_TOOLS_CONTROL_SPECS
+        },
+        "control_mapping_schema_version": CODEX_CONTROL_MAPPING_SCHEMA_VERSION,
+        "control_mapping_policy_hash": _sha256_text(
+            _canonical_json(mapping_policy)
+        ),
         "provider_transport_network_expected": True,
         "agent_tool_network_enabled": False,
         "web_search_mode": "disabled",
         "shell_tool_enabled": False,
         "unified_exec_enabled": False,
         "apps_enabled": False,
+        "memories_enabled": False,
         "view_image_enabled": False,
         "history_persistence": "none",
         "agent_reasoning_events_hidden": True,
@@ -347,6 +450,99 @@ class CodexExecError(RuntimeError):
 
 
 @dataclass(frozen=True)
+class CodexControlProbe:
+    """Public-safe result for one canonical runtime control."""
+
+    canonical_key: str
+    actual_key: str
+    requested_value: Any
+    project_probe_accepted: bool
+    cli_parser_accepted: bool
+    effective_or_parse_only: str
+    verification_method: str
+    required_for_real_use: bool
+    process_exit_code: Optional[int] = None
+    failure_source: Optional[str] = None
+    failure_reason: Optional[str] = None
+    diagnostic_output_sha256: Optional[str] = None
+    stderr_summary: Optional[str] = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "canonical_key": self.canonical_key,
+            "actual_key": self.actual_key,
+            "requested_value": self.requested_value,
+            "project_probe_accepted": self.project_probe_accepted,
+            "cli_parser_accepted": self.cli_parser_accepted,
+            "effective_or_parse_only": self.effective_or_parse_only,
+            "verification_method": self.verification_method,
+            "required_for_real_use": self.required_for_real_use,
+            "process_exit_code": self.process_exit_code,
+            "failure_source": self.failure_source,
+            "failure_reason": self.failure_reason,
+            "diagnostic_output_sha256": self.diagnostic_output_sha256,
+            "stderr_summary": self.stderr_summary,
+        }
+
+
+@dataclass(frozen=True)
+class CodexRuntimeCompatibilityReport:
+    """Parser-only/no-model runtime report, including failed readiness."""
+
+    cli_version: str
+    binary_name: str
+    binary_sha256: str
+    auth_mode: str
+    auth_verified: bool
+    supported_exec_flags: tuple[str, ...]
+    missing_exec_flags: tuple[str, ...]
+    missing_probe_flags: tuple[str, ...]
+    control_matrix: tuple[CodexControlProbe, ...]
+    resolved_config_items: tuple[tuple[str, Any], ...]
+    control_mapping_schema_version: str
+    control_mapping_hash: str
+    tool_surface_verified: bool
+    runtime_compatible: bool
+    real_use_ready: bool
+    explicit_model_present: bool
+    explicit_reasoning_effort_present: bool
+    stable_block_reason: Optional[str]
+    capability_probe_method: str
+    model_turns_started: int = 0
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "cli_version": self.cli_version,
+            "binary_identity": {
+                "name": self.binary_name,
+                "sha256": self.binary_sha256,
+            },
+            "auth_mode": self.auth_mode,
+            "auth_verified": self.auth_verified,
+            "supported_exec_flags": list(self.supported_exec_flags),
+            "missing_exec_flags": list(self.missing_exec_flags),
+            "missing_probe_flags": list(self.missing_probe_flags),
+            "control_matrix": [item.to_dict() for item in self.control_matrix],
+            "resolved_config_items": [
+                {"key": key, "value": value}
+                for key, value in self.resolved_config_items
+            ],
+            "control_mapping_schema_version": self.control_mapping_schema_version,
+            "control_mapping_hash": self.control_mapping_hash,
+            "tool_surface_verified": self.tool_surface_verified,
+            "runtime_compatible": self.runtime_compatible,
+            "real_use_ready": self.real_use_ready,
+            "explicit_model_present": self.explicit_model_present,
+            "explicit_reasoning_effort_present": (
+                self.explicit_reasoning_effort_present
+            ),
+            "stable_block_reason": self.stable_block_reason,
+            "capability_probe_method": self.capability_probe_method,
+            "model_turns_started": self.model_turns_started,
+        }
+
+
+@dataclass(frozen=True)
 class CodexCapabilityProbe:
     cli_version: str
     binary_name: str
@@ -355,6 +551,10 @@ class CodexCapabilityProbe:
     auth_verified: bool
     supported_exec_flags: tuple[str, ...]
     supported_config_keys: tuple[str, ...]
+    resolved_config_items: tuple[tuple[str, Any], ...]
+    control_matrix: tuple[CodexControlProbe, ...]
+    control_mapping_schema_version: str
+    control_mapping_hash: str
     tool_surface_verified: bool
     capability_probe_method: str
 
@@ -369,6 +569,13 @@ class CodexCapabilityProbe:
             "auth_verified": self.auth_verified,
             "supported_exec_flags": list(self.supported_exec_flags),
             "supported_config_keys": list(self.supported_config_keys),
+            "resolved_config_items": [
+                {"key": key, "value": value}
+                for key, value in self.resolved_config_items
+            ],
+            "control_matrix": [item.to_dict() for item in self.control_matrix],
+            "control_mapping_schema_version": self.control_mapping_schema_version,
+            "control_mapping_hash": self.control_mapping_hash,
             "tool_surface_verified": self.tool_surface_verified,
             "capability_probe_method": self.capability_probe_method,
         }
@@ -406,6 +613,29 @@ def sanitized_subprocess_environment(
             continue
         cleaned[key] = str(raw_value)
     return cleaned
+
+
+def codex_binary_from_environment(
+    environment: Optional[Mapping[str, str]] = None,
+) -> str:
+    """Return the explicit Codex runtime without allowing ambiguous sources."""
+
+    source = os.environ if environment is None else environment
+    primary = str(source.get(CODEX_EXEC_BINARY_ENV, "")).strip()
+    legacy = str(source.get(LEGACY_CODEX_EXEC_BINARY_ENV, "")).strip()
+    if primary and legacy:
+        primary_path = pathlib.Path(primary).expanduser()
+        legacy_path = pathlib.Path(legacy).expanduser()
+        try:
+            same_runtime = primary_path.resolve() == legacy_path.resolve()
+        except OSError:
+            same_runtime = primary == legacy
+        if not same_runtime:
+            raise CodexExecError(
+                "codex_binary_configuration_conflict",
+                "Codex runtime identity was specified by conflicting environment variables",
+            )
+    return primary or legacy or "codex"
 
 
 def _safe_identifier(value: Optional[str], fallback: str) -> str:
@@ -625,18 +855,99 @@ def _classify_nonzero(result: _ProcessResult) -> CodexExecError:
     )
 
 
-def _effective_config_items(
+def _control_specs(
     reasoning_effort: Optional[str],
-) -> tuple[tuple[str, Any], ...]:
-    items = list(_NO_TOOLS_CONFIG_ITEMS)
+) -> tuple[CodexControlSpec, ...]:
+    specs = list(_NO_TOOLS_CONTROL_SPECS)
+    keys = [spec.canonical_key for spec in specs]
+    present = set(keys)
+    duplicates = sorted(key for key in present if keys.count(key) > 1)
+    if duplicates:
+        raise CodexExecError(
+            "project_probe_rejected_key",
+            "Codex no-tools contract contains duplicate canonical controls",
+            public_metadata={"duplicate_canonical_controls": duplicates},
+        )
+    reviewed = {
+        spec.canonical_key: spec
+        for spec in _REVIEWED_NO_TOOLS_CONTROL_CONTRACT
+    }
+    active = {spec.canonical_key: spec for spec in specs}
+    missing = sorted(set(reviewed) - present)
+    unexpected = sorted(present - set(reviewed))
+    changed = sorted(
+        key for key in set(reviewed) & present if active[key] != reviewed[key]
+    )
+    if missing or unexpected or changed:
+        raise CodexExecError(
+            "project_probe_rejected_key",
+            "Codex no-tools contract differs from the reviewed exact control contract",
+            public_metadata={
+                "missing_canonical_controls": missing,
+                "unexpected_canonical_controls": unexpected,
+                "changed_canonical_controls": changed,
+            },
+        )
     if reasoning_effort is not None:
-        items.append(
-            (
+        specs.append(
+            CodexControlSpec(
                 "model_reasoning_effort",
                 validate_codex_reasoning_effort(reasoning_effort),
+                "config_read",
             )
         )
-    return tuple(items)
+    return tuple(specs)
+
+
+def _resolved_control_specs(
+    cli_version: str,
+    reasoning_effort: Optional[str],
+) -> tuple[tuple[CodexControlSpec, str], ...]:
+    mapping = _VERSION_SPECIFIC_CONFIG_KEY_MAP.get(cli_version, {})
+    known = {spec.canonical_key for spec in _control_specs(reasoning_effort)}
+    unknown = sorted(set(mapping) - known)
+    if unknown:
+        raise CodexExecError(
+            "project_probe_rejected_key",
+            "Codex compatibility mapping contains an unknown canonical control",
+            public_metadata={"unknown_canonical_controls": unknown},
+        )
+    resolved = tuple(
+        (spec, str(mapping.get(spec.canonical_key, spec.canonical_key)))
+        for spec in _control_specs(reasoning_effort)
+    )
+    actual_keys = [actual_key for _spec, actual_key in resolved]
+    duplicates = sorted(
+        key for key in set(actual_keys) if actual_keys.count(key) > 1
+    )
+    if duplicates:
+        raise CodexExecError(
+            "project_probe_rejected_key",
+            "Codex compatibility mapping resolves multiple controls to one key",
+            public_metadata={"duplicate_actual_controls": duplicates},
+        )
+    return resolved
+
+
+def _control_mapping_hash(
+    cli_version: str,
+    resolved: Sequence[tuple[CodexControlSpec, str]],
+) -> str:
+    payload = {
+        "schema_version": CODEX_CONTROL_MAPPING_SCHEMA_VERSION,
+        "cli_version": cli_version,
+        "controls": [
+            {
+                "canonical_key": spec.canonical_key,
+                "actual_key": actual_key,
+                "requested_value": spec.requested_value,
+                "verification_method": spec.verification_method,
+                "required_for_real_use": spec.required_for_real_use,
+            }
+            for spec, actual_key in resolved
+        ],
+    }
+    return _sha256_text(_canonical_json(payload))
 
 
 def _config_assignment(key: str, value: Any) -> str:
@@ -653,25 +964,307 @@ def _config_argv(items: Iterable[tuple[str, Any]]) -> list[str]:
 def _feature_states(text: str) -> dict[str, bool]:
     states: dict[str, bool] = {}
     for raw_line in text.splitlines():
-        match = re.match(r"^\s*([A-Za-z0-9_.-]+)\s+\S+\s+(true|false)\s*$", raw_line)
+        match = re.match(
+            r"^\s*([A-Za-z0-9_.-]+)\s+.+?\s+(true|false)\s*$",
+            raw_line,
+        )
         if match is not None:
             states[match.group(1)] = match.group(2) == "true"
     return states
 
 
-def probe_codex_cli(
+def _safe_probe_failure(
+    result: _ProcessResult,
+    *,
+    key: str,
+) -> dict[str, Any]:
+    stderr = _decode_bounded(result.stderr)
+    stdout = _decode_bounded(result.stdout)
+    combined = "{}\n{}".format(stdout, stderr).strip()
+    digest = _sha256_text(combined) if combined else None
+    unknown_field = re.search(
+        r"unknown\s+configuration\s+field\s+[`'\"]?([^`'\"\s]+)",
+        combined,
+        re.I,
+    )
+    if unknown_field is not None:
+        rejected = unknown_field.group(1)
+        return {
+            "failure_source": "codex_cli_rejected_key",
+            "failure_reason": "unsupported_in_installed_version",
+            "diagnostic_output_sha256": digest,
+            "stderr_summary": "unknown configuration field `{}`".format(
+                _safe_public_label(rejected, "config-key")
+            ),
+        }
+    if re.search(
+        r"unknown\s+(?:argument|option)|unrecognized\s+(?:argument|option)|"
+        r"missing\s+(?:required\s+)?(?:argument|option)|usage:",
+        combined,
+        re.I,
+    ):
+        return {
+            "failure_source": "invocation_syntax_error",
+            "failure_reason": "strict_config_probe_invocation_rejected",
+            "diagnostic_output_sha256": digest,
+            "stderr_summary": "Codex rejected the parser-only probe invocation syntax",
+        }
+    return {
+        "failure_source": "codex_cli_rejected_key",
+        "failure_reason": "strict_config_parser_rejected_control",
+        "diagnostic_output_sha256": digest,
+        "stderr_summary": "Codex strict config parser rejected `{}`".format(
+            _safe_public_label(key, "config-key")
+        ),
+    }
+
+
+@dataclass(frozen=True)
+class _EffectiveConfigReadEvidence:
+    config: Optional[Mapping[str, Any]]
+    origins: frozenset[str]
+    failure_reason: Optional[str]
+    diagnostic_output_sha256: Optional[str]
+
+    @property
+    def succeeded(self) -> bool:
+        return self.config is not None and self.failure_reason is None
+
+
+def _run_effective_config_read_probe(
+    executable: pathlib.Path,
+    *,
+    config_items: Sequence[tuple[str, Any]],
+    cwd: pathlib.Path,
+    env: Mapping[str, str],
+    timeout_seconds: float,
+    stdout_limit: int = 256 * 1024,
+    stderr_limit: int = 64 * 1024,
+) -> _EffectiveConfigReadEvidence:
+    """Read effective config over app-server JSONL without starting a turn."""
+
+    argv = [
+        str(executable),
+        "app-server",
+        "--strict-config",
+        "--listen",
+        "stdio://",
+        *_config_argv(config_items),
+    ]
+    try:
+        process = subprocess.Popen(
+            argv,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(cwd),
+            env=dict(env),
+            shell=False,
+            start_new_session=True,
+        )
+    except (FileNotFoundError, OSError) as error:
+        return _EffectiveConfigReadEvidence(
+            config=None,
+            origins=frozenset(),
+            failure_reason="config_read_process_launch_failed",
+            diagnostic_output_sha256=_sha256_text(type(error).__name__),
+        )
+
+    stdout_buffer = bytearray()
+    stderr_buffer = bytearray()
+    stdout_lines: queue.Queue[bytes] = queue.Queue()
+    output_limit_exceeded = threading.Event()
+
+    def read_stdout() -> None:
+        assert process.stdout is not None
+        try:
+            while True:
+                line = process.stdout.readline(stdout_limit + 2)
+                if not line:
+                    break
+                remaining = max(0, stdout_limit + 1 - len(stdout_buffer))
+                if remaining:
+                    stdout_buffer.extend(line[:remaining])
+                if len(stdout_buffer) > stdout_limit or len(line) > remaining:
+                    output_limit_exceeded.set()
+                    _kill_process_group(process)
+                    break
+                stdout_lines.put(line)
+        finally:
+            try:
+                process.stdout.close()
+            except OSError:
+                pass
+
+    def read_stderr() -> None:
+        assert process.stderr is not None
+        try:
+            while True:
+                chunk = process.stderr.read(8192)
+                if not chunk:
+                    break
+                remaining = max(0, stderr_limit + 1 - len(stderr_buffer))
+                if remaining:
+                    stderr_buffer.extend(chunk[:remaining])
+                if len(stderr_buffer) > stderr_limit or len(chunk) > remaining:
+                    output_limit_exceeded.set()
+                    _kill_process_group(process)
+                    break
+        finally:
+            try:
+                process.stderr.close()
+            except OSError:
+                pass
+
+    threads = [
+        threading.Thread(target=read_stdout, daemon=True),
+        threading.Thread(target=read_stderr, daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+
+    def diagnostic_hash() -> Optional[str]:
+        combined = bytes(stdout_buffer) + b"\n" + bytes(stderr_buffer)
+        return _sha256_bytes(combined) if combined.strip() else None
+
+    def send(payload: Mapping[str, Any]) -> bool:
+        assert process.stdin is not None
+        try:
+            process.stdin.write(
+                (_canonical_json(payload) + "\n").encode("utf-8")
+            )
+            process.stdin.flush()
+        except (BrokenPipeError, OSError):
+            return False
+        return True
+
+    failure_reason: Optional[str] = None
+    config: Optional[Mapping[str, Any]] = None
+    origins: frozenset[str] = frozenset()
+    deadline = time.monotonic() + timeout_seconds
+    initialized = send(
+        {
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "clientInfo": {
+                    "name": "nmsim-runtime-probe",
+                    "version": "1.0",
+                },
+                "capabilities": {"experimentalApi": True},
+            },
+        }
+    )
+    if not initialized:
+        failure_reason = "config_read_initialize_write_failed"
+
+    try:
+        while failure_reason is None and time.monotonic() < deadline:
+            if output_limit_exceeded.is_set():
+                failure_reason = "config_read_output_too_large"
+                break
+            try:
+                raw_line = stdout_lines.get(timeout=0.05)
+            except queue.Empty:
+                if process.poll() is not None:
+                    failure_reason = "config_read_process_exited"
+                    break
+                continue
+            try:
+                message = json.loads(raw_line.decode("utf-8"))
+            except (UnicodeError, json.JSONDecodeError):
+                failure_reason = "config_read_json_invalid"
+                break
+            if not isinstance(message, Mapping):
+                failure_reason = "config_read_json_invalid"
+                break
+            if message.get("id") == 1:
+                if "error" in message:
+                    failure_reason = "config_read_initialize_rejected"
+                    break
+                if not send({"method": "initialized"}) or not send(
+                    {
+                        "id": 2,
+                        "method": "config/read",
+                        "params": {
+                            "cwd": str(cwd),
+                            "includeLayers": False,
+                        },
+                    }
+                ):
+                    failure_reason = "config_read_request_write_failed"
+                    break
+            elif message.get("id") == 2:
+                result = message.get("result")
+                if not isinstance(result, Mapping):
+                    failure_reason = "config_read_response_invalid"
+                    break
+                raw_config = result.get("config")
+                raw_origins = result.get("origins")
+                if not isinstance(raw_config, Mapping) or not isinstance(
+                    raw_origins, Mapping
+                ):
+                    failure_reason = "config_read_response_invalid"
+                    break
+                config = dict(raw_config)
+                origins = frozenset(str(key) for key in raw_origins)
+                break
+        if failure_reason is None and config is None:
+            failure_reason = "config_read_timeout"
+    finally:
+        if process.stdin is not None:
+            try:
+                process.stdin.close()
+            except OSError:
+                pass
+        try:
+            process.wait(timeout=0.5)
+        except subprocess.TimeoutExpired:
+            _kill_process_group(process)
+            process.wait()
+        for thread in threads:
+            thread.join(timeout=2.0)
+
+    return _EffectiveConfigReadEvidence(
+        config=config,
+        origins=origins,
+        failure_reason=failure_reason,
+        diagnostic_output_sha256=(
+            None if failure_reason is None else diagnostic_hash()
+        ),
+    )
+
+
+def _nested_config_value(
+    config: Mapping[str, Any], key: str
+) -> tuple[bool, Any]:
+    current: Any = config
+    for component in key.split("."):
+        if not isinstance(current, Mapping) or component not in current:
+            return False, None
+        current = current[component]
+    return True, current
+
+
+def inspect_codex_runtime_compatibility(
     binary: os.PathLike[str] | str = "codex",
     *,
+    model: Optional[str] = None,
     reasoning_effort: Optional[str] = None,
     timeout_seconds: float = 10.0,
     environment: Optional[Mapping[str, str]] = None,
     temp_root: Optional[os.PathLike[str] | str] = None,
-) -> CodexCapabilityProbe:
-    """Validate safe CLI controls and auth without submitting a model task."""
+) -> CodexRuntimeCompatibilityReport:
+    """Return a no-model parser/effective compatibility matrix.
 
+    The function intentionally returns failed readiness instead of collapsing a
+    CLI parser rejection into a generic project error. It never invokes
+    ``codex exec`` or supplies a model prompt.
+    """
+
+    explicit_model = model is not None and bool(validate_codex_model_identity(model))
     executable = _resolve_executable(binary)
     auth_env = sanitized_subprocess_environment(environment)
-    config_items = _effective_config_items(reasoning_effort)
     with tempfile.TemporaryDirectory(
         prefix="nmsim-codex-probe-",
         dir=None if temp_root is None else os.fspath(temp_root),
@@ -695,16 +1288,6 @@ def probe_codex_cli(
                 stderr_limit=64 * 1024,
             )
 
-        def run_tool_surface(args: Sequence[str]) -> _ProcessResult:
-            try:
-                return run(args)
-            except CodexExecError as error:
-                raise CodexExecError(
-                    "codex_tool_surface_cannot_be_disabled",
-                    "Codex no-tools capability validation did not complete safely",
-                    public_metadata={"probe_failure_code": error.code},
-                ) from error
-
         version_result = run(["--version"])
         if version_result.returncode != 0:
             raise CodexExecError(
@@ -719,6 +1302,9 @@ def probe_codex_cli(
             raise CodexExecError(
                 "unsupported_codex_cli_version", "Codex CLI version was not recognizable"
             )
+        cli_version = version_match.group(1)
+        resolved_specs = _resolved_control_specs(cli_version, reasoning_effort)
+        mapping_hash = _control_mapping_hash(cli_version, resolved_specs)
 
         help_result = run(["exec", "--help"])
         if help_result.returncode != 0:
@@ -728,102 +1314,231 @@ def probe_codex_cli(
         help_text = "{}\n{}".format(
             _decode_bounded(help_result.stdout), _decode_bounded(help_result.stderr)
         )
-        missing_flags = [flag for flag in _REQUIRED_EXEC_FLAGS if flag not in help_text]
-        if missing_flags:
-            raise CodexExecError(
-                "unsupported_codex_cli_version",
-                "Codex exec is missing required safe execution capabilities",
-                public_metadata={"missing_flags": sorted(missing_flags)},
-            )
+        missing_flags = tuple(
+            sorted(flag for flag in _REQUIRED_EXEC_FLAGS if flag not in help_text)
+        )
+        supported_flags = tuple(
+            sorted(flag for flag in _REQUIRED_EXEC_FLAGS if flag in help_text)
+        )
 
-        app_server_help = run_tool_surface(["app-server", "--help"])
+        app_server_help = run(["app-server", "--help"])
         app_server_help_text = "{}\n{}".format(
             _decode_bounded(app_server_help.stdout),
             _decode_bounded(app_server_help.stderr),
         )
-        missing_probe_flags = [
-            flag
-            for flag in _REQUIRED_APP_SERVER_FLAGS
-            if flag not in app_server_help_text
-        ]
-        if app_server_help.returncode != 0 or missing_probe_flags:
-            raise CodexExecError(
-                "codex_tool_surface_cannot_be_disabled",
-                "Codex CLI cannot strictly validate the required no-tools configuration",
-                public_metadata={"missing_probe_flags": sorted(missing_probe_flags)},
+        missing_probe_flags = tuple(
+            sorted(
+                flag
+                for flag in _REQUIRED_APP_SERVER_FLAGS
+                if flag not in app_server_help_text
+            )
+        )
+
+        parser_results: dict[str, _ProcessResult] = {}
+        project_failures: dict[str, dict[str, Any]] = {}
+        serialised_items: list[tuple[CodexControlSpec, str, str]] = []
+        if app_server_help.returncode == 0 and not missing_probe_flags:
+            for spec, actual_key in resolved_specs:
+                try:
+                    assignment = _config_assignment(
+                        actual_key, spec.requested_value
+                    )
+                except (TypeError, ValueError) as error:
+                    project_failures[spec.canonical_key] = {
+                        "failure_source": "project_probe_rejected_key",
+                        "failure_reason": "project_config_value_not_serializable",
+                        "diagnostic_output_sha256": _sha256_text(
+                            type(error).__name__
+                        ),
+                        "stderr_summary": (
+                            "Project probe could not serialize the reviewed control"
+                        ),
+                    }
+                    continue
+                serialised_items.append((spec, actual_key, assignment))
+
+        initial_combined: Optional[_ProcessResult] = None
+        if serialised_items:
+            initial_combined = run(
+                [
+                    "app-server",
+                    "--strict-config",
+                    "--listen",
+                    "stdio://",
+                    *[
+                        value
+                        for _spec, _actual_key, assignment in serialised_items
+                        for value in ("-c", assignment)
+                    ],
+                ]
+            )
+            if initial_combined.returncode == 0:
+                for spec, _actual_key, _assignment in serialised_items:
+                    parser_results[spec.canonical_key] = initial_combined
+            else:
+                for spec, _actual_key, assignment in serialised_items:
+                    parser_results[spec.canonical_key] = run(
+                        [
+                            "app-server",
+                            "--strict-config",
+                            "--listen",
+                            "stdio://",
+                            "-c",
+                            assignment,
+                        ]
+                    )
+
+        accepted_items = tuple(
+            (actual_key, spec.requested_value)
+            for spec, actual_key in resolved_specs
+            if spec.canonical_key not in project_failures
+            and spec.canonical_key in parser_results
+            and parser_results[spec.canonical_key].returncode == 0
+        )
+        combined_result: Optional[_ProcessResult] = initial_combined
+        if (
+            initial_combined is not None
+            and initial_combined.returncode != 0
+            and accepted_items
+        ):
+            combined_result = run(
+                [
+                    "app-server",
+                    "--strict-config",
+                    "--listen",
+                    "stdio://",
+                    *_config_argv(accepted_items),
+                ]
             )
 
-        validation = run_tool_surface(
-            [
-                "app-server",
-                "--strict-config",
-                "--listen",
-                "stdio://",
-                *_config_argv(config_items),
-            ]
+        feature_result: Optional[_ProcessResult] = None
+        feature_states: dict[str, bool] = {}
+        if accepted_items:
+            feature_result = run(
+                ["features", "list", *_config_argv(accepted_items)]
+            )
+            feature_text = "{}\n{}".format(
+                _decode_bounded(feature_result.stdout),
+                _decode_bounded(feature_result.stderr),
+            )
+            feature_states = _feature_states(feature_text)
+
+        effective_config = _run_effective_config_read_probe(
+            executable,
+            config_items=accepted_items,
+            cwd=cwd,
+            env=probe_env,
+            timeout_seconds=timeout_seconds,
         )
-        validation_text = "{}\n{}".format(
-            _decode_bounded(validation.stdout),
-            _decode_bounded(validation.stderr),
-        )
-        reported_unsupported = sorted(
-            key
-            for key, _value in config_items
-            if key.lower() in validation_text.lower()
-        )
-        unsupported: list[str] = []
-        if validation.returncode != 0:
-            # Strict config parsing may stop after the first error. Diagnose
-            # every reviewed key on the failure path so provenance never
-            # overstates what the installed CLI accepted.
-            for key, value in config_items:
-                single = run_tool_surface(
-                    [
-                        "app-server",
-                        "--strict-config",
-                        "--listen",
-                        "stdio://",
-                        "-c",
-                        _config_assignment(key, value),
-                    ]
+
+        matrix: list[CodexControlProbe] = []
+        for spec, actual_key in resolved_specs:
+            project_failure = project_failures.get(spec.canonical_key)
+            parser_result = parser_results.get(spec.canonical_key)
+            project_accepted = project_failure is None
+            parser_accepted = (
+                project_accepted
+                and parser_result is not None
+                and parser_result.returncode == 0
+            )
+            failure: dict[str, Any] = {}
+            if project_failure is not None:
+                failure = project_failure
+            elif parser_result is None:
+                failure = {
+                    "failure_source": "invocation_syntax_error",
+                    "failure_reason": "strict_config_probe_unavailable",
+                    "diagnostic_output_sha256": None,
+                    "stderr_summary": (
+                        "Codex app-server strict parser could not be invoked"
+                    ),
+                }
+            elif not parser_accepted:
+                failure = _safe_probe_failure(
+                    parser_result, key=actual_key
                 )
-                if single.returncode != 0:
-                    unsupported.append(key)
-        if validation.returncode != 0:
-            raise CodexExecError(
-                "codex_tool_surface_cannot_be_disabled",
-                "Codex CLI cannot validate every required no-tools control",
-                public_metadata={
-                    "unsupported_controls": sorted(unsupported)
-                    or reported_unsupported
-                    or ["<strict-config-validation-failed>"]
-                },
-            )
 
-        feature_result = run_tool_surface(
-            ["features", "list", *_config_argv(config_items)]
-        )
-        feature_text = "{}\n{}".format(
-            _decode_bounded(feature_result.stdout),
-            _decode_bounded(feature_result.stderr),
-        )
-        feature_states = _feature_states(feature_text)
-        unconfirmed_features = sorted(
-            key
-            for key, expected in config_items
-            if key.startswith("features.")
-            and (
-                key.removeprefix("features.") not in feature_states
-                or feature_states[key.removeprefix("features.")] is not bool(expected)
-            )
-        )
-        if feature_result.returncode != 0 or unconfirmed_features:
-            raise CodexExecError(
-                "codex_tool_surface_cannot_be_disabled",
-                "Codex CLI did not confirm the requested disabled feature states",
-                public_metadata={
-                    "unconfirmed_feature_controls": unconfirmed_features
-                },
+            if not parser_accepted:
+                effective_state = "unconfirmed"
+            elif spec.verification_method.endswith("_supplementary"):
+                effective_state = "parse_only_supplementary"
+            else:
+                config_present = False
+                config_value: Any = None
+                if effective_config.config is not None:
+                    config_present, config_value = _nested_config_value(
+                        effective_config.config, actual_key
+                    )
+                config_confirmed = (
+                    effective_config.succeeded
+                    and config_present
+                    and config_value == spec.requested_value
+                )
+                feature_confirmed = True
+                if spec.verification_method == "features_list_and_config_read":
+                    expected = bool(spec.requested_value)
+                    actual = feature_states.get(
+                        actual_key.removeprefix("features.")
+                    )
+                    feature_confirmed = (
+                        feature_result is not None
+                        and feature_result.returncode == 0
+                        and actual is expected
+                    )
+                if config_confirmed and feature_confirmed:
+                    effective_state = "effective_confirmed"
+                else:
+                    effective_state = "effective_unconfirmed"
+                    failure = {
+                        "failure_source": (
+                            "codex_cli_effective_state_unconfirmed"
+                        ),
+                        "failure_reason": (
+                            effective_config.failure_reason
+                            or (
+                                "config_read_value_or_origin_mismatch"
+                                if not config_confirmed
+                                else "features_list_state_mismatch"
+                            )
+                        ),
+                        "diagnostic_output_sha256": (
+                            effective_config.diagnostic_output_sha256
+                            if not config_confirmed
+                            else (
+                                None
+                                if feature_result is None
+                                else _sha256_bytes(
+                                    feature_result.stdout
+                                    + b"\n"
+                                    + feature_result.stderr
+                                )
+                            )
+                        ),
+                        "stderr_summary": (
+                            "Codex did not confirm the requested effective control state"
+                        ),
+                    }
+
+            matrix.append(
+                CodexControlProbe(
+                    canonical_key=spec.canonical_key,
+                    actual_key=actual_key,
+                    requested_value=spec.requested_value,
+                    project_probe_accepted=project_accepted,
+                    cli_parser_accepted=parser_accepted,
+                    effective_or_parse_only=effective_state,
+                    verification_method=spec.verification_method,
+                    required_for_real_use=spec.required_for_real_use,
+                    process_exit_code=(
+                        None if parser_result is None else parser_result.returncode
+                    ),
+                    failure_source=failure.get("failure_source"),
+                    failure_reason=failure.get("failure_reason"),
+                    diagnostic_output_sha256=failure.get(
+                        "diagnostic_output_sha256"
+                    ),
+                    stderr_summary=failure.get("stderr_summary"),
+                )
             )
 
         auth_result = run(["login", "status"], use_managed_auth=True)
@@ -831,35 +1546,197 @@ def probe_codex_cli(
             _decode_bounded(auth_result.stdout), _decode_bounded(auth_result.stderr)
         )
         if re.search(r"api[ -]?key", auth_text, re.I):
-            raise CodexExecError(
-                "auth_mode_not_chatgpt",
-                "Codex is authenticated with an API key rather than ChatGPT-managed login",
-            )
-        if auth_result.returncode != 0 or re.search(
+            auth_mode = "api_key"
+            auth_verified = False
+            auth_block = "auth_mode_not_chatgpt"
+        elif auth_result.returncode != 0 or re.search(
             r"not\s+(?:logged|authenticated)|logged\s+out", auth_text, re.I
         ):
-            raise CodexExecError(
-                "codex_not_authenticated",
-                "Codex CLI is not authenticated; login must be completed manually",
-            )
-        if not re.search(r"logged\s+in\s+using\s+chatgpt|chatgpt", auth_text, re.I):
-            raise CodexExecError(
-                "auth_mode_not_chatgpt",
-                "Codex authentication mode could not be verified as ChatGPT-managed",
-            )
+            auth_mode = "none"
+            auth_verified = False
+            auth_block = "codex_not_authenticated"
+        elif not re.search(
+            r"logged\s+in\s+using\s+chatgpt|chatgpt", auth_text, re.I
+        ):
+            auth_mode = "unverified"
+            auth_verified = False
+            auth_block = "auth_mode_not_chatgpt"
+        else:
+            auth_mode = "chatgpt_managed_codex"
+            auth_verified = True
+            auth_block = None
 
-    return CodexCapabilityProbe(
-        cli_version=version_match.group(1),
+        required_controls_ok = all(
+            (
+                not item.required_for_real_use
+                or (
+                    item.project_probe_accepted
+                    and item.cli_parser_accepted
+                    and item.effective_or_parse_only
+                    in {
+                        "effective_confirmed",
+                    }
+                )
+            )
+            for item in matrix
+        )
+        combined_ok = (
+            combined_result is not None and combined_result.returncode == 0
+        )
+        tool_surface_verified = bool(
+            not missing_flags
+            and app_server_help.returncode == 0
+            and not missing_probe_flags
+            and required_controls_ok
+            and combined_ok
+        )
+        runtime_compatible = tool_surface_verified and auth_verified
+        request_identity_complete = bool(
+            explicit_model and reasoning_effort is not None
+        )
+        if not tool_surface_verified:
+            stable_block_reason = "codex_tool_surface_cannot_be_disabled"
+        elif not auth_verified:
+            stable_block_reason = auth_block
+        elif not explicit_model:
+            stable_block_reason = "missing_explicit_model_identity"
+        elif reasoning_effort is None:
+            stable_block_reason = "missing_explicit_reasoning_effort"
+        else:
+            stable_block_reason = None
+
+    return CodexRuntimeCompatibilityReport(
+        cli_version=cli_version,
         binary_name=_safe_public_label(executable.name, "binary"),
         binary_sha256=_sha256_file(executable),
-        auth_mode="chatgpt_managed_codex",
-        auth_verified=True,
-        supported_exec_flags=tuple(sorted(_REQUIRED_EXEC_FLAGS)),
-        supported_config_keys=tuple(sorted(key for key, _value in config_items)),
-        tool_surface_verified=True,
+        auth_mode=auth_mode,
+        auth_verified=auth_verified,
+        supported_exec_flags=supported_flags,
+        missing_exec_flags=missing_flags,
+        missing_probe_flags=missing_probe_flags,
+        control_matrix=tuple(matrix),
+        resolved_config_items=accepted_items,
+        control_mapping_schema_version=CODEX_CONTROL_MAPPING_SCHEMA_VERSION,
+        control_mapping_hash=mapping_hash,
+        tool_surface_verified=tool_surface_verified,
+        runtime_compatible=runtime_compatible,
+        real_use_ready=runtime_compatible and request_identity_complete,
+        explicit_model_present=bool(explicit_model),
+        explicit_reasoning_effort_present=reasoning_effort is not None,
+        stable_block_reason=stable_block_reason,
         capability_probe_method=(
-            "isolated_CODEX_HOME_app_server_strict_config_plus_features_list"
+            "isolated_CODEX_HOME_per_key_strict_config_plus_config_read_and_features_list"
         ),
+        model_turns_started=0,
+    )
+
+
+def probe_codex_cli(
+    binary: os.PathLike[str] | str = "codex",
+    *,
+    model: Optional[str] = None,
+    reasoning_effort: Optional[str] = None,
+    timeout_seconds: float = 10.0,
+    environment: Optional[Mapping[str, str]] = None,
+    temp_root: Optional[os.PathLike[str] | str] = None,
+) -> CodexCapabilityProbe:
+    """Validate safe CLI controls and auth without submitting a model task."""
+
+    report = inspect_codex_runtime_compatibility(
+        binary,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        timeout_seconds=timeout_seconds,
+        environment=environment,
+        temp_root=temp_root,
+    )
+    if report.missing_exec_flags:
+        raise CodexExecError(
+            "unsupported_codex_cli_version",
+            "Codex exec is missing required safe execution capabilities",
+            public_metadata={"missing_flags": list(report.missing_exec_flags)},
+        )
+    if report.missing_probe_flags:
+        raise CodexExecError(
+            "codex_tool_surface_cannot_be_disabled",
+            "Codex CLI cannot strictly validate the required no-tools configuration",
+            public_metadata={
+                "missing_probe_flags": list(report.missing_probe_flags)
+            },
+        )
+    if not report.tool_surface_verified:
+        failed = [
+            item
+            for item in report.control_matrix
+            if item.required_for_real_use
+            and (
+                not item.project_probe_accepted
+                or not item.cli_parser_accepted
+                or item.effective_or_parse_only
+                not in {"effective_confirmed"}
+            )
+        ]
+        raise CodexExecError(
+            "codex_tool_surface_cannot_be_disabled",
+            "Codex CLI cannot validate every required no-tools control",
+            public_metadata={
+                "unsupported_controls": sorted(
+                    item.canonical_key for item in failed
+                )
+                or ["<strict-config-validation-failed>"],
+                "failure_sources": sorted(
+                    {
+                        item.failure_source
+                        for item in failed
+                        if item.failure_source
+                    }
+                ),
+                "failure_reasons": sorted(
+                    {
+                        item.failure_reason
+                        for item in failed
+                        if item.failure_reason
+                    }
+                ),
+                "control_mapping_hash": report.control_mapping_hash,
+            },
+        )
+    if report.auth_mode == "api_key":
+        raise CodexExecError(
+            "auth_mode_not_chatgpt",
+            "Codex is authenticated with an API key rather than ChatGPT-managed login",
+        )
+    if report.auth_mode == "none":
+        raise CodexExecError(
+            "codex_not_authenticated",
+            "Codex CLI is not authenticated; login must be completed manually",
+        )
+    if not report.auth_verified:
+        raise CodexExecError(
+            "auth_mode_not_chatgpt",
+            "Codex authentication mode could not be verified as ChatGPT-managed",
+        )
+
+    return CodexCapabilityProbe(
+        cli_version=report.cli_version,
+        binary_name=report.binary_name,
+        binary_sha256=report.binary_sha256,
+        auth_mode=report.auth_mode,
+        auth_verified=report.auth_verified,
+        supported_exec_flags=report.supported_exec_flags,
+        supported_config_keys=tuple(
+            sorted(
+                item.canonical_key
+                for item in report.control_matrix
+                if item.cli_parser_accepted
+            )
+        ),
+        resolved_config_items=report.resolved_config_items,
+        control_matrix=report.control_matrix,
+        control_mapping_schema_version=report.control_mapping_schema_version,
+        control_mapping_hash=report.control_mapping_hash,
+        tool_surface_verified=report.tool_surface_verified,
+        capability_probe_method=report.capability_probe_method,
     )
 
 
@@ -917,6 +1794,12 @@ def codex_static_adapter_identity(
         "tool_surface_contract_hash": _sha256_text(
             _canonical_json(tool_surface)
         ),
+        "control_mapping_schema_version": (
+            CODEX_CONTROL_MAPPING_SCHEMA_VERSION
+        ),
+        "control_mapping_policy_hash": tool_surface[
+            "control_mapping_policy_hash"
+        ],
         "sandbox_mode": "read-only",
         "ephemeral": True,
         "strict_config": True,
@@ -927,6 +1810,7 @@ def codex_static_adapter_identity(
         "shell_tool_enabled": False,
         "unified_exec_enabled": False,
         "apps_enabled": False,
+        "memories_enabled": False,
         "view_image_enabled": False,
         "history_persistence": "none",
         "agent_reasoning_events_hidden": True,
@@ -1370,6 +2254,7 @@ class CodexExecLLM:
         }
         self.probe = probe or probe_codex_cli(
             self.binary_path,
+            model=self.model,
             reasoning_effort=self.reasoning_effort,
             timeout_seconds=min(self.timeout_seconds, 10.0),
             environment=self._source_environment,
@@ -1380,12 +2265,70 @@ class CodexExecLLM:
                 "unsupported_codex_cli_version",
                 "Codex CLI binary identity changed after capability probing",
             )
+        if (
+            self.probe.auth_mode != "chatgpt_managed_codex"
+            or not self.probe.auth_verified
+        ):
+            raise CodexExecError(
+                "auth_mode_not_chatgpt",
+                "Codex capability evidence does not verify ChatGPT-managed authentication",
+            )
+        expected_specs = _resolved_control_specs(
+            self.probe.cli_version, self.reasoning_effort
+        )
+        expected_resolved_items = tuple(
+            (actual_key, spec.requested_value)
+            for spec, actual_key in expected_specs
+        )
+        expected_mapping_hash = _control_mapping_hash(
+            self.probe.cli_version, expected_specs
+        )
+        expected_matrix_identity = tuple(
+            (
+                spec.canonical_key,
+                actual_key,
+                spec.requested_value,
+                spec.verification_method,
+                spec.required_for_real_use,
+            )
+            for spec, actual_key in expected_specs
+        )
+        actual_matrix_identity = tuple(
+            (
+                item.canonical_key,
+                item.actual_key,
+                item.requested_value,
+                item.verification_method,
+                item.required_for_real_use,
+            )
+            for item in self.probe.control_matrix
+        )
         required_keys = {
-            key for key, _value in _effective_config_items(self.reasoning_effort)
+            spec.canonical_key
+            for spec, _actual_key in expected_specs
+            if spec.required_for_real_use
+        }
+        verified_matrix_keys = {
+            item.canonical_key
+            for item in self.probe.control_matrix
+            if item.required_for_real_use
+            and item.project_probe_accepted
+            and item.cli_parser_accepted
+            and item.effective_or_parse_only
+            in {"effective_confirmed"}
         }
         if (
             not self.probe.tool_surface_verified
+            or not set(_REQUIRED_EXEC_FLAGS).issubset(
+                set(self.probe.supported_exec_flags)
+            )
             or not required_keys.issubset(set(self.probe.supported_config_keys))
+            or not required_keys.issubset(verified_matrix_keys)
+            or self.probe.control_mapping_schema_version
+            != CODEX_CONTROL_MAPPING_SCHEMA_VERSION
+            or self.probe.control_mapping_hash != expected_mapping_hash
+            or self.probe.resolved_config_items != expected_resolved_items
+            or actual_matrix_identity != expected_matrix_identity
         ):
             raise CodexExecError(
                 "codex_tool_surface_cannot_be_disabled",
@@ -1393,7 +2336,8 @@ class CodexExecLLM:
                 public_metadata={
                     "unverified_controls": sorted(
                         required_keys - set(self.probe.supported_config_keys)
-                    )
+                    ),
+                    "runtime_control_identity_mismatch": True,
                 },
             )
 
@@ -1445,6 +2389,15 @@ class CodexExecLLM:
             "forced_login_method": "chatgpt",
             "capability_probe_method": self.probe.capability_probe_method,
             "tool_surface_verified": self.probe.tool_surface_verified,
+            "control_mapping_schema_version": (
+                self.probe.control_mapping_schema_version
+            ),
+            "control_mapping_hash": self.probe.control_mapping_hash,
+            "control_matrix": [
+                item.to_dict() for item in self.probe.control_matrix
+            ],
+            "real_use_ready": True,
+            "real_use_readiness": "runtime_controls_and_auth_verified",
             "tool_access": "disabled_by_explicit_config_and_monitored",
             "provider_transport_network_expected": True,
             "provider_transport_network_declared_or_observed": (
@@ -1457,6 +2410,7 @@ class CodexExecLLM:
             "shell_tool_enabled": False,
             "unified_exec_enabled": False,
             "apps_enabled": False,
+            "memories_enabled": False,
             "view_image_enabled": False,
             "history_persistence": "none",
             "agent_reasoning_events_hidden": True,
@@ -1507,7 +2461,7 @@ class CodexExecLLM:
             "never",
             "--model",
             self.model,
-            *_config_argv(_effective_config_items(self.reasoning_effort)),
+            *_config_argv(self.probe.resolved_config_items),
             "--cd",
             str(cwd),
             "-",
@@ -1749,21 +2703,29 @@ class CodexExecLLM:
 __all__ = [
     "CODEX_DECISION_SCHEMA_HASH",
     "CODEX_DECISION_SCHEMA_VERSION",
+    "CODEX_CONTROL_MAPPING_SCHEMA_VERSION",
+    "CODEX_EXEC_BINARY_ENV",
     "CODEX_EXEC_PROVIDER_ID",
+    "LEGACY_CODEX_EXEC_BINARY_ENV",
     "CODEX_REASONING_EFFORT_ENV",
     "CODEX_TOOL_SURFACE_CONTRACT_HASH",
     "CODEX_TOOL_SURFACE_CONTRACT_VERSION",
     "CODEX_WRAPPER_PROTOCOL_VERSION",
     "CODEX_WRAPPER_SOURCE_HASH",
     "CodexCapabilityProbe",
+    "CodexControlSpec",
+    "CodexControlProbe",
     "CodexExecError",
     "CodexExecLLM",
+    "CodexRuntimeCompatibilityReport",
     "build_codex_wrapper",
+    "codex_binary_from_environment",
     "codex_request_identity",
     "codex_reasoning_effort_from_environment",
     "codex_static_adapter_identity",
     "codex_tool_surface_contract",
     "parse_codex_json_events",
+    "inspect_codex_runtime_compatibility",
     "probe_codex_cli",
     "sanitized_subprocess_environment",
     "validate_codex_model_identity",

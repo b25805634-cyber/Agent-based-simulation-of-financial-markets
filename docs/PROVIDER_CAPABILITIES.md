@@ -46,8 +46,10 @@ native batch, temperature, seed, or single all-tools-off switch. The adapter
 therefore requires explicit config overrides to disable the complete reviewed
 tool surface before launch and retains JSONL rejection as a second defence.
 The local strict probe rejects `tools.view_image`, so this installed CLI is
-currently ineligible for a real turn. Full boundaries and probe evidence are in
-[CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md).
+currently ineligible for a real turn. Official side-by-side stable 0.144.5 and
+prerelease 0.145.0-alpha.16 reproduce the same rejection. Full boundaries and
+probe evidence are in [CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md) and
+[CODEX_RUNTIME_COMPATIBILITY.md](CODEX_RUNTIME_COMPATIBILITY.md).
 
 `auto` is deliberately absent. It is a selection policy: the current factory
 resolves it to `anthropic` when the relevant environment credential is present
@@ -86,7 +88,7 @@ wrapper/output-schema versions and hashes.
 For CodexExec, the safe snapshot additionally declares the reviewed effective
 tool/network contract: Provider-transport networking is expected; Agent-tool
 networking is disabled; Web search is disabled; shell, unified execution,
-Apps, and image viewing are disabled; history persistence is `none`; CLI
+Apps, memories, and image viewing are disabled; history persistence is `none`; CLI
 reasoning events are hidden; approval is `never`; sandboxing is read-only; and
 personality is `none`. These are adapter requirements, not claims that a real
 turn has already demonstrated the upstream behavior.
@@ -151,8 +153,10 @@ shell/unified-exec/Apps/image tools disabled, and feedback/update checks
 disabled. If a required control is unsupported, it fails before the real turn
 with `codex_tool_surface_cannot_be_disabled`.
 
-The current 0.144.4 strict probe does not recognize `tools.view_image`, so real
-turns remain blocked. If a future reviewed CLI accepts the full control set,
+The 0.144.4, 0.144.5, and investigated 0.145.0-alpha.16 strict probes do not
+recognize `tools.view_image`, so real turns remain blocked. The canonical
+mapping remains identity-only; undocumented aliases are not accepted. If a
+future reviewed CLI accepts the full control set,
 JSONL command/file/patch/MCP/App/Web/image/computer/permission events still
 cause a hard `tool_use_violation`; that detection is defence in depth.
 Temperature and seed are unsupported, and no deterministic behavior is
@@ -191,9 +195,15 @@ continues to use its existing scientific, configuration, Prompt, Persona,
 request, and schema contracts.
 
 For CodexExec, the immutable no-tools settings, explicit model and reasoning
-effort, CLI/binary, wrapper, and Decision schema are also copied into the
-Codex-specific model-request identity. A change there must reject strict replay
-or result reuse even though ordinary capability-document wording does not.
+effort, binary-byte identity, wrapper, and Decision schema are also copied into
+the Codex-specific pre-execution model-request identity. The static
+exact-version mapping-policy hash distinguishes a reviewed side-by-side binary
+without making its path scientific Config. A successful run additionally saves
+CLI-reported version, the effective control matrix, and resolved mapping hash in
+runtime/recording provenance; current child reuse does not independently
+re-probe the reported version. A change to the pre-execution identity must
+reject strict replay or result reuse even though ordinary capability-document
+wording does not.
 Reasoning effort remains a separately hashed Provider request option outside
 the frozen scientific Config dataclass; the strict gate uses
 `model_request_config_hash`.

@@ -233,6 +233,7 @@ _CAPABILITIES: dict[str, ProviderCapability] = {
                 "shell_tool_enabled": False,
                 "unified_exec_enabled": False,
                 "apps_enabled": False,
+                "memories_enabled": False,
                 "view_image_enabled": False,
                 "history_persistence": "none",
                 "agent_reasoning_events_hidden": True,
@@ -377,10 +378,13 @@ def provider_capability_snapshot(
     if capability["provider_id"] == "codex_exec":
         # Bind the exact versioned wrapper/schema/no-tools policy and local
         # executable byte identity without probing auth or starting Codex.
-        from .codex_exec import codex_static_adapter_identity
+        from .codex_exec import (
+            codex_binary_from_environment,
+            codex_static_adapter_identity,
+        )
 
         snapshot["provider_adapter_contract"] = codex_static_adapter_identity(
-            os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+            codex_binary_from_environment(),
             model=model,
             reasoning_effort=reasoning_effort,
         )

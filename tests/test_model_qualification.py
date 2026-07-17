@@ -428,7 +428,11 @@ class QualificationManagedCLITests(unittest.TestCase):
     def test_codex_provider_and_static_identity_share_fake_executable_locator(self):
         fake_binary = str(self.root / "fake-codex")
         with mock.patch.dict(
-            os.environ, {"NMSIM_CODEX_EXECUTABLE": fake_binary}
+            os.environ,
+            {
+                "CODEX_EXEC_BINARY": fake_binary,
+                "NMSIM_CODEX_EXECUTABLE": fake_binary,
+            },
         ), mock.patch(
             "nmsim.codex_exec.CodexExecLLM"
         ) as provider_class, mock.patch(

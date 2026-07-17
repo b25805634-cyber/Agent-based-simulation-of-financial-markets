@@ -62,7 +62,7 @@ The identity contains the following components.
 | Lifecycle | `run_id`, `run_kind`, command/entrypoint identity, manifest schema, status, `managed_run_completed`, `outputs_complete`, empty failure stage, simulation completion, decision completion, recording schema |
 | Scientific source | scientific component fingerprint, Decision parser schema/source hash, event schema, Prompt hash, Persona hash, simulation-core hash |
 | Runtime science | config-hash schema, scientific-config hash, normalized scientific-input identity, `reference_path` content hash, scenario-definition hash, population-contract identity and realized population completeness, seed |
-| Model request | requested and resolved Provider, requested and resolved model, credential-free endpoint identity, model-request-config hash, temperature, max tokens, cache policy; for CodexExec also CLI/binary identity, explicit reasoning effort, wrapper/schema identities, forced login/approval/personality, read-only/ephemeral/history/reasoning settings, and the complete no-tools configuration |
+| Model request | requested and resolved Provider, requested and resolved model, credential-free endpoint identity, model-request-config hash, temperature, max tokens, cache policy; for CodexExec also binary-byte identity, explicit reasoning effort, wrapper/schema identities, forced login/approval/personality, read-only/ephemeral/history/reasoning settings, complete no-tools configuration, and the exact-version canonical-to-actual control mapping policy. CLI-reported version/resolved mapping remain runtime provenance rather than a separately re-probed pre-execution reuse field. |
 | Results | driver-required canonical artifact names, every manifest-registered artifact's relative path, registration state, SHA-256 and byte size, `experiment_result.json` identity consistency, declared legacy-link identities |
 | Git provenance | commit, dirty state, and diff hash; these are retained for audit but the commit alone is not the compatibility gate |
 
@@ -95,8 +95,9 @@ of the following hold:
    population identities match.
 8. Model-request hash, requested/resolved Provider and model, endpoint
    identity, temperature, max tokens, and cache policy match. For CodexExec,
-   the CLI/binary, explicit reasoning effort, wrapper/schema, and full
-   no-tools/history/reasoning/personality contract must also match.
+   the exact binary bytes, explicit reasoning effort, wrapper/schema, full
+   no-tools/history/reasoning/personality contract, and control-mapping policy
+   must also match.
 9. Every driver-required canonical artifact is registered. Every registered
    canonical artifact is resolved inside the immutable child directory and is
    re-hashed; its bytes and size must match the manifest.
@@ -206,8 +207,8 @@ second copy of the same runs.
 
 ## Scope and limitations
 
-- CodexExec 的 CLI/binary/requested-model/reasoning-effort、wrapper/schema 和
-  no-tools/history/reasoning/personality 身份通过条件化
+- CodexExec 的 binary-byte/requested-model/reasoning-effort、wrapper/schema 和
+  no-tools/history/reasoning/personality/control-mapping 身份通过条件化
   `_provider_adapter_contract` 进入 `model_request_config_hash`，因此正式 child
   reuse 会在该信息不同时以 model-request 身份不匹配拒绝。这一
   扩展不改变 Mock/Anthropic/OpenAI-compatible 的已有 config hash。
@@ -219,9 +220,13 @@ second copy of the same runs.
   provenance，不作为预执行 expected-config 的猜测值。禁用工具的请求配置
   进入 model-request identity；成功候选的 observed tool-call count 则作为
   manifest/运行完整性证据核验。
-- 当前本机 Codex CLI 0.144.4 不识别 `tools.view_image`，因此真实 turn
-  fail-closed，不能产生可复用的正式 Codex child。普通文档变化不会阻止
-  reuse，但任何未来允许完整 no-tools contract 的代码/配置身份变化必须由
+- 当前本机 Codex CLI 0.144.4 以及隔离的 0.144.5 和
+  0.145.0-alpha.16 均不识别 `tools.view_image`，因此真实 turn
+  fail-closed，不能产生可复用的正式 Codex child。`CODEX_EXEC_BINARY`
+  可选择 side-by-side runtime；预执行 reuse 由 resolved binary hash 和
+  static mapping policy 区分，成功运行另在 runtime provenance 保存 CLI
+  reported version 和 resolved mapping。普通文档变化不会阻止 reuse，但任何未来允许
+  完整 no-tools contract 的代码/配置身份变化必须由
   `model_request_config_hash` 区分。
 - Policy 1.0 authenticates what the current manifest and hashes can represent;
   it does not prove the causal validity of the experiment.

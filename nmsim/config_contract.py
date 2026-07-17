@@ -341,13 +341,14 @@ def build_effective_config_contract(
     ).strip().lower()
     if requested_provider == "codex_exec":
         from .codex_exec import (
+            codex_binary_from_environment,
             codex_reasoning_effort_from_environment,
             codex_static_adapter_identity,
         )
 
         model_summary["_provider_adapter_contract"] = (
             codex_static_adapter_identity(
-                os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+                codex_binary_from_environment(),
                 model=(
                     os.environ.get("LLM_MODEL")
                     or getattr(cfg, "model", "")

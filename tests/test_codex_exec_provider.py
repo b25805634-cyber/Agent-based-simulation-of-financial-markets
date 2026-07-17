@@ -13,20 +13,26 @@ import stat
 import tempfile
 import textwrap
 import unittest
+from dataclasses import replace
 from unittest import mock
 
 import nmsim.codex_exec as codex_exec_module
 from nmsim.config import Config
 from nmsim.config_contract import build_effective_config_contract
 from nmsim.codex_exec import (
+    CODEX_CONTROL_MAPPING_SCHEMA_VERSION,
     CODEX_DECISION_SCHEMA_HASH,
     CODEX_DECISION_SCHEMA_VERSION,
+    CODEX_EXEC_BINARY_ENV,
     CODEX_WRAPPER_PROTOCOL_VERSION,
     CODEX_WRAPPER_SOURCE_HASH,
     CodexExecError,
     CodexExecLLM,
+    codex_binary_from_environment,
     codex_request_identity,
     codex_static_adapter_identity,
+    codex_tool_surface_contract,
+    inspect_codex_runtime_compatibility,
     probe_codex_cli,
     sanitized_subprocess_environment,
     validate_codex_decision,
@@ -54,6 +60,7 @@ _EXPECTED_NO_TOOLS_CONFIG = {
     "features.shell_tool": False,
     "features.unified_exec": False,
     "features.apps": False,
+    "features.memories": False,
     "tools.view_image": False,
     "feedback.enabled": False,
     "check_for_update_on_startup": False,
@@ -136,7 +143,7 @@ def config_map(items):
 
 if args == ["--version"]:
     append_invocation("version_probe")
-    print("codex-cli 0.144.4")
+    print("codex-cli " + os.environ.get("FAKE_CODEX_VERSION", "0.144.4"))
     raise SystemExit(0)
 
 if args == ["exec", "--help"]:
@@ -157,11 +164,9 @@ if args == ["app-server", "--help"]:
     raise SystemExit(0)
 
 if args and args[0] == "app-server":
-    stdin_text = sys.stdin.read()
     items = config_items()
     append_invocation(
         "app_server_config_probe",
-        stdin_text=stdin_text,
         config_items=items,
     )
     if "--strict-config" not in args or "--listen" not in args:
@@ -178,11 +183,54 @@ if args and args[0] == "app-server":
         key for key, _value in items if key in unsupported
     )
     if rejected:
-        print("unknown config key: " + ",".join(rejected), file=sys.stderr)
+        if os.environ.get("FAKE_CODEX_CONFIG_ERROR_MODE") == "syntax":
+            print("Usage: codex app-server: unknown option", file=sys.stderr)
+        else:
+            print(
+                "unknown configuration field `"
+                + rejected[0]
+                + "` in -c/--config override",
+                file=sys.stderr,
+            )
         raise SystemExit(2)
-    if stdin_text:
-        print("app-server capability probe stdin must be empty", file=sys.stderr)
-        raise SystemExit(2)
+
+    def set_nested(target, key, value):
+        components = key.split(".")
+        current = target
+        for component in components[:-1]:
+            current = current.setdefault(component, {})
+        current[components[-1]] = value
+
+    decoded = config_map(items)
+    for line in sys.stdin:
+        try:
+            request = json.loads(line)
+        except json.JSONDecodeError:
+            print("invalid app-server JSON", file=sys.stderr)
+            raise SystemExit(2)
+        if request.get("id") == 1 and request.get("method") == "initialize":
+            print(json.dumps({"id": 1, "result": {"userAgent": "fake-codex"}}), flush=True)
+        elif request.get("method") == "initialized":
+            continue
+        elif request.get("id") == 2 and request.get("method") == "config/read":
+            append_invocation(
+                "app_server_config_read",
+                config_items=items,
+            )
+            effective = {}
+            origins = {}
+            for key, value in decoded.items():
+                if value == "{}":
+                    value = {}
+                set_nested(effective, key, value)
+                origins[key] = {"name": {"type": "sessionFlags"}}
+            mismatch = os.environ.get("FAKE_CODEX_CONFIG_READ_MISMATCH_KEY")
+            if mismatch:
+                set_nested(effective, mismatch, None)
+            print(json.dumps({
+                "id": 2,
+                "result": {"config": effective, "origins": origins},
+            }), flush=True)
     raise SystemExit(0)
 
 if args and args[:2] == ["features", "list"]:
@@ -191,8 +239,15 @@ if args and args[:2] == ["features", "list"]:
     config = config_map(items)
     for key, value in sorted(config.items()):
         if key.startswith("features."):
-            print("{} stable {}".format(
+            maturity = (
+                "under development"
+                if key.removeprefix("features.")
+                in {"enable_mcp_apps", "request_permissions_tool"}
+                else "stable"
+            )
+            print("{} {} {}".format(
                 key.removeprefix("features."),
+                maturity,
                 "true" if value is True else "false",
             ))
     raise SystemExit(0)
@@ -442,12 +497,24 @@ class CodexExecProviderTests(unittest.TestCase):
         self.assertIn("--strict-config", self.probe.supported_exec_flags)
         self.assertIn("--color", self.probe.supported_exec_flags)
         self.assertTrue(self.probe.tool_surface_verified)
+        self.assertEqual(
+            self.probe.control_mapping_schema_version,
+            CODEX_CONTROL_MAPPING_SCHEMA_VERSION,
+        )
+        self.assertRegex(self.probe.control_mapping_hash, r"^[0-9a-f]{64}$")
+        self.assertTrue(
+            all(
+                item.actual_key == item.canonical_key
+                for item in self.probe.control_matrix
+            )
+        )
         self.assertIn(
             "model_reasoning_effort", self.probe.supported_config_keys
         )
         invocation_kinds = [row["kind"] for row in self.invocations()]
         self.assertIn("app_server_help_probe", invocation_kinds)
         self.assertIn("app_server_config_probe", invocation_kinds)
+        self.assertIn("app_server_config_read", invocation_kinds)
         self.assertIn("login_status_probe", invocation_kinds)
         self.assertEqual(self.model_turn_count(), 0)
         probed = self.invocation_config(
@@ -458,11 +525,190 @@ class CodexExecProviderTests(unittest.TestCase):
         self.assertEqual(probed.get("model_reasoning_effort"), "low")
         self.assertTrue(
             all(
-                row.get("stdin") == ""
+                row.get("stdin") in {None, ""}
                 for row in self.invocations()
                 if row.get("kind") == "app_server_config_probe"
             )
         )
+        effective = {
+            item.canonical_key: item.effective_or_parse_only
+            for item in self.probe.control_matrix
+        }
+        self.assertEqual(
+            effective["features.enable_mcp_apps"], "effective_confirmed"
+        )
+        self.assertEqual(
+            effective["features.request_permissions_tool"],
+            "effective_confirmed",
+        )
+        self.assertEqual(
+            effective["features.memories"], "effective_confirmed"
+        )
+
+    def test_runtime_report_attributes_cli_key_rejection_without_model_turn(
+        self,
+    ) -> None:
+        environment = dict(self.base_environment)
+        environment["FAKE_CODEX_UNSUPPORTED_CONFIG_KEY"] = "tools.view_image"
+        report = inspect_codex_runtime_compatibility(
+            self.binary,
+            reasoning_effort="low",
+            environment=environment,
+            temp_root=self.root,
+        )
+        row = next(
+            item
+            for item in report.control_matrix
+            if item.canonical_key == "tools.view_image"
+        )
+        self.assertTrue(row.project_probe_accepted)
+        self.assertFalse(row.cli_parser_accepted)
+        self.assertEqual(row.failure_source, "codex_cli_rejected_key")
+        self.assertEqual(
+            row.failure_reason, "unsupported_in_installed_version"
+        )
+        self.assertEqual(row.process_exit_code, 2)
+        self.assertEqual(
+            row.stderr_summary,
+            "unknown configuration field `tools.view_image`",
+        )
+        self.assertFalse(report.real_use_ready)
+        self.assertEqual(
+            report.stable_block_reason,
+            "codex_tool_surface_cannot_be_disabled",
+        )
+        self.assertEqual(report.model_turns_started, 0)
+        self.assertEqual(self.model_turn_count(), 0)
+
+    def test_runtime_report_distinguishes_invocation_syntax_error(self) -> None:
+        environment = dict(self.base_environment)
+        environment.update(
+            {
+                "FAKE_CODEX_UNSUPPORTED_CONFIG_KEY": "tools.view_image",
+                "FAKE_CODEX_CONFIG_ERROR_MODE": "syntax",
+            }
+        )
+        report = inspect_codex_runtime_compatibility(
+            self.binary,
+            environment=environment,
+            temp_root=self.root,
+        )
+        row = next(
+            item
+            for item in report.control_matrix
+            if item.canonical_key == "tools.view_image"
+        )
+        self.assertEqual(row.failure_source, "invocation_syntax_error")
+        self.assertEqual(
+            row.failure_reason, "strict_config_probe_invocation_rejected"
+        )
+        self.assertEqual(self.model_turn_count(), 0)
+
+    def test_side_by_side_binary_selection_and_identity_are_explicit(self) -> None:
+        second = self.root / "side-by-side-codex"
+        second.write_text(
+            textwrap.dedent(_FAKE_CODEX) + "\n# side-by-side identity\n",
+            encoding="utf-8",
+        )
+        second.chmod(second.stat().st_mode | stat.S_IXUSR)
+        environment = dict(self.base_environment)
+        environment.update(
+            {
+                CODEX_EXEC_BINARY_ENV: str(second),
+                "FAKE_CODEX_VERSION": "0.144.5",
+            }
+        )
+        self.assertEqual(
+            codex_binary_from_environment(environment), str(second)
+        )
+        report = inspect_codex_runtime_compatibility(
+            codex_binary_from_environment(environment),
+            model="test-codex-model",
+            reasoning_effort="low",
+            environment=environment,
+            temp_root=self.root,
+        )
+        self.assertEqual(report.cli_version, "0.144.5")
+        self.assertNotEqual(report.binary_sha256, self.probe.binary_sha256)
+        self.assertNotEqual(
+            report.control_mapping_hash, self.probe.control_mapping_hash
+        )
+        self.assertTrue(report.runtime_compatible)
+        self.assertTrue(report.real_use_ready)
+        self.assertEqual(self.model_turn_count(), 0)
+
+    def test_conflicting_binary_environment_fails_closed(self) -> None:
+        with self.assertRaises(CodexExecError) as raised:
+            codex_binary_from_environment(
+                {
+                    CODEX_EXEC_BINARY_ENV: str(self.binary),
+                    "NMSIM_CODEX_EXECUTABLE": str(
+                        self.root / "different-codex"
+                    ),
+                }
+            )
+        self.assertEqual(
+            raised.exception.code, "codex_binary_configuration_conflict"
+        )
+
+    def test_injected_probe_cannot_bypass_auth_or_resolved_controls(self) -> None:
+        with self.assertRaises(CodexExecError) as auth_error:
+            CodexExecLLM(
+                model="test-codex-model",
+                reasoning_effort="low",
+                binary=self.binary,
+                environment=self.base_environment,
+                temp_root=self.root,
+                probe=replace(
+                    self.probe,
+                    auth_mode="api_key",
+                    auth_verified=False,
+                ),
+            )
+        self.assertEqual(auth_error.exception.code, "auth_mode_not_chatgpt")
+
+        without_view_image = tuple(
+            item
+            for item in self.probe.resolved_config_items
+            if item[0] != "tools.view_image"
+        )
+        with self.assertRaises(CodexExecError) as control_error:
+            CodexExecLLM(
+                model="test-codex-model",
+                reasoning_effort="low",
+                binary=self.binary,
+                environment=self.base_environment,
+                temp_root=self.root,
+                probe=replace(
+                    self.probe,
+                    resolved_config_items=without_view_image,
+                ),
+            )
+        self.assertEqual(
+            control_error.exception.code,
+            "codex_tool_surface_cannot_be_disabled",
+        )
+
+        changed_matrix = tuple(
+            replace(item, requested_value=True)
+            if item.canonical_key == "tools.view_image"
+            else item
+            for item in self.probe.control_matrix
+        )
+        with self.assertRaises(CodexExecError) as matrix_error:
+            CodexExecLLM(
+                model="test-codex-model",
+                reasoning_effort="low",
+                binary=self.binary,
+                environment=self.base_environment,
+                temp_root=self.root,
+                probe=replace(self.probe, control_matrix=changed_matrix),
+            )
+        self.assertEqual(
+            matrix_error.exception.code,
+            "codex_tool_surface_cannot_be_disabled",
+        )
+        self.assertEqual(self.model_turn_count(), 0)
 
     def test_missing_safe_capability_fails_closed(self) -> None:
         environment = dict(self.base_environment)
@@ -477,9 +723,15 @@ class CodexExecProviderTests(unittest.TestCase):
     def test_each_required_no_tools_config_failure_is_fail_closed_without_turn(
         self,
     ) -> None:
+        contract = codex_tool_surface_contract()
+        required_controls = {
+            key
+            for key, metadata in contract["control_verification"].items()
+            if metadata["required_for_real_use"]
+        }
         environment = dict(self.base_environment)
         environment["FAKE_CODEX_UNSUPPORTED_CONFIG_KEY"] = ",".join(
-            sorted(_EXPECTED_NO_TOOLS_CONFIG)
+            sorted(required_controls)
         )
         with self.assertRaises(CodexExecError) as raised:
             probe_codex_cli(
@@ -493,12 +745,133 @@ class CodexExecProviderTests(unittest.TestCase):
         )
         self.assertEqual(
             set(raised.exception.public_metadata["unsupported_controls"]),
-            set(_EXPECTED_NO_TOOLS_CONFIG),
+            required_controls,
         )
         self.assertNotIn(
             "FORBIDDEN_TOOL_OUTPUT_MUST_NOT_ESCAPE",
             str(raised.exception),
         )
+        self.assertEqual(self.model_turn_count(), 0)
+
+    def test_unreviewed_version_mapping_and_missing_view_image_fail_closed(
+        self,
+    ) -> None:
+        environment = dict(self.base_environment)
+        environment["FAKE_CODEX_UNSUPPORTED_CONFIG_KEY"] = (
+            "tools.view_image_alias"
+        )
+        with mock.patch.object(
+            codex_exec_module,
+            "_VERSION_SPECIFIC_CONFIG_KEY_MAP",
+            {"0.144.4": {"tools.view_image": "tools.view_image_alias"}},
+        ):
+            report = inspect_codex_runtime_compatibility(
+                self.binary,
+                environment=environment,
+                temp_root=self.root,
+            )
+        view_image = next(
+            item
+            for item in report.control_matrix
+            if item.canonical_key == "tools.view_image"
+        )
+        self.assertEqual(view_image.actual_key, "tools.view_image_alias")
+        self.assertFalse(view_image.cli_parser_accepted)
+        self.assertFalse(report.real_use_ready)
+
+        without_view_image = tuple(
+            spec
+            for spec in codex_exec_module._NO_TOOLS_CONTROL_SPECS
+            if spec.canonical_key != "tools.view_image"
+        )
+        with mock.patch.object(
+            codex_exec_module,
+            "_NO_TOOLS_CONTROL_SPECS",
+            without_view_image,
+        ), self.assertRaises(CodexExecError) as raised:
+            inspect_codex_runtime_compatibility(
+                self.binary,
+                environment=self.base_environment,
+                temp_root=self.root,
+            )
+        self.assertEqual(raised.exception.code, "project_probe_rejected_key")
+        self.assertIn(
+            "tools.view_image",
+            raised.exception.public_metadata["missing_canonical_controls"],
+        )
+
+        view_image = next(
+            spec
+            for spec in codex_exec_module._NO_TOOLS_CONTROL_SPECS
+            if spec.canonical_key == "tools.view_image"
+        )
+        for label, changed_spec in (
+            (
+                "optional",
+                replace(view_image, required_for_real_use=False),
+            ),
+            ("enabled", replace(view_image, requested_value=True)),
+            (
+                "supplementary",
+                replace(
+                    view_image,
+                    verification_method="config_read_supplementary",
+                ),
+            ),
+        ):
+            with self.subTest(label=label):
+                changed_contract = tuple(
+                    changed_spec
+                    if spec.canonical_key == "tools.view_image"
+                    else spec
+                    for spec in codex_exec_module._NO_TOOLS_CONTROL_SPECS
+                )
+                with mock.patch.object(
+                    codex_exec_module,
+                    "_NO_TOOLS_CONTROL_SPECS",
+                    changed_contract,
+                ), self.assertRaises(CodexExecError) as changed_error:
+                    inspect_codex_runtime_compatibility(
+                        self.binary,
+                        environment=self.base_environment,
+                        temp_root=self.root,
+                    )
+                self.assertEqual(
+                    changed_error.exception.code,
+                    "project_probe_rejected_key",
+                )
+                self.assertIn(
+                    "tools.view_image",
+                    changed_error.exception.public_metadata[
+                        "changed_canonical_controls"
+                    ],
+                )
+
+    def test_parse_acceptance_without_effective_readback_stays_blocked(self) -> None:
+        environment = dict(self.base_environment)
+        environment["FAKE_CODEX_CONFIG_READ_MISMATCH_KEY"] = "tools.view_image"
+        report = inspect_codex_runtime_compatibility(
+            self.binary,
+            model="test-codex-model",
+            reasoning_effort="low",
+            environment=environment,
+            temp_root=self.root,
+        )
+        view_image = next(
+            item
+            for item in report.control_matrix
+            if item.canonical_key == "tools.view_image"
+        )
+        self.assertTrue(view_image.cli_parser_accepted)
+        self.assertEqual(
+            view_image.effective_or_parse_only, "effective_unconfirmed"
+        )
+        self.assertEqual(
+            view_image.failure_source,
+            "codex_cli_effective_state_unconfirmed",
+        )
+        self.assertFalse(report.runtime_compatible)
+        self.assertFalse(report.real_use_ready)
         self.assertEqual(self.model_turn_count(), 0)
 
     def test_api_key_auth_and_unauthenticated_modes_are_distinct(self) -> None:
@@ -803,6 +1176,7 @@ class CodexExecProviderTests(unittest.TestCase):
             {
                 "LLM_PROVIDER": "codex_exec",
                 "LLM_MODEL": "test-codex-model",
+                "CODEX_EXEC_BINARY": str(self.binary),
                 "NMSIM_CODEX_EXECUTABLE": str(self.binary),
                 "NMSIM_CODEX_REASONING_EFFORT": "low",
             },
@@ -836,6 +1210,7 @@ class CodexExecProviderTests(unittest.TestCase):
         environment = {
             "LLM_PROVIDER": "codex_exec",
             "LLM_MODEL": "test-codex-model",
+            "CODEX_EXEC_BINARY": str(self.binary),
             "NMSIM_CODEX_EXECUTABLE": str(self.binary),
             "NMSIM_CODEX_REASONING_EFFORT": "low",
         }
@@ -900,6 +1275,7 @@ class CodexExecProviderTests(unittest.TestCase):
             **self.base_environment,
             "LLM_PROVIDER": "codex_exec",
             "LLM_MODEL": "test-codex-model",
+            "CODEX_EXEC_BINARY": str(self.binary),
             "NMSIM_CODEX_EXECUTABLE": str(self.binary),
             "NMSIM_CODEX_REASONING_EFFORT": "low",
         }
@@ -936,6 +1312,18 @@ class CodexExecProviderTests(unittest.TestCase):
             self.assertEqual(record["schema_version"], "1.2")
             self.assertIn("provider_adapter_contract", record["model_config"])
             self.assertIn("provider_runtime_identity", record["model_config"])
+            runtime_identity = record["model_config"][
+                "provider_runtime_identity"
+            ]
+            self.assertEqual(runtime_identity["codex_cli_version"], "0.144.4")
+            self.assertEqual(
+                runtime_identity["binary_identity"]["sha256"],
+                self.probe.binary_sha256,
+            )
+            self.assertEqual(
+                runtime_identity["control_mapping_hash"],
+                self.probe.control_mapping_hash,
+            )
 
             calls_after_record = json.loads(
                 (recorded.run_dir / "run_manifest.json").read_text(encoding="utf-8")
@@ -1267,6 +1655,12 @@ class CodexExecProviderTests(unittest.TestCase):
             codex_exec_module,
             "_run_limited_process",
             side_effect=AssertionError("strict replay must not start Codex"),
+        ), mock.patch.object(
+            codex_exec_module,
+            "inspect_codex_runtime_compatibility",
+            side_effect=AssertionError(
+                "strict replay must not probe local Codex capability"
+            ),
         ):
             replay = ReplayLLM(
                 record_dir,

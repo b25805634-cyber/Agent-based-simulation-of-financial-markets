@@ -190,7 +190,10 @@ class ProviderCapabilityTests(unittest.TestCase):
         )
         with mock.patch.dict(
             os.environ,
-            {"NMSIM_CODEX_EXECUTABLE": str(missing_binary)},
+            {
+                "CODEX_EXEC_BINARY": str(missing_binary),
+                "NMSIM_CODEX_EXECUTABLE": str(missing_binary),
+            },
             clear=False,
         ):
             snapshot = provider_capability_snapshot("codex_exec")

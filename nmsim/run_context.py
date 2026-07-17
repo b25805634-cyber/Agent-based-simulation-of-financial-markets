@@ -582,6 +582,7 @@ class ManagedRunContext:
                 from .codex_exec import (
                     CodexExecError,
                     CodexExecLLM,
+                    codex_binary_from_environment,
                     codex_reasoning_effort_from_environment,
                 )
 
@@ -608,7 +609,7 @@ class ManagedRunContext:
                 codex_provider = CodexExecLLM(
                     model=str(requested_model),
                     reasoning_effort=reasoning_effort,
-                    binary=os.environ.get("NMSIM_CODEX_EXECUTABLE", "codex"),
+                    binary=codex_binary_from_environment(),
                     project_root=self.repo_root,
                     run_id=self.run_id,
                 )
