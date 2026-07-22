@@ -15,6 +15,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import socket
 import stat
 import subprocess
@@ -471,6 +472,32 @@ def _attempt_lifecycle(candidate: Path) -> str:
     return "indeterminate"
 
 
+def _off_policy_slot_attempt_materializations(
+    out_root: Path,
+    job: MultiEventJob,
+    allowed_run_ids: Sequence[str],
+) -> list[str]:
+    """Return canonical same-slot attempts outside the current five-ID cap."""
+
+    runs_root = Path(out_root) / "runs"
+    if not os.path.lexists(runs_root):
+        return []
+    if runs_root.is_symlink() or not runs_root.is_dir():
+        raise AttemptCoordinationError(
+            "canonical live runs root is not a regular directory"
+        )
+    prefix = "me-{}-".format(job.slot["slot_id"])
+    pattern = re.compile(
+        r"^{}[0-9a-f]{{64}}-ta[1-9][0-9]*$".format(re.escape(prefix))
+    )
+    allowed = set(allowed_run_ids)
+    return sorted(
+        entry.name
+        for entry in runs_root.iterdir()
+        if pattern.fullmatch(entry.name) and entry.name not in allowed
+    )
+
+
 def build_multi_event_child_command(
     *,
     material: MultiEventMaterial,
@@ -620,6 +647,13 @@ def _model_aliases(
         raise ValueError("application provider-attempt evidence is missing")
     if attempts.get("reported_models_truncated") is not False:
         raise ValueError("reported model aliases are truncated")
+    invalid_count = attempts.get("invalid_reported_model_alias_count")
+    if (
+        isinstance(invalid_count, bool)
+        or not isinstance(invalid_count, int)
+        or invalid_count != 0
+    ):
+        raise ValueError("invalid reported model alias evidence is present")
     raw = attempts.get("reported_models")
     if not isinstance(raw, list) or any(
         safe_reported_model(alias) != alias for alias in raw
@@ -632,6 +666,8 @@ def _model_aliases(
         raise ValueError("live child must report exactly one model alias")
     if result.get("reported_model_aliases") != aliases:
         raise ValueError("result reported-model aliases do not match manifest")
+    if result.get("invalid_reported_model_alias_count") != 0:
+        raise ValueError("result invalid-alias evidence does not match manifest")
     return aliases
 
 
@@ -818,6 +854,9 @@ def _candidate_record(
             "resolved_model": child.resolved_model,
             "endpoint_identity": child.endpoint_identity,
             "reported_model_aliases": aliases,
+            "invalid_reported_model_alias_count": (
+                child.invalid_reported_model_alias_count
+            ),
             "scientific_runtime_environment": (
                 child.scientific_runtime_environment
             ),
@@ -925,7 +964,8 @@ def _plan_document(
             "max_child_attempts": protocol["acceptance_and_execution"]["max_child_attempts"],
             "technical_retry_identity": "technical_retry_idx; excluded from repeat_idx/slot",
             "reported_model_gate": (
-                "openai_live requires non-truncated exactly-one alias per child attempt; mock=[]"
+                "openai_live requires non-truncated exactly-one alias and "
+                "invalid_reported_model_alias_count=0 per child; mock=[] and zero"
             ),
             "coordination": (
                 "one output-root advisory lock inherited by launched children; "
@@ -1170,6 +1210,10 @@ def main(argv=None) -> None:
                 "scope": "entire_output_root_all_attempt_series",
                 "child_descriptor_inheritance": True,
                 "stale_recovery": "kernel_release_after_last_inherited_fd_closes",
+                "live_slot_cap_guard": (
+                    "all preserved canonical me-{slot_id}-*-ta* materializations; "
+                    "foreign series fail closed"
+                ),
             },
         }
         managed.context.register_llm_runtime(
@@ -1278,6 +1322,23 @@ def main(argv=None) -> None:
                 _attempt_run_id(job, index, series_id)
                 for index in range(1, max_attempts + 1)
             ]
+            if mode == "openai_live":
+                off_policy_attempts = _off_policy_slot_attempt_materializations(
+                    out_root, job, allowed_ids
+                )
+                if off_policy_attempts:
+                    record_attempt(
+                        job,
+                        source="canonical_slot_preflight",
+                        technical_retry_idx=None,
+                        run_id=off_policy_attempts[0],
+                        status="blocked",
+                        reason_code="off_policy_slot_attempt_materialized",
+                    )
+                    raise AttemptCoordinationError(
+                        "canonical slot already has an attempt outside the "
+                        "current bounded series; refusing to reset the cap"
+                    )
             occupied = [
                 os.path.lexists(str(out_root / "runs" / run_id))
                 for run_id in allowed_ids
@@ -1798,6 +1859,7 @@ def main(argv=None) -> None:
                 "scientific_runtime_environment"
             ],
             "reported_model_aliases": aliases,
+            "invalid_reported_model_alias_count": 0,
         }
         reference_root = Path(__file__).resolve().parents[1]
         event_records = [
@@ -1879,6 +1941,7 @@ def main(argv=None) -> None:
                 "honest_n_complete_seed_pairs": complete_pairs,
                 "honest_n_complete_seed_pairs_by_event": per_event_pairs,
                 "reported_model_aliases": aliases,
+                "invalid_reported_model_alias_count": 0,
                 "underlying_model_identity_verified": False,
                 "model_specific_inference_allowed": False,
                 "reported_alias_homogeneous_pooling_allowed": bool(

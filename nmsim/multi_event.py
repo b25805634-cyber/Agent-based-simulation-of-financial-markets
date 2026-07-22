@@ -34,7 +34,7 @@ TRANSFORM_ID = "event_phase_normalized_log_linear_25_v1"
 TRANSFORM_N_ROUNDS = 24
 TRANSFORM_POINT_COUNT = 25
 FROZEN_PROTOCOL_SHA256 = (
-    "1cff28c0af7ef4c0874b86d0b7d660e0d15f4f208d8f00ac7e93e71a50a39e72"
+    "f5ff63c16ca8393b8f801ce52c2ba66455c3c3aef384b38e654592fb4888987e"
 )
 
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")

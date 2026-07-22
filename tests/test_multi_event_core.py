@@ -18,12 +18,21 @@ from experiments.driver_utils import (
 )
 from experiments.multi_event import build_multi_event_child_command
 from experiments.run_seed import (
+    _multi_event_health_from_decision_audits,
     _reported_model_aliases,
     build_argparser,
     config_from_args,
 )
 from nmsim.config import Config, NewsTimelineEntry, normalize_news_timeline
-from nmsim.decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+from nmsim.decision_contract import (
+    ADAPTER_TERMINAL_STATUS_FIELD,
+    DECISION_VALID,
+    LEGACY_PARSE_INVALID,
+    MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+    PROVIDER_EXCEPTION_EXHAUSTED,
+    PROVIDER_PARSE_EXHAUSTED,
+    STRICT_SCHEMA_INVALID,
+)
 from nmsim.fingerprint import SCIENTIFIC_COMPONENT_FILES
 from nmsim.llm import CostTracker, parse_order_with_validity
 from nmsim.multi_event import (
@@ -406,6 +415,97 @@ class StrictDecisionResponseTests(unittest.TestCase):
         self.assertEqual(order["side"], "hold")
         self.assertNotIn("strict-schema-failed", order["rationale"])
 
+    @staticmethod
+    def _audit(agent, validity):
+        return {
+            "agent": agent,
+            "decision_response_schema": MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+            "strict_schema_valid": validity.valid,
+            "strict_schema_error_code": validity.error_code,
+            "terminal_status": validity.terminal_status,
+        }
+
+    def test_machine_health_never_scans_valid_reasoning_markers(self) -> None:
+        payload = {
+            "action": "hold",
+            "quantity": 0,
+            "limit_price": 100.0,
+            "sentiment": 0.0,
+            "public_take": "Waiting.",
+            "reasoning": (
+                "This discusses api-error, parse-failed, and "
+                "parse-retries-exhausted as text only."
+            ),
+        }
+        order, validity = self._parse(payload, "action")
+        self.assertTrue(validity.valid)
+        self.assertEqual(validity.terminal_status, DECISION_VALID)
+        bad, total, counts = _multi_event_health_from_decision_audits(
+            {1: [self._audit("valid", validity)]}
+        )
+        self.assertEqual((bad, total), (0, 1))
+        self.assertEqual(counts["valid_decisions"], 1)
+        self.assertIn("api-error", order["rationale"])
+
+    def test_machine_health_terminal_statuses_are_mutually_exclusive(self) -> None:
+        def strict_fallback(status, rationale):
+            raw = json.dumps(
+                {
+                    "side": "hold",
+                    "quantity": 0,
+                    "limit_price": 100.0,
+                    "sentiment": 0.0,
+                    "public_take": "",
+                    "rationale": rationale,
+                    ADAPTER_TERMINAL_STATUS_FIELD: status,
+                }
+            )
+            _order, validity = parse_order_with_validity(
+                raw,
+                100.0,
+                response_schema=MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+                direction_field="action",
+            )
+            return validity
+
+        parse_exhausted = strict_fallback(
+            PROVIDER_PARSE_EXHAUSTED,
+            "parse-retries-exhausted; holding",
+        )
+        provider_exhausted = strict_fallback(
+            PROVIDER_EXCEPTION_EXHAUSTED,
+            "api-error; holding",
+        )
+        _, strict_invalid = self._parse({}, "action")
+        audits = {
+            1: [
+                self._audit("strict", strict_invalid),
+                self._audit("provider-exception", provider_exhausted),
+                self._audit("provider-parse", parse_exhausted),
+            ]
+        }
+        bad, total, counts = _multi_event_health_from_decision_audits(audits)
+        self.assertEqual((bad, total), (3, 3))
+        self.assertEqual(
+            counts,
+            {
+                "strict_schema_invalid": 1,
+                "legacy_parse_invalid": 0,
+                "provider_exception_exhausted": 1,
+                "provider_parse_exhausted": 1,
+                "valid_decisions": 0,
+            },
+        )
+        legacy_audit = {
+            "agent": "legacy",
+            "decision_response_schema": MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+            "strict_schema_valid": None,
+            "strict_schema_error_code": "invalid_or_missing_json_object",
+            "terminal_status": LEGACY_PARSE_INVALID,
+        }
+        with self.assertRaises(ValueError):
+            _multi_event_health_from_decision_audits({1: [legacy_audit]})
+
     def test_run_seed_alias_projection_rejects_without_trimming(self) -> None:
         for alias in (" ", " leading", "trailing ", "bad\nline", "x" * 257):
             manager = type(
@@ -415,6 +515,7 @@ class StrictDecisionResponseTests(unittest.TestCase):
                     "manifest": {
                         "completion": {
                             "application_provider_attempts": {
+                                "invalid_reported_model_alias_count": 0,
                                 "reported_models_truncated": False,
                                 "reported_models": [alias],
                             }
@@ -424,6 +525,24 @@ class StrictDecisionResponseTests(unittest.TestCase):
             )()
             with self.subTest(alias=repr(alias)), self.assertRaises(ValueError):
                 _reported_model_aliases(manager)
+
+        mixed = type(
+            "Manager",
+            (),
+            {
+                "manifest": {
+                    "completion": {
+                        "application_provider_attempts": {
+                            "invalid_reported_model_alias_count": 1,
+                            "reported_models_truncated": False,
+                            "reported_models": ["HiggsAI"],
+                        }
+                    }
+                }
+            },
+        )()
+        with self.assertRaises(ValueError):
+            _reported_model_aliases(mixed)
 
     def test_scientific_fingerprint_covers_loader_and_result_assembler(self) -> None:
         self.assertIn("experiments/run_seed.py", SCIENTIFIC_COMPONENT_FILES)
@@ -614,7 +733,23 @@ class ManagedReuseHealthAndIdentityTests(unittest.TestCase):
         counts = result["health"]["failure_union_counts"]
         self.assertGreater(counts["valid_decisions"], 0)
         counts["valid_decisions"] -= 1
-        counts["strict_schema_only"] += 1
+        counts["strict_schema_invalid"] += 1
+        self.result_path.write_text(json.dumps(result), encoding="utf-8")
+        self._refresh_result_descriptor(manifest)
+        decision = self._decision()
+        self.assertFalse(decision.reusable)
+        self.assertIn(HEALTH_GATE_REJECTED, decision.reason_codes)
+
+    def test_health_must_close_against_manifest_completion_counts(self) -> None:
+        manifest = json.loads(self.original_manifest)
+        result = json.loads(self.original_result)
+        health = result["health"]
+        counts = health["failure_union_counts"]
+        self.assertGreater(counts["valid_decisions"], 0)
+        counts["valid_decisions"] -= 1
+        counts["strict_schema_invalid"] += 1
+        health["bad_orders"] = 1
+        health["bad_frac"] = round(1 / health["total_llm_orders"], 4)
         self.result_path.write_text(json.dumps(result), encoding="utf-8")
         self._refresh_result_descriptor(manifest)
         decision = self._decision()
@@ -641,6 +776,25 @@ class ManagedReuseHealthAndIdentityTests(unittest.TestCase):
         manifest["completion"]["application_provider_attempts"]["reported_models"] = aliases
         result["reported_model_aliases"] = aliases
         result["completion"] = manifest["completion"]
+        self.result_path.write_text(json.dumps(result), encoding="utf-8")
+        self._refresh_result_descriptor(manifest)
+        decision = self._decision()
+        self.assertFalse(decision.reusable)
+        self.assertIn(REPORTED_MODEL_GATE_REJECTED, decision.reason_codes)
+
+    def test_mixed_valid_and_invalid_alias_evidence_is_rejected(self) -> None:
+        manifest = json.loads(self.original_manifest)
+        result = json.loads(self.original_result)
+        manifest["completion"]["application_provider_attempts"][
+            "reported_models"
+        ] = ["HiggsAI"]
+        manifest["completion"]["application_provider_attempts"][
+            "invalid_reported_model_alias_count"
+        ] = 1
+        manifest["multi_event"]["reported_model_aliases"] = ["HiggsAI"]
+        manifest["multi_event"]["invalid_reported_model_alias_count"] = 1
+        result["reported_model_aliases"] = ["HiggsAI"]
+        result["invalid_reported_model_alias_count"] = 1
         self.result_path.write_text(json.dumps(result), encoding="utf-8")
         self._refresh_result_descriptor(manifest)
         decision = self._decision()

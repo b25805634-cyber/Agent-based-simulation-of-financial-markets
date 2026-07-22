@@ -23,11 +23,18 @@ import random
 import asyncio
 import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .config import Config
 from .decision_contract import (
+    ADAPTER_TERMINAL_STATUS_FIELD,
+    DECISION_VALID,
     DecisionResponseValidity,
+    LEGACY_PARSE_INVALID,
+    PROVIDER_EXCEPTION_EXHAUSTED,
+    PROVIDER_PARSE_EXHAUSTED,
+    STRICT_SCHEMA_INVALID,
+    exact_adapter_terminal_status,
     validate_decision_response,
 )
 from .provider_attempts import (
@@ -159,29 +166,31 @@ def parse_order_with_validity(
 
     if response_schema is None:
         order = _parse_order_legacy(raw, last_price)
+        # Preserve the established null-schema parser semantics byte-for-byte.
         failed = order["rationale"] == "parse-failed; holding"
         return order, DecisionResponseValidity(
             None,
             None,
             not failed,
             "invalid_or_missing_json_object" if failed else None,
+            LEGACY_PARSE_INVALID if failed else DECISION_VALID,
         )
     value, validity = validate_decision_response(
         raw,
         schema_version=response_schema,
         direction_field=direction_field,
     )
+    adapter_status = exact_adapter_terminal_status(raw)
+    terminal_status = adapter_status or (
+        DECISION_VALID if validity.valid else STRICT_SCHEMA_INVALID
+    )
+    validity = replace(validity, terminal_status=terminal_status)
     if value is None:
-        fallback_markers = [
-            marker
-            for marker in ("api-error", "parse-retries-exhausted")
-            if marker in raw
-        ]
-        fallback_suffix = (
-            "; " + ";".join(fallback_markers)
-            if fallback_markers
-            else ""
-        )
+        fallback_marker = {
+            PROVIDER_PARSE_EXHAUSTED: "parse-retries-exhausted",
+            PROVIDER_EXCEPTION_EXHAUSTED: "api-error",
+        }.get(adapter_status)
+        fallback_suffix = "; " + fallback_marker if fallback_marker else ""
         return (
             Order(
                 agent="",
@@ -209,6 +218,33 @@ def parse_order_with_validity(
         ),
         validity,
     )
+
+
+def _adapter_fallback_json(
+    *,
+    last_price: float,
+    terminal_status: str,
+    response_schema: str | None,
+    include_public_take: bool,
+) -> str:
+    """Preserve legacy fallback JSON; mark strict-study fallbacks explicitly."""
+
+    rationale = {
+        PROVIDER_PARSE_EXHAUSTED: "parse-retries-exhausted; holding",
+        PROVIDER_EXCEPTION_EXHAUSTED: "api-error; holding",
+    }[terminal_status]
+    payload = {
+        "side": "hold",
+        "quantity": 0,
+        "limit_price": last_price,
+        "sentiment": 0.0,
+    }
+    if include_public_take:
+        payload["public_take"] = ""
+    payload["rationale"] = rationale
+    if response_schema is not None:
+        payload[ADAPTER_TERMINAL_STATUS_FIELD] = terminal_status
+    return json.dumps(payload)
 
 
 def parse_order(
@@ -449,9 +485,14 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                     ),
                 )
                 if attempt == retries:
-                    return json.dumps({"side": "hold", "quantity": 0,
-                                       "limit_price": last_price, "sentiment": 0.0,
-                                       "rationale": "api-error; holding"})
+                    return _adapter_fallback_json(
+                        last_price=last_price,
+                        terminal_status=PROVIDER_EXCEPTION_EXHAUSTED,
+                        response_schema=getattr(
+                            self, "decision_response_schema", None
+                        ),
+                        include_public_take=False,
+                    )
                 await asyncio.sleep(0.5 * (attempt + 1))
                 trigger = "provider_exception"
                 continue
@@ -488,8 +529,12 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
             # Preserve the existing cumulative retry nudge exactly.
             user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
             trigger = "parse_failure"
-        return json.dumps({"side": "hold", "quantity": 0, "limit_price": last_price,
-                           "sentiment": 0.0, "rationale": "parse-retries-exhausted; holding"})
+        return _adapter_fallback_json(
+            last_price=last_price,
+            terminal_status=PROVIDER_PARSE_EXHAUSTED,
+            response_schema=getattr(self, "decision_response_schema", None),
+            include_public_take=False,
+        )
 
     def complete_batch(self, prompts):
         prompt_list = list(prompts)
@@ -666,9 +711,14 @@ class OpenAILLM(ProviderAttemptContextCarrier):
                     ),
                 )
                 if attempt == retries:
-                    return json.dumps({"side": "hold", "quantity": 0,
-                                       "limit_price": last_price, "sentiment": 0.0,
-                                       "public_take": "", "rationale": "api-error; holding"})
+                    return _adapter_fallback_json(
+                        last_price=last_price,
+                        terminal_status=PROVIDER_EXCEPTION_EXHAUSTED,
+                        response_schema=getattr(
+                            self, "decision_response_schema", None
+                        ),
+                        include_public_take=True,
+                    )
                 await asyncio.sleep(0.5 * (attempt + 1))
                 trigger = "provider_exception"
                 continue
@@ -706,9 +756,12 @@ class OpenAILLM(ProviderAttemptContextCarrier):
             # Preserve the existing cumulative retry nudge exactly.
             user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
             trigger = "parse_failure"
-        return json.dumps({"side": "hold", "quantity": 0, "limit_price": last_price,
-                           "sentiment": 0.0, "public_take": "",
-                           "rationale": "parse-retries-exhausted; holding"})
+        return _adapter_fallback_json(
+            last_price=last_price,
+            terminal_status=PROVIDER_PARSE_EXHAUSTED,
+            response_schema=getattr(self, "decision_response_schema", None),
+            include_public_take=True,
+        )
 
     def complete_batch(self, prompts):
         prompt_list = list(prompts)

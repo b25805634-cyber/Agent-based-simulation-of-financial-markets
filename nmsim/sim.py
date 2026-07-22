@@ -36,6 +36,7 @@ class SimResult:
     cfg: Config
     tracker: object
     liquidations: list = field(default_factory=list)   # LiquidationEvent log (leverage layer)
+    decision_audits: dict = field(default_factory=dict)
     # Populated by managed entry points (nmsim.run / experiments.run_seed).
     # Direct run_sim callers remain fully backward compatible.
     run_id: str | None = None
@@ -79,7 +80,7 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
 
     price = cfg.initial_price
     history = [price]
-    rows, traces = [], {}
+    rows, traces, decision_audits = [], {}, {}
     metrics = C.PropagationMetrics()
     last_statements: dict[str, Statement] = {}
     prev_sentiment = {nm: 0.0 for nm in llm_names}
@@ -221,6 +222,7 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
             )
         completions = llm.complete_batch(prompts)
         orders: list[Order] = []
+        round_decision_audits: list[dict] = []
         statements: dict[str, Statement] = {}
         sentiments: dict[str, float] = {}
         flips = 0
@@ -239,6 +241,24 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
             parse_failed = not bool(
                 validity is not None and getattr(validity, "valid", False)
             )
+            decision_audit = {
+                "agent": a.name,
+                "decision_response_schema": getattr(
+                    validity, "schema_version", None
+                ),
+                "strict_schema_valid": (
+                    getattr(validity, "valid", None)
+                    if cfg.decision_response_schema is not None
+                    else None
+                ),
+                "strict_schema_error_code": getattr(
+                    validity, "error_code", None
+                ),
+                "terminal_status": getattr(
+                    validity, "terminal_status", None
+                ),
+            }
+            round_decision_audits.append(decision_audit)
             if event_logger is not None:
                 public_decision = {
                     "persona_id": a.persona_id,
@@ -261,6 +281,9 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
                     ),
                     "strict_schema_error_code": getattr(
                         validity, "error_code", None
+                    ),
+                    "terminal_status": getattr(
+                        validity, "terminal_status", None
                     ),
                     "raw_response_sha256": _digest(raw),
                 }
@@ -439,6 +462,7 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
         traces[r] = [(o["agent"], o["side"], o["quantity"], o["limit_price"],
                       o["sentiment"], o["public_take"], o["rationale"])
                      for o in orders if o["agent"] in llm_set]
+        decision_audits[r] = round_decision_audits
         non_seed = set(llm_names) - seed_agents
         metrics.record(r, sentiments, flips,
                        seed_sign if r >= cfg.news_round else 0.0,
@@ -470,4 +494,5 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
 
     return SimResult(history, rows, traces, agents, metrics,
                      adjacency, seed_agents, hub_names, cfg, tracker,
-                     liquidations=liquidations, run_id=run_id)
+                     liquidations=liquidations, decision_audits=decision_audits,
+                     run_id=run_id)

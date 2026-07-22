@@ -34,6 +34,14 @@ from nmsim.managed_cli import (
 )
 from nmsim.run_context import ManagedRunContext
 from nmsim.provider_attempts import safe_reported_model
+from nmsim.decision_contract import (
+    DECISION_VALID,
+    LEGACY_PARSE_INVALID,
+    PROVIDER_EXCEPTION_EXHAUSTED,
+    PROVIDER_PARSE_EXHAUSTED,
+    STRICT_SCHEMA_INVALID,
+    MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+)
 from nmsim.result_reuse import inspect_legacy_analysis_inputs
 from nmsim.multi_event import (
     MultiEventMaterial,
@@ -159,7 +167,13 @@ def _replay_records_path(source):
 
 def _reported_model_aliases(manager) -> list[str]:
     attempts = manager.manifest["completion"]["application_provider_attempts"]
-    if attempts.get("reported_models_truncated"):
+    invalid_count = attempts.get("invalid_reported_model_alias_count")
+    if (
+        attempts.get("reported_models_truncated") is not False
+        or isinstance(invalid_count, bool)
+        or not isinstance(invalid_count, int)
+        or invalid_count != 0
+    ):
         raise ValueError("reported model aliases are truncated")
     raw = attempts.get("reported_models", [])
     if not isinstance(raw, list) or any(
@@ -167,6 +181,89 @@ def _reported_model_aliases(manager) -> list[str]:
     ):
         raise ValueError("reported model aliases are malformed")
     return sorted(set(raw))
+
+
+def _multi_event_health_from_decision_audits(decision_audits):
+    """Build the exact disjoint health union from machine audit fields only."""
+
+    failure_union_counts = {
+        "strict_schema_invalid": 0,
+        "legacy_parse_invalid": 0,
+        "provider_exception_exhausted": 0,
+        "provider_parse_exhausted": 0,
+        "valid_decisions": 0,
+    }
+    total = 0
+    bad = 0
+    for items in decision_audits.values():
+        if not isinstance(items, list):
+            raise ValueError("multi-event decision audit must be a list")
+        for audit in items:
+            expected_keys = {
+                "agent",
+                "decision_response_schema",
+                "strict_schema_valid",
+                "strict_schema_error_code",
+                "terminal_status",
+            }
+            if not isinstance(audit, dict) or set(audit) != expected_keys:
+                raise ValueError("multi-event decision audit must be an object")
+            total += 1
+            strict_valid = audit.get("strict_schema_valid")
+            strict_error = audit.get("strict_schema_error_code")
+            terminal_status = audit.get("terminal_status")
+            allowed_statuses = {
+                DECISION_VALID,
+                STRICT_SCHEMA_INVALID,
+                LEGACY_PARSE_INVALID,
+                PROVIDER_EXCEPTION_EXHAUSTED,
+                PROVIDER_PARSE_EXHAUSTED,
+            }
+            if (
+                audit.get("decision_response_schema")
+                != MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+                or not isinstance(audit.get("agent"), str)
+                or not audit.get("agent")
+                or (
+                    strict_valid is not True
+                    and strict_valid is not False
+                    and strict_valid is not None
+                )
+                or (strict_valid is True and strict_error is not None)
+                or (
+                    strict_valid is False
+                    and (not isinstance(strict_error, str) or not strict_error)
+                )
+                or terminal_status not in allowed_statuses
+                or (terminal_status == DECISION_VALID and strict_valid is not True)
+                or (
+                    terminal_status == STRICT_SCHEMA_INVALID
+                    and strict_valid is not False
+                )
+                or (
+                    terminal_status == LEGACY_PARSE_INVALID
+                    # The frozen multi-event schema is always strict; retain
+                    # this compatibility bucket as exact reserved-zero only.
+                )
+                or (
+                    terminal_status
+                    in {
+                        PROVIDER_EXCEPTION_EXHAUSTED,
+                        PROVIDER_PARSE_EXHAUSTED,
+                    }
+                    and strict_valid is not False
+                )
+            ):
+                raise ValueError("multi-event decision audit is inconsistent")
+            if terminal_status != DECISION_VALID:
+                bad += 1
+            bucket = (
+                "valid_decisions"
+                if terminal_status == DECISION_VALID
+                else terminal_status
+            )
+            failure_union_counts[bucket] += 1
+    return bad, total, failure_union_counts
 
 
 def _live(args, cfg, manager, multi_event_material=None):
@@ -184,35 +281,20 @@ def _live(args, cfg, manager, multi_event_material=None):
     res.run_dir = str(manager.run_dir)
     manager.set_population(res.agents)
     manager.sync_llm_accounting(llm, tracker)
-    bad = total = 0
-    failure_union_counts = {
-        "strict_schema_only": 0,
-        "legacy_parse_only": 0,
-        "provider_fallback_only": 0,
-        "multiple_failure_causes": 0,
-        "valid_decisions": 0,
-    }
-    for items in res.traces.values():
-        for (_a, _s, _q, _l, _se, _tk, why) in items:
-            total += 1
-            causes = {
-                "strict_schema" if "strict-schema-failed" in why else None,
-                (
-                    "legacy_parse"
-                    if "parse-failed" in why
-                    or "parse-retries-exhausted" in why
-                    else None
-                ),
-                "provider_fallback" if "api-error" in why else None,
-            } - {None}
-            if causes:
-                bad += 1
-            if not causes:
-                failure_union_counts["valid_decisions"] += 1
-            elif len(causes) > 1:
-                failure_union_counts["multiple_failure_causes"] += 1
-            else:
-                failure_union_counts["{}_only".format(next(iter(causes)))] += 1
+    if cfg.decision_response_schema is not None:
+        bad, total, failure_union_counts = (
+            _multi_event_health_from_decision_audits(res.decision_audits)
+        )
+    else:
+        # Historical entry points retain their established marker projection;
+        # preregistered multi-event runs exclusively use machine audit fields.
+        bad = total = 0
+        for items in res.traces.values():
+            for (_a, _s, _q, _l, _se, _tk, why) in items:
+                total += 1
+                if any(marker in why for marker in _BAD_MARKERS):
+                    bad += 1
+        failure_union_counts = None
     out = _assemble(
         args.label,
         args.seed,
@@ -229,7 +311,7 @@ def _live(args, cfg, manager, multi_event_material=None):
                 "schema_version": "multi_event_health_v1",
                 "decision_response_schema": cfg.decision_response_schema,
                 "failure_union": (
-                    "strict_schema_or_legacy_parse_or_provider_fallback"
+                    "exact_terminal_decision_status"
                 ),
                 "failure_union_counts": failure_union_counts,
             }
@@ -687,9 +769,13 @@ def main(argv=None):
         if multi_event_material is not None:
             reported_model_aliases = _reported_model_aliases(manager)
             result["reported_model_aliases"] = reported_model_aliases
+            result["invalid_reported_model_alias_count"] = 0
             manager.manifest["multi_event"]["reported_model_aliases"] = (
                 reported_model_aliases
             )
+            manager.manifest["multi_event"][
+                "invalid_reported_model_alias_count"
+            ] = 0
             manager.manifest.write_atomic()
 
         result["rep"] = args.repeat_idx

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 import json
 import os
 from pathlib import Path
@@ -110,6 +111,7 @@ class MultiEventDriverTests(unittest.TestCase):
                 "resolved_model": expected.resolved_model,
                 "endpoint_identity": expected.endpoint_identity,
                 "reported_model_aliases": [],
+                "invalid_reported_model_alias_count": 0,
                 "scientific_runtime_environment": (
                     expected.scientific_runtime_environment
                 ),
@@ -201,14 +203,34 @@ class MultiEventDriverTests(unittest.TestCase):
             manifest = {
                 "completion": {
                     "application_provider_attempts": {
+                        "invalid_reported_model_alias_count": 0,
                         "reported_models_truncated": False,
                         "reported_models": [alias],
                     }
                 }
             }
-            result = {"reported_model_aliases": [alias]}
+            result = {
+                "reported_model_aliases": [alias],
+                "invalid_reported_model_alias_count": 0,
+            }
             with self.subTest(alias=repr(alias)), self.assertRaises(ValueError):
                 M._model_aliases(manifest, result, mode="openai_live")
+
+        manifest = {
+            "completion": {
+                "application_provider_attempts": {
+                    "invalid_reported_model_alias_count": 1,
+                    "reported_models_truncated": False,
+                    "reported_models": ["HiggsAI"],
+                }
+            }
+        }
+        result = {
+            "reported_model_aliases": ["HiggsAI"],
+            "invalid_reported_model_alias_count": 1,
+        }
+        with self.assertRaises(ValueError):
+            M._model_aliases(manifest, result, mode="openai_live")
 
     def test_fail_then_success_preserves_both_attempts_and_registered_parent_artifacts(self) -> None:
         secret = "TOP_SECRET_RETRY_OUTPUT"
@@ -595,6 +617,78 @@ class MultiEventDriverTests(unittest.TestCase):
             self.assertTrue(manifest["multi_event_driver"]["network_access"])
             self.assertTrue(manifest["llm"]["runtime"]["network_access"])
             self.assertEqual(manifest["llm"]["mode"], "connectivity_probe_only")
+
+    def test_live_runtime_drift_cannot_reset_same_slot_attempt_cap(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            patches, _protocol, job, expected, _allowed = self._patch_one_job(root)
+            drifted = replace(
+                expected,
+                scientific_runtime_environment_identity="f" * 64,
+            )
+            foreign_series = M._attempt_series_id(job, drifted)
+            foreign_run_id = M._attempt_run_id(job, 1, foreign_series)
+            (root / "runs" / foreign_run_id).mkdir(parents=True)
+            snapshot = {
+                "schema_version": "multi_event_source_snapshot_v1",
+                "execution_mode": "openai_live",
+                "live_snapshot_enforced": True,
+                "live_eligibility_claim": True,
+                "head_commit": "a" * 40,
+                "protocol_last_change_commit": "a" * 40,
+                "scientific_component_fingerprint": "b" * 64,
+            }
+
+            def no_child(command, *args, **kwargs):
+                if isinstance(command, (list, tuple)) and "experiments.run_seed" in command:
+                    raise AssertionError("runtime drift reset the attempt cap")
+                return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                M, "_validate_cli", return_value=([11], [1], "openai_live", True, None)
+            ), mock.patch.object(
+                M, "_resolve_output_root", return_value=root
+            ), mock.patch.object(
+                M, "_source_snapshot", return_value=snapshot
+            ), mock.patch.object(
+                M, "_validate_expected_source_snapshot"
+            ), mock.patch.object(
+                M.subprocess, "run", side_effect=no_child
+            ), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ), self.assertRaisesRegex(
+                M.AttemptCoordinationError, "refusing to reset the cap"
+            ):
+                M.main(
+                    [
+                        "--provider",
+                        "openai",
+                        "--live",
+                        "--out",
+                        str(root),
+                        "--run-id",
+                        "runtime-drift-parent",
+                    ]
+                )
+            manifest = json.loads(
+                (
+                    root
+                    / "runs"
+                    / "runtime-drift-parent"
+                    / "run_manifest.json"
+                ).read_text(encoding="utf-8")
+            )
+            ledger = _read_jsonl(
+                root
+                / "runs"
+                / "runtime-drift-parent"
+                / M.ATTEMPT_LEDGER_NAME
+            )
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual(
+                [entry["reason_code"] for entry in ledger],
+                ["off_policy_slot_attempt_materialized"],
+            )
 
     def test_live_output_root_and_source_snapshot_fail_closed(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

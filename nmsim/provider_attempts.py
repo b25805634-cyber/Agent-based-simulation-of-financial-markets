@@ -107,6 +107,7 @@ class ProviderAttemptObservation:
     def public_payload(self, context: ProviderAttemptContext) -> dict[str, Any]:
         """Return a public-safe event payload containing identities and codes."""
 
+        reported_model = safe_reported_model(self.reported_model)
         return {
             "provider_attempt_schema": PROVIDER_ATTEMPT_SCHEMA,
             "logical_sequence": int(context.logical_sequence),
@@ -120,7 +121,10 @@ class ProviderAttemptObservation:
             "max_attempts": int(self.max_attempts),
             "provider": str(self.provider),
             "model": None if self.model is None else str(self.model),
-            "reported_model": safe_reported_model(self.reported_model),
+            "reported_model": reported_model,
+            "reported_model_alias_invalid": bool(
+                self.reported_model is not None and reported_model is None
+            ),
             "original_prompt_hash": context.original_prompt_hash,
             "attempted_prompt_hash": prompt_hash(
                 self.attempted_system, self.attempted_user

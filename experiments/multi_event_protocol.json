@@ -68,13 +68,13 @@
     "record_replay_role": "audit_of_observed_runs_only",
     "attempt_series_coordination": "the driver holds one nonblocking advisory lock at the canonical study output root for its entire preflight, execution, selection, and summary lifecycle; every launched child inherits the lock descriptor so an orphaned in-flight child retains ownership until it terminates",
     "attempt_inflight_policy": "an occupied ACTIVE or running attempt is never classified as rejected and never advances the series; lock contention or an independently observed active attempt causes a safe parent stop, after which a later parent must reacquire the lock and reassess the exact attempt",
-    "attempt_budget_scope": "one bounded five-attempt series per preregistered slot in the single canonical repository results_multi_event root; selectable alternate live output roots are prohibited and cannot reset the local cap",
+    "attempt_budget_scope": "one bounded five-attempt budget per preregistered slot across all preserved canonical me-{slot_id}-*-ta* materializations in the single canonical repository results_multi_event root; selectable alternate live output roots, runtime-environment drift, and foreign attempt-series identities cannot reset the cap; deleting preserved canonical results is outside the protocol",
     "live_source_snapshot_policy": "live execution requires a completely clean repository and HEAD exactly equal to the last commit that changed the canonical protocol artifact; every accepted live child must bind that same commit and scientific component fingerprint",
     "launch_order_policy": "multi_event_launch_order_v1: iterate repeat position then seed position; rotate canonical event order by (repeat_position+seed_position)%3; launch both arms adjacently; social_on is first exactly when (repeat_position+seed_position+canonical_event_position)%2==1; each event occupies each temporal position eight times and has 12 on-first plus 12 off-first blocks",
     "scientific_runtime_environment_policy": "every multi-event attempt series, child, plan, selection, and pooled study binds scientific_runtime_environment_v1: Python implementation/version, platform/architecture, and exact numpy/matplotlib/anthropic/openai/httpx versions including null; live accepted children must be uniform",
     "raw_audit_artifact_policy": "every accepted child must register and preserve experiment_result.json, its canonical compatibility JSON, llm_records.jsonl, events.jsonl, and private_events.jsonl; private_events.jsonl and llm_records.jsonl must be non-symlink regular files with exact mode 0600",
     "parent_network_policy": "the live parent truthfully records network_access=true for connectivity probes only; LLM provider calls belong to managed children; mock and dry parents record network_access=false",
-    "health_contract": "multi_event_health_v1 requires total_llm_orders>0 and nonnegative integer counts; bad_orders is the union of strict-schema, legacy-parse, and provider-fallback final-decision failures represented by disjoint exhaustive failure_union_counts; bad_frac must equal round(bad_orders/total_llm_orders,4), while the acceptance threshold is applied to the unrounded ratio"
+    "health_contract": "multi_event_health_v1 derives one exact terminal_status machine field per decision and never scans model-authored reasoning text; failure_union_counts has exactly strict_schema_invalid, legacy_parse_invalid, provider_exception_exhausted, provider_parse_exhausted, and valid_decisions as mutually exclusive exhaustive nonnegative integer buckets, with legacy_parse_invalid reserved at exact zero because every multi-event audit binds the strict multi_event_decision_response_v1 schema; bad_orders is the sum of the four failure buckets, total_llm_orders is the sum of all five buckets, bad_frac must equal round(bad_orders/total_llm_orders,4), and the acceptance threshold is applied to the unrounded ratio; total_llm_orders must equal manifest completion.agent_decisions.completed, bad_orders must equal completion.parsing.failed, and the two provider-exhaustion buckets must sum to completion.application_provider_attempts.exhausted_logical_requests"
   },
   "bootstrap": {
     "method": "cluster_resample_complete_seed_ids_with_replacement",
@@ -274,9 +274,10 @@
       "resolved_model",
       "endpoint_identity",
       "reported_model_aliases",
+      "invalid_reported_model_alias_count",
       "scientific_runtime_environment_identity"
     ],
-    "reported_model_alias_policy": "each live child binds exactly one endpoint-reported alias across application attempt evidence, selection identity, and experiment_result; an alias is accepted byte-exact only when it is 1..256 printable characters, equals its own strip result, has no leading/trailing whitespace or control characters, and may contain safe printable interior spaces; invalid aliases are rejected and never trimmed; a single study alias permits pooling only under one homogeneous self-reported endpoint condition, underlying_model_identity_verified is always false, mixed live aliases prohibit alias-homogeneous pooling, and mock records an empty list",
+    "reported_model_alias_policy": "each live child binds exactly one endpoint-reported alias across application attempt evidence, selection identity, and experiment_result; an alias is accepted byte-exact only when it is 1..256 printable characters, equals its own strip result, has no leading/trailing whitespace or control characters, and may contain safe printable interior spaces; every non-null invalid raw alias increments invalid_reported_model_alias_count, accepted children and analyzer-facing child/study identities require that count to be exactly integer zero, invalid aliases are rejected and never silently dropped or trimmed; a single study alias permits pooling only under one homogeneous self-reported endpoint condition, underlying_model_identity_verified is always false, mixed live aliases prohibit alias-homogeneous pooling, and mock records an empty list",
     "required_child_identity": [
       "run_id",
       "command_identity",
@@ -292,6 +293,7 @@
       "resolved_model",
       "endpoint_identity",
       "reported_model_aliases",
+      "invalid_reported_model_alias_count",
       "scientific_runtime_environment",
       "scientific_runtime_environment_identity"
     ],

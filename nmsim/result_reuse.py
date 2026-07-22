@@ -229,6 +229,7 @@ class ChildRunIdentity:
     scientific_runtime_environment: Optional[Mapping[str, Any]]
     scientific_runtime_environment_identity: Optional[str]
     reported_model_aliases: Optional[tuple[str, ...]]
+    invalid_reported_model_alias_count: Optional[int]
     artifacts: tuple[ArtifactIdentity, ...]
     legacy_links: tuple[LegacyLinkIdentity, ...]
     git_commit: Optional[str]
@@ -279,7 +280,10 @@ class ChildRunIdentity:
                     raw, experiment_slot, multi_event_identity
                 )
             )
-            reported_model_aliases = _manifest_reported_model_aliases(
+            (
+                reported_model_aliases,
+                invalid_reported_model_alias_count,
+            ) = _manifest_reported_model_aliases(
                 raw, experiment_slot
             )
             (
@@ -358,6 +362,9 @@ class ChildRunIdentity:
                     runtime_environment_identity
                 ),
                 reported_model_aliases=reported_model_aliases,
+                invalid_reported_model_alias_count=(
+                    invalid_reported_model_alias_count
+                ),
                 artifacts=artifacts,
                 legacy_links=legacy_links,
                 git_commit=_optional_text(git.get("commit")),
@@ -1258,9 +1265,9 @@ def _manifest_runtime_environment_identity(
 
 def _manifest_reported_model_aliases(
     raw: Mapping[str, Any], slot: Optional[Mapping[str, Any]]
-) -> Optional[tuple[str, ...]]:
+) -> tuple[Optional[tuple[str, ...]], Optional[int]]:
     if slot is None:
-        return None
+        return None, None
     multi_event = raw.get("multi_event")
     completion = raw.get("completion")
     if not isinstance(multi_event, Mapping) or not isinstance(completion, Mapping):
@@ -1271,13 +1278,21 @@ def _manifest_reported_model_aliases(
         or attempts.get("reported_models_truncated") is not False
     ):
         raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    invalid_count = attempts.get("invalid_reported_model_alias_count")
+    if (
+        isinstance(invalid_count, bool)
+        or not isinstance(invalid_count, int)
+        or invalid_count != 0
+        or multi_event.get("invalid_reported_model_alias_count") != 0
+    ):
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
     manifest_aliases = _normalized_aliases(
         multi_event.get("reported_model_aliases")
     )
     completion_aliases = _normalized_aliases(attempts.get("reported_models"))
     if manifest_aliases != completion_aliases:
         raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
-    return manifest_aliases
+    return manifest_aliases, invalid_count
 
 
 def _input_identity(value: Any) -> tuple[str, Optional[str]]:
@@ -1759,6 +1774,8 @@ def _verify_result_identity(child: ChildRunIdentity) -> list[str]:
                     == child.experiment_slot["repeat_idx"],
                     tuple(result.get("reported_model_aliases", ()))
                     == child.reported_model_aliases,
+                    result.get("invalid_reported_model_alias_count")
+                    == child.invalid_reported_model_alias_count,
                     material == child.multi_event_material_identity,
                 )
             )

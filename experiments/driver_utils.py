@@ -658,6 +658,8 @@ def assess_run_seed_reuse(
     try:
         with result_path.open(encoding="utf-8") as stream:
             health = json.load(stream)["health"]
+        with decision.manifest_path.open(encoding="utf-8") as stream:
+            manifest = json.load(stream)
         bad_orders = health["bad_orders"]
         total_orders = health["total_llm_orders"]
         declared_fraction = float(health["bad_frac"])
@@ -685,10 +687,10 @@ def assess_run_seed_reuse(
                 raise ValueError("multi-event health schema changed")
             union_counts = health["failure_union_counts"]
             count_keys = {
-                "strict_schema_only",
-                "legacy_parse_only",
-                "provider_fallback_only",
-                "multiple_failure_causes",
+                "strict_schema_invalid",
+                "legacy_parse_invalid",
+                "provider_exception_exhausted",
+                "provider_parse_exhausted",
                 "valid_decisions",
             }
             if (
@@ -696,7 +698,7 @@ def assess_run_seed_reuse(
                 or health["decision_response_schema"]
                 != MULTI_EVENT_DECISION_RESPONSE_SCHEMA
                 or health["failure_union"]
-                != "strict_schema_or_legacy_parse_or_provider_fallback"
+                != "exact_terminal_decision_status"
                 or not isinstance(union_counts, Mapping)
                 or set(union_counts) != count_keys
                 or any(
@@ -706,6 +708,7 @@ def assess_run_seed_reuse(
                     for value in union_counts.values()
                 )
                 or sum(union_counts.values()) != total_orders
+                or union_counts["legacy_parse_invalid"] != 0
                 or sum(
                     union_counts[key]
                     for key in count_keys - {"valid_decisions"}
@@ -713,6 +716,37 @@ def assess_run_seed_reuse(
                 != bad_orders
             ):
                 raise ValueError("multi-event health union is inconsistent")
+            completion = manifest.get("completion")
+            decisions = (
+                completion.get("agent_decisions")
+                if isinstance(completion, Mapping)
+                else None
+            )
+            parsing = (
+                completion.get("parsing")
+                if isinstance(completion, Mapping)
+                else None
+            )
+            attempts = (
+                completion.get("application_provider_attempts")
+                if isinstance(completion, Mapping)
+                else None
+            )
+            if (
+                not isinstance(decisions, Mapping)
+                or not isinstance(parsing, Mapping)
+                or not isinstance(attempts, Mapping)
+                or decisions.get("completed") != total_orders
+                or parsing.get("failed") != bad_orders
+                or (
+                    union_counts["provider_exception_exhausted"]
+                    + union_counts["provider_parse_exhausted"]
+                )
+                != attempts.get("exhausted_logical_requests")
+            ):
+                raise ValueError(
+                    "multi-event health does not close against completion"
+                )
         if (
             not math.isfinite(declared_fraction)
             or not 0.0 <= declared_fraction <= 1.0
