@@ -231,6 +231,18 @@ Phase 1.1B 的 `run_context.py`、`managed_cli.py`、`entrypoints.py`、`run.py`
 
 这项兼容不是对生命周期变更的 blanket 豁免：如果未来将影响科学行为的代码错放在 allowlist 之外，必须修正指纹覆盖集/版本并增加测试，不能借此声称兼容。Recording schema 仍为 `1.2`，Phase 1.1B 未引入新的 Replay 忽略开关或降级路径。生命周期终态与 completion 单位分别见 [MANAGED_RUN_LIFECYCLE.md](MANAGED_RUN_LIFECYCLE.md) 和 [COMPLETION_ACCOUNTING.md](COMPLETION_ACCOUNTING.md)。
 
+### Provider-attempt instrumentation 的 source-identity 边界
+
+completion `1.1` 新增的 Provider-attempt 观察保持了 OpenAI/Anthropic
+retry 次数、顺序、累加 reminder、异常退避、fallback 字符串、CostTracker
+和最终 recording `1.2` 结构，没有改变 Prompt、parser 或市场语义。
+但该 instrumentation 执行于 `nmsim/llm.py`，而该文件本来就在
+scientific-component allowlist 内。因此新旧代码的 simulation-core/scientific
+source identity 会不同，改动前的 recording 按第 4 层 preflight 拒绝是预期结果。
+本项目不把“语义意图不变”当作绕过可执行源身份的理由。在同一新
+source identity 内生成的 recording 仍按既有 Strict Replay 规则校验；Replay
+不生成 Provider-attempt 事件，相应 attempt 完成量为 0。
+
 ### 2026-07-15 跨 commit 示例的真实 provenance
 
 原记录与 Replay 保留在本机 `/private/tmp`，未修改历史文件。已直接读取 manifest/首条 recording 并与 Git tree 核对：

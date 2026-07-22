@@ -20,7 +20,7 @@ from .config import Config
 from .provenance import RunManager, redact_secrets
 
 
-COMPLETION_SCHEMA_VERSION = "1.0"
+COMPLETION_SCHEMA_VERSION = "1.1"
 MANAGED_CONTEXT_SCHEMA_VERSION = "1.0"
 FAILURE_STAGES = (
     "bootstrap",
@@ -135,6 +135,22 @@ def completion_template(
                 "provider-interface requests; SDK-internal retry attempts are not observable"
             ),
         },
+        "application_provider_attempts": {
+            "unit": "visible_adapter_loop_attempts",
+            "attempted": 0,
+            "responses_received": 0,
+            "parse_failed_responses": 0,
+            "provider_exceptions": 0,
+            "retries_scheduled": 0,
+            "logical_requests_with_retry": 0,
+            "exhausted_logical_requests": 0,
+            "reported_models": [],
+            "reported_models_truncated": False,
+            "coverage": (
+                "OpenAI/Anthropic application retry loops only; excludes SDK, "
+                "transport, proxy, and server-internal retries"
+            ),
+        },
         "parsing": {
             "unit": "agent_decision_parse_operations",
             "attempted": 0,
@@ -185,6 +201,31 @@ class _ManagedEventObserver:
     ) -> str:
         return self._writer.emit_private(
             event_type, round_i=round_i, agent_id=agent_id, data=data
+        )
+
+    def observe_provider_attempt(self, context: Any, observation: Any) -> None:
+        """Persist one correlated Provider attempt through the managed logger."""
+
+        def sanitize_private(value: Any) -> Any:
+            if isinstance(value, str):
+                return self._context._manager._sanitize_text(
+                    value, max_length=None
+                )
+            if isinstance(value, Mapping):
+                return {
+                    str(key): sanitize_private(item)
+                    for key, item in value.items()
+                }
+            if isinstance(value, (list, tuple)):
+                return [sanitize_private(item) for item in value]
+            return value
+
+        self.emit(
+            "LLMProviderAttemptObserved",
+            round_i=context.round_i,
+            agent_id=context.agent,
+            data=observation.public_payload(context),
+            private_data=sanitize_private(observation.private_payload()),
         )
 
     def __getattr__(self, name: str) -> Any:
@@ -411,6 +452,37 @@ class ManagedRunContext:
                     completion["response_sources"]["replay"] += 1
                 else:
                     completion["response_sources"]["provider"] += 1
+            elif event_type == "LLMProviderAttemptObserved":
+                attempts = completion["application_provider_attempts"]
+                attempts["attempted"] += 1
+                outcome = str(data.get("outcome") or "")
+                if outcome in {"response_parseable", "response_parse_failed"}:
+                    attempts["responses_received"] += 1
+                if outcome == "response_parse_failed":
+                    attempts["parse_failed_responses"] += 1
+                elif outcome == "provider_exception":
+                    attempts["provider_exceptions"] += 1
+                if bool(data.get("will_retry")):
+                    attempts["retries_scheduled"] += 1
+                if int(data.get("attempt_index") or 0) == 2:
+                    attempts["logical_requests_with_retry"] += 1
+                if (
+                    not bool(data.get("will_retry"))
+                    and outcome in {"response_parse_failed", "provider_exception"}
+                ):
+                    attempts["exhausted_logical_requests"] += 1
+                reported_model = data.get("reported_model")
+                reported_models = attempts["reported_models"]
+                if (
+                    isinstance(reported_model, str)
+                    and reported_model
+                    and reported_model not in reported_models
+                ):
+                    if len(reported_models) < 16:
+                        reported_models.append(reported_model)
+                        reported_models.sort()
+                    else:
+                        attempts["reported_models_truncated"] = True
             elif event_type == "AgentDecisionParsed":
                 completion["agent_decisions"]["completed"] += 1
                 parsing = completion["parsing"]

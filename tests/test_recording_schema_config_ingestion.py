@@ -534,11 +534,11 @@ class StrictConfigIngestionTests(unittest.TestCase):
         )
         self.assertEqual(
             metadata["simulation_core_source_hash"],
-            "8077036b5b2ed3b5264cf994c1dd412152c89a033a5fa79b1cf00c20564db7e6",
+            "efe0417170052e6c80270c612b32c513d7c1ddd7fb1f1f4469e8cd5b0fd28cdb",
         )
         self.assertEqual(
             metadata["scientific_component_fingerprint"],
-            "29487b1fb3b03fcd27d70b987b80750c86d102e697140b85516d12ab679a9cd1",
+            "fe604b01f952cc261d38e989c468ed9c0115c512d7f522caad610744d38f6d44",
         )
         defaults = Config()
         self.assertEqual(defaults.n_rounds, 24)
