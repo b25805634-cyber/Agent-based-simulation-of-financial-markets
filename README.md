@@ -65,6 +65,20 @@ python -m experiments.model_qualification --provider mock --dry-run \
 # execute the same frozen 48-case protocol with the in-process Mock only:
 python -m experiments.model_qualification --provider mock \
   --out /tmp/nmsim-qualification-mock
+
+# Wave 0 endpoint-stochasticity plan: validate the frozen 48->6 selection and
+# the 6 cases x 2 temperatures x K=30 x 3 concurrency levels = 1080-call grid;
+# dry-run constructs no Provider and performs no network access:
+python3 -m experiments.endpoint_stochasticity --provider openai --dry-run \
+  --out /tmp/nmsim-endpoint-stochasticity-dry
+
+# execute the full grid plus the separate two-call same-seed probe offline:
+python3 -m experiments.endpoint_stochasticity --provider fake_test_provider \
+  --out /tmp/nmsim-endpoint-stochasticity-fake
+
+# a real OpenAI-compatible endpoint is reachable only behind the explicit guard:
+python3 -m experiments.endpoint_stochasticity --provider openai --live \
+  --out /tmp/nmsim-endpoint-stochasticity-live
 ```
 
 `provider=auto` (the default) uses Anthropic when `ANTHROPIC_API_KEY` is set and
@@ -115,6 +129,17 @@ Provider capability snapshots describe adapter behavior and network/auth
 boundaries; they do not establish model quality, realism, or deterministic
 responses.
 
+`experiments.endpoint_stochasticity` is a managed non-market Wave 0
+diagnostic. It measures pairwise within-case raw-byte agreement and pooled
+within-case sample sigma for sentiment and signed order (`+quantity` buy, `0`
+hold, `-quantity` sell) across temperatures `0`/`0.3` and concurrency
+`1`/`8`/`32`. The 1080 main-grid samples and separate two-call seed probe are
+distinct honest-N units and contribute zero simulation `honest_n_runs`.
+Prompts, raw responses and private reasoning remain in the mode-`0600`
+`private_endpoint_records.jsonl`; public output contains only hashes, explicit
+public parsed fields, accounting, and aggregates. Temperature zero or equal
+seed-probe responses are not a determinism claim.
+
 See [`docs/RUN_PROVENANCE.md`](docs/RUN_PROVENANCE.md) for schemas and replay,
 [`docs/MANAGED_RUN_LIFECYCLE.md`](docs/MANAGED_RUN_LIFECYCLE.md) for startup and
 failure handling, [`docs/ENTRYPOINTS.md`](docs/ENTRYPOINTS.md) for the supported
@@ -123,6 +148,9 @@ for units and honest-N. Phase 1.2A's exact boundaries are in
 [`docs/RESULT_REUSE_POLICY.md`](docs/RESULT_REUSE_POLICY.md),
 [`docs/PROVIDER_CAPABILITIES.md`](docs/PROVIDER_CAPABILITIES.md), and
 [`docs/MODEL_QUALIFICATION_PROTOCOL.md`](docs/MODEL_QUALIFICATION_PROTOCOL.md).
+Wave 0's frozen grid, artifact schemas, privacy boundary, sigma estimators, and
+N/K interpretation are in
+[`docs/ENDPOINT_STOCHASTICITY.md`](docs/ENDPOINT_STOCHASTICITY.md).
 The experimental Codex CLI boundary and future quota-guarded pilot procedure
 are documented in [`docs/CODEX_EXEC_PROVIDER.md`](docs/CODEX_EXEC_PROVIDER.md)
 and [`docs/CODEX_QUALIFICATION_RUNBOOK.md`](docs/CODEX_QUALIFICATION_RUNBOOK.md).

@@ -1,7 +1,7 @@
 # Entrypoint inventory and management policy
 
-This document records the executable surfaces found through Phase 1.2A and
-their current lifecycle and result-reuse policy. The machine-readable source is
+This document records the executable surfaces found through the Wave 0
+endpoint-stochasticity addition and their current lifecycle and result-reuse policy. The machine-readable source is
 [nmsim/entrypoints.py](../nmsim/entrypoints.py). Importing that registry has no
 provider, Git, network, or filesystem side effect.
 
@@ -43,6 +43,7 @@ Management policies are more precise than a managed/unmanaged boolean:
 | python3 -m experiments.run_seed | argparse → Config assembly → ManagedRunContext → live `run_sim`, strict replay, or provider-free `--price-csv` historical analysis → export | Managed, but previously duplicated lifecycle/provider/export logic | Canonical result, recording/manifest/events and non-overwriting legacy flat JSON | Direct, replay, or none in historical CSV analysis | Yes, direct_managed; `--price-csv` uses `run_kind=analysis` and is not child-run reuse |
 | python3 -m experiments.capture_traces | argparse → Config → build_llm → bare run_sim → JSON | Unmanaged | Ordinary trace JSON containing private reasoning | Direct | Yes only after direct_managed; rationale must be a 0600 private artifact |
 | python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Provider/real-use guard → ManagedRunContext → selected cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Mock/Fake; experimental CodexExec only behind explicit future-use confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
+| python3 -m experiments.endpoint_stochasticity | bootstrap → validate frozen qualification universe and 48-to-6 selection → Provider/live guard → ManagedRunContext → dry-run or 1080-sample grid plus separate two-call seed probe → public/private export | New in Wave 0 | Dry-run `dry_run_summary.json`, or full `endpoint_stochasticity_summary.json`, `endpoint_samples.jsonl`, and mode-0600 `private_endpoint_records.jsonl`, in a managed run | Fake offline; real OpenAI-compatible only with `--live`; dry-run constructs none | Yes, direct_managed with `run_kind=endpoint_stochasticity`; non-market noise diagnostic with zero simulation honest-N |
 
 Evidence in the Phase 1.1A source:
 
@@ -144,6 +145,39 @@ than a model-quality score. See
 [PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md), and
 [CODEX_QUALIFICATION_RUNBOOK.md](CODEX_QUALIFICATION_RUNBOOK.md).
 
+## Endpoint stochasticity entrypoint
+
+`python3 -m experiments.endpoint_stochasticity` is an official managed
+research entrypoint with `run_kind=endpoint_stochasticity`. It reuses the
+validated qualification case identities without changing their frozen
+Prompts, Personas, fixtures, or parser. Its versioned six-case panel covers
+cascade fuel, dampener/narrative-immune, and spark roles from the 48-case
+qualification universe.
+
+The main plan is six cases x temperatures `{0, 0.3}` x `K=30` x client
+concurrency `{1, 8, 32}` = 1080 logical endpoint samples. A two-call same-seed
+probe is separately labeled and accounted, rather than being folded into the
+main-grid denominator. Public aggregation compares raw-response hashes for
+pairwise within-case byte agreement and reports pooled within-case sample
+sigma for parsed sentiment and signed order (`+quantity` buy, `0` hold,
+`-quantity` sell).
+
+The dry-run validates and writes the exact 48-to-6 plan to
+`dry_run_summary.json` while constructing no Provider and reporting zero
+network calls; it does not fabricate full-run sample artifacts.
+`fake_test_provider` executes the
+full grid offline. OpenAI-compatible execution is rejected before Provider
+construction unless `--live` is explicit. Public artifacts contain response
+hashes and explicitly public parsed fields; full Prompts, raw responses,
+private reasoning, and detailed failures exist only in the mode-`0600` private
+record. The 1080 main samples, two seed-probe calls, completed raw responses,
+parsed decisions, failures, and derived pairs retain distinct units, and the
+run contributes `honest_n_runs=0` because it never clears a market.
+
+See [ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md) for exact commands,
+artifact schemas, estimators, N/K power interpretation, limitations, and the
+no-scientific-semantics-change statement.
+
 ## Test and diagnostic entrypoints
 
 | Entrypoint | Actual purpose | Writes files | Provider | Formal research allowed |
@@ -160,7 +194,7 @@ than a model-quality score. See
 | experiments.additive_test | load result JSON → print regressions and CI | No | No | No |
 | python3 -m unittest discover -s tests -v | test discovery and helpers/low-level APIs | Temporary files only | No real Provider | No |
 
-The fifteen test files that also have standalone unittest.main guards are:
+The seventeen test files that also have standalone unittest.main guards are:
 
 - tests/test_phase1_integration.py
 - tests/test_privacy_invariant.py
@@ -177,6 +211,8 @@ The fifteen test files that also have standalone unittest.main guards are:
 - tests/test_result_reuse.py
 - tests/test_provider_capabilities.py
 - tests/test_model_qualification.py
+- tests/test_codex_exec_provider.py
+- tests/test_endpoint_stochasticity.py
 
 They share the test-suite registry policy; individual execution does not create
 a formal research run.

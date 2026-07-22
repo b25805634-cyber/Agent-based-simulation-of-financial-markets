@@ -1,8 +1,8 @@
 # 当前架构与真实数据流
 
-本文描述 2026-07-15 工作区中的实际实现，不描述理想架构。核心入口是 `python3 -m nmsim.run`；`narrative_market_sim.py` 是已经分叉的旧 Phase-1 脚本。
+本文描述 2026-07-22 工作区中的实际实现，不描述理想架构。核心入口是 `python3 -m nmsim.run`；`narrative_market_sim.py` 是已经分叉的旧 Phase-1 脚本。
 
-> Phase 1–1.2B-CX1 更新：核心回合顺序和科学语义未变；Phase 1.1A 建立 strict LLM Record/Replay、离线 reparse audit、科学源/运行时 Config 契约和正式 recording schema 1.2，Phase 1.1B 统一 `ManagedRunContext`、两阶段 CLI、入口 registry 以及带单位 completion / honest-N。Phase 1.2A 在实验编排边界新增 child-result 身份门、Provider capability 描述层和不运行市场的模型资格协议；Phase 1.2B-CX1 增加实验性的本机官方 `codex exec` 适配器、工具事件拒绝和真实资格试跑保护，但未运行真实模型任务。详细见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md)、[RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)、[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md)、[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md)、[CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md) 以及既有 Replay/生命周期/完成量文档。下文关于市场、观察和随机性的描述仍是 compatibility baseline。
+> Phase 1–1.2B-CX1 更新：核心回合顺序和科学语义未变；Phase 1.1A 建立 strict LLM Record/Replay、离线 reparse audit、科学源/运行时 Config 契约和正式 recording schema 1.2，Phase 1.1B 统一 `ManagedRunContext`、两阶段 CLI、入口 registry 以及带单位 completion / honest-N。Phase 1.2A 在实验编排边界新增 child-result 身份门、Provider capability 描述层和不运行市场的模型资格协议；Phase 1.2B-CX1 增加实验性的本机官方 `codex exec` 适配器、工具事件拒绝和真实资格试跑保护，但未运行真实模型任务。Wave 0 又新增不运行市场的 endpoint stochasticity managed 诊断，定量而不消除真实 Provider 首次采样噪声。详细见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md)、[RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)、[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md)、[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md)、[CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md)、[ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md) 以及既有 Replay/生命周期/完成量文档。下文关于市场、观察和随机性的描述仍是 compatibility baseline。
 
 ## 模块责任
 
@@ -37,6 +37,7 @@
 | 正式 experiment driver | 管理 parent attempt 的 run-level completion，用集中 reuse gate 验证候选，调用受管 `run_seed` child，保留脱敏 summary/audit 和 0600 failure detail | 不把文件存在当作成功；不把 child 内 Decision 行数当作独立 N |
 | 正式派生分析入口 | 在 managed analysis attempt 中读取历史 JSON/trace，把 legacy input 路径/大小/hash 和未验证身份计数入 manifest，并计算原有表/图 | 不伪造 child manifest；不统一或静默修改历史 analyzer 的过滤、配对和 CI 公式 |
 | `experiments/model_qualification.py` | `run_kind=model_qualification` 的 managed 入口；加载冻结 protocol/fixtures/rubric，构造 6×8=48 cases，执行 Mock/Fake，支持 CodexExec 安全 dry-run，并以确认参数和 case 上限保护未来小规模真实试跑 | 不调用市场、不产生价格路径；Phase 1.2B-CX1 未执行真实 Codex case；低层函数不是绕过 CLI 确认的正式入口 |
+| `experiments/endpoint_stochasticity.py` | `run_kind=endpoint_stochasticity` 的 managed Wave 0 入口；验证 qualification 48-case universe 和冻结 6-case 子集，执行 temp×K×concurrency 网格、独立 same-seed probe、pairwise byte agreement 与 within-case pooled sigma | 不调用 `run_sim`、不生成价格路径或市场 replicate；dry-run 不构造 Provider；真实 OpenAI-compatible 路径必须显式 `--live` |
 | `qualification/*.json` | protocol 1.1、字节不变的 8 个 Observation fixtures、rubric 1.1 和 field-level visibility contract 1.0 | 不包含未来价格、private rationale、评价答案或 rubric 泄漏到 Observation；真实 Prompt 不可见的 fundamental anchor 明确 not-scored |
 
 ## Scientific Component Fingerprint
@@ -128,7 +129,18 @@ bootstrap -> validate/hash protocol + fixtures + rubric + visibility contract ->
   -> managed finish with run_kind=model_qualification and honest_n_runs=0
 ```
 
-它不进入下面的价格更新图。
+
+Endpoint stochasticity 也是旁路 managed flow：
+
+```text
+bootstrap -> validate 48 qualification cases + frozen six-case panel -> provider/live guard
+  -> dry-run (no Provider) OR 1080 main-grid calls + separate two-call same-seed probe
+  -> public response hashes/parsed fields + within-case agreement/sigma
+  -> 0600 prompts/raw responses/private rationale
+  -> managed finish with run_kind=endpoint_stochasticity and honest_n_runs=0
+```
+
+这两个非市场 flow 都不进入下面的价格更新图。
 
 ## 从公开入口到价格更新
 
@@ -423,6 +435,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 | CodexExec adapter identity | `nmsim.codex_exec` + `config_contract` + `recording` | 是；Codex 条件化 model-request contract、历史 runtime identity 和逐 request combined-input identity |
 | child-result reuse audit | `nmsim.result_reuse` + experiment driver parent | 是；`driver_summary.json` 保存 policy version、候选数、拒绝 reason 和脱敏 audit，不保存私有 Prompt/response |
 | qualification cases | `experiments.model_qualification` | 是；公共 case/aggregate 文件和 0600 private case records；不存在 price/fill/market state |
+| endpoint stochasticity samples | `experiments.endpoint_stochasticity` | 是；公共 response hash/显式公开 parsed fields/聚合噪底与 0600 Prompt/raw/private records；不存在 price/fill/market state |
 | tracker cost | provider/tracker | 只打印；experiment JSON 写部分 |
 | liquidation events | `sim.run_sim` | 主 CLI 否；`run_seed` 是 |
 
@@ -438,6 +451,13 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 | Leverage | 无 RNG | cohort 和 ratio 取决于稳定 agent 顺序 |
 | Real LLM | provider/server sampling | 不发送 seed；temperature=0 不保证位级确定 |
 | Thread/process scheduling | driver `workers`、provider batching | manifest 记录 driver workers、声明的 batching 和实际 logical batch sizes；gather 保持返回索引，但 SDK 内部调度与服务端 batch 浮点/采样仍可能受并发影响 |
+
+`experiments.endpoint_stochasticity` 不改写上述随机源，而是在固定 case
+内对 raw-response hash 做 pairwise byte agreement，并对 sentiment 和
+signed order 先计算 `ddof=1` sample variance，再按各 case 的
+`n_c-1` 自由度池化为 temperature×concurrency 噪底 sigma。固定
+case 之间的均值差不得混入 within-case 噪声；完整公式和 N/K 解读见
+[ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md)。
 
 ## 输出边界
 
@@ -457,6 +477,14 @@ Reparse audit 不写入 managed run directory，而是在单独 audit 目录写�
 Model qualification 在自身的不可覆盖 managed run directory 写
 `dry_run_summary.json` 或 `case_results.jsonl` / `qualification_summary.json` / `private_case_records.jsonl`；最后一个文件权限为 0600。该 run 不创建 `price_path.csv`、market chart 或 simulation replicate。
 
+Endpoint stochasticity 在自身的不可覆盖 managed run directory 中，dry-run 只写
+`dry_run_summary.json`；完整执行改写 `endpoint_stochasticity_summary.json`、
+`endpoint_samples.jsonl` 和 `private_endpoint_records.jsonl`。最后一个文件权限为
+0600，而公共文件只允许 raw-response hash、显式公开 parsed fields、
+脱敏错误/计数和聚合量。Dry-run 不构造 Provider、不伪造 sample row 或
+sigma。该 run 不创建
+`price_path.csv`、market chart 或 simulation replicate，且 `honest_n_runs=0`。
+
 Phase 1.2B-CX1 的 `CodexExecLLM` 位于 scientific allowlist 之外的独立
 `nmsim/codex_exec.py`，避免修改已冻结的 `nmsim/llm.py`。`ManagedRunContext`
 只在显式 `provider=codex_exec` 时构造该实验 adapter；默认 Provider 不变。
@@ -467,4 +495,4 @@ runtime identity，每条 request 再绑定 `final_combined_input_hash`。Replay
 
 仍未完整记录/实现：Provider SDK 中间 retry/request id、显式 market-maker inventory、phantom seller 账本、独立 adjacency artifact，以及没有 `.git` 时的 commit/diff。只有 `FINISHED` 且 `managed_run_completed=true` / `outputs_complete=true` 的成功 run 才发布兼容链接；flat link 直接指向生成 artifact 的不可变 run，普通历史文件永不覆盖。部分 artifact 可以被失败 manifest 登记和 hash，但不等于成功样本。
 
-需要单独记住这个边界设计：`nmsim/config.py` 仍在 scientific source allowlist 中，且 Phase 1.1A.2 保持了该文件原始字节和所有默认值，所以 simulation core source hash 和总 scientific fingerprint 保持基线身份。`nmsim/config_ingestion.py` 是 package/configuration instrumentation，由 `nmsim/__init__.py` 在正常包导入时安装 strict contract，未被伪装为市场规则。Phase 1.1B 的 lifecycle 文件以及 Phase 1.2A 的 `result_reuse.py`、`provider_capabilities.py`、qualification/driver instrumentation 也位于 scientific allowlist 之外；它们收紧实验身份、增强可观测性和冻结资格协议，不改 Agent、Prompt、市场、社交或风控语义。完整 Phase 1.1A schema 1.2 recording 在所有既有 strict 身份一致时仍可 Replay；capability snapshot 是可选 provenance，不改变这一契约。最终 effective Config 由运行时 config hash 约束，recording evidence 结构仍由 schema 1.2 约束。
+需要单独记住这个边界设计：`nmsim/config.py` 仍在 scientific source allowlist 中，且 Phase 1.1A.2 保持了该文件原始字节和所有默认值，所以 simulation core source hash 和总 scientific fingerprint 保持基线身份。`nmsim/config_ingestion.py` 是 package/configuration instrumentation，由 `nmsim/__init__.py` 在正常包导入时安装 strict contract，未被伪装为市场规则。Phase 1.1B 的 lifecycle 文件以及 Phase 1.2A 的 `result_reuse.py`、`provider_capabilities.py`、qualification/driver instrumentation 也位于 scientific allowlist 之外；Wave 0 endpoint diagnostic/entrypoint/documentation 同样不进入核心科学源集。它们收紧实验身份、增强可观测性、冻结资格协议或测量 Provider 噪声，不改 Agent observation、Prompt、Persona、parser、市场、社交、风控、Config 默认值或既有输出 schema。完整 Phase 1.1A schema 1.2 recording 在所有既有 strict 身份一致时仍可 Replay；capability snapshot 是可选 provenance，不改变这一契约。最终 effective Config 由运行时 config hash 约束，recording evidence 结构仍由 schema 1.2 约束。
