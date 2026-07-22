@@ -1,6 +1,6 @@
 # Replay 兼容性契约
 
-本文定义 Phase 1.1A–1.1B 的本地 Replay 版本、运行时配置和配置输入边界。它的目标是让不兼容的历史响应重放明确失败，并为解析器升级提供离线审计路径；它不改变 Agent、Prompt、Persona、市场、社交、杠杆、默认参数或正常响应的解析结果。Phase 1.1B 只替换外层生命周期编排；recording schema 仍为 `1.2`，Phase 1.1A 的完整 1.2 记录在既有 strict 身份一致时继续兼容。
+本文定义当前本地 Replay 版本、运行时配置和配置输入边界。它的目标是让不兼容的历史响应重放明确失败，并为解析器升级提供离线审计路径。Phase 1.1B 只替换外层生命周期；recording schema 仍为 `1.2`。Wave 1 新增的 public news timeline、strict decision-response schema 和 Provider SDK retry 上限都是显式 opt-in；空 timeline、null decision schema 和未指定 SDK retry 保留 legacy 执行行为，但新字段与科学源边界使当前 Config/source identity 有意迁移。
 
 ## 五种不同的复现与审计能力
 
@@ -21,19 +21,23 @@
 当前 `scientific_component_fingerprint` 基于真实调用链覆盖下列源文件，按仓库相对路径排序：
 
 ```text
+experiments/run_seed.py
 nmsim/agents.py
 nmsim/config.py
 nmsim/contagion.py
+nmsim/decision_contract.py
 nmsim/leverage.py
 nmsim/llm.py
 nmsim/market.py
+nmsim/multi_event.py
 nmsim/prompts.py
+nmsim/reference_data/__init__.py
 nmsim/sim.py
 nmsim/types.py
 nmsim/validation.py
 ```
 
-这组文件覆盖 Agent observation 与 Prompt 构造、Decision 解析、相关类型和配置默认值、simulation 科学步骤顺序、市场 clearing、社交传播、杠杆/强平和指标计算。`recording.py`、`provenance.py`、`reparse_audit.py` 等审计设施由独立 schema 约束；Phase 1.1B 新增/修改的 `nmsim/run_context.py`、`nmsim/managed_cli.py`、`nmsim/entrypoints.py`、`nmsim/run.py` 和 experiment driver/lifecycle 文件也不在 scientific allowlist 内。普通文档、测试、运行目录、结果、私有日志和时间戳同样不进入科学组件指纹。
+这组文件覆盖 Agent observation 与 Prompt 构造、Decision 契约/解析、配置默认值、multi-event 公开材料、参考数据加载、canonical child 结果组装、simulation 科学步骤顺序、市场 clearing、社交传播、杠杆/强平和指标计算。`experiments/run_seed.py` 是普通 driver 排除原则的保守例外；它会组装正式 child 科学结果和 transformed-reference 指标。`recording.py`、`provenance.py`、`reparse_audit.py` 等审计设施由独立 schema 约束；其他普通 experiment driver/lifecycle、文档、测试、运行产物、私有日志和时间戳不进入科学组件指纹。
 
 因此，只修改 `README`、`docs/` 或普通工作流文档不会改变科学指纹。反之，只要上述科学组件的原始字节变化，即使 Git commit 没变而工作树为 dirty，相关 hash 也会变化，strict replay 会拒绝。
 
@@ -64,7 +68,7 @@ Strict Replay 不再用一个模糊的“版本 hash”代替不同责任：
 | execution config hash | 输出位置、run/scenario label、worker、driver batching 声明和输入/重放路径等执行上下文 | 允许不同；差异写入 manifest，不放松实际请求顺序 |
 | Git commit + dirty/diff | 整个仓库快照和未提交状态 | 用于 provenance，不单独决定兼容 |
 
-`full_effective_config_hash` 还覆盖全部 38 个 `Config` 字段的脱敏规范表示，用于审计整体身份；它包含 execution 字段，因而不作为 strict 放行/拒绝的单一开关。
+`full_effective_config_hash` 还覆盖全部 41 个 `Config` 字段的脱敏规范表示：29 个 scientific、10 个 model-request 和 2 个 execution 字段。它用于审计整体身份；由于包含 execution 字段，不作为 strict 放行/拒绝的单一开关。
 
 文档和报告必须写具体 identity 名称，禁止用模糊的“默认 Config hash”。
 历史测试值 `f0508c23…` 是 raw `asdict(Config())` 规范 JSON 的 SHA-256，
@@ -82,7 +86,7 @@ Strict Replay 不再用一个模糊的“版本 hash”代替不同责任：
 
 `population` 需要一项有意的例外：`counts` 按 Persona id 排序以便审计，但 `effective_cast` 显式保留当前可执行的 mapping 插入顺序，对 `influencer_amplifier` 封顶为 1，最后按 `max_llm_agents` 截断。这个顺序影响真实 Agent 创建/请求顺序，所以即使 counts 相同，effective cast 顺序变化也必须改变 scientific hash；它不是字典顺序稳定性的缺陷。
 
-### 字段分类（完整 38 项）
+### 字段分类（完整 41 项）
 
 S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”均指在第一轮之前拒绝；execution 差异允许但必须记录。
 
@@ -92,6 +96,7 @@ S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”�
 | `n_rounds` | scientific | 决定时域和末轮强平机会 | ✓ |  |  | 拒绝 |
 | `news_round` | scientific | 决定新闻到达、margin gate 和指标对齐 | ✓ |  |  | 拒绝 |
 | `news_text` | scientific | 定义发送给知情 Agent 的 Scenario 事件 | ✓ |  |  | 拒绝 |
+| `news_timeline` | scientific | 定义有序、累积的公开事件投递机制 | ✓ |  |  | 拒绝 |
 | `initial_price` | scientific | 初始化价格、组合和杠杆参照仓 | ✓ |  |  | 拒绝 |
 | `fundamental_value` | scientific | 进入 Mock 观察与决策路径 | ✓ |  |  | 拒绝 |
 | `recent_window` | scientific | 决定 Agent 可见价格历史窗口 | ✓ |  |  | 拒绝 |
@@ -100,6 +105,7 @@ S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”�
 | `n_noise_agents` | scientific | 设置背景噪声交易者数量 | ✓ |  |  | 拒绝 |
 | `max_llm_agents` | scientific | 截断有效 Persona cast 和请求 batch | ✓ |  |  | 拒绝 |
 | `population` | scientific | 定义 Persona counts 和顺序敏感 `effective_cast` | ✓ |  |  | 拒绝 |
+| `decision_response_schema` | scientific | 选择显式 opt-in 的版本化 Decision 响应校验语义 | ✓ |  |  | 拒绝 |
 | `provider` | model_request | 选择请求的 Provider |  | ✓ |  | 拒绝 |
 | `model` | model_request | 选择显式模型 identity |  | ✓ |  | 拒绝 |
 | `cheap_model` | model_request | 定义 cheap-model 分支的候选模型 |  | ✓ |  | 拒绝 |
@@ -110,6 +116,7 @@ S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”�
 | `temperature` | model_request | 改变 Provider 采样分布 |  | ✓ |  | 拒绝 |
 | `max_tokens` | model_request | 改变响应 token 上限 |  | ✓ |  | 拒绝 |
 | `cache_enabled` | model_request | 决定逻辑响应是否可来自 cache |  | ✓ |  | 拒绝 |
+| `provider_sdk_max_retries` | model_request | 设置 Provider SDK 内部 transport retry；multi-event 冻结为 0 |  | ✓ |  | 拒绝 |
 | `social_enabled` | scientific | 启用/移除社交传播通道 | ✓ |  |  | 拒绝 |
 | `social_mode` | scientific | 选择 feed/network 信息路由 | ✓ |  |  | 拒绝 |
 | `topology` | scientific | 选择社交图拓扑 | ✓ |  |  | 拒绝 |
@@ -139,9 +146,9 @@ S/M/E 分别表示进入 scientific/model-request/execution hash。“拒绝”�
 
 ### Scenario label 边界
 
-`scenario_id` 现在只是人类可读的 label 和 execution provenance；修改 label 本身不阻止 Replay。当前实际科学 Scenario 语义由 `news_round`、`news_text`、`seed_fraction`、`reference_path` 内容身份，以及 population/信息可见性等 scientific Config 共同覆盖。Manifest 中的 `scenario.definition_sha256` 是对当前一个有限摘要的描述性 hash，不是独立、完整的 Strict Replay 兼容键；兼容判断仍以 scientific config contract 为准。
+`scenario_id` 现在只是人类可读的 label 和 execution provenance；修改 label 本身不阻止 Replay。当前实际科学 Scenario 语义由 `news_round`、`news_text`、受限的 opt-in `news_timeline`、`seed_fraction`、`reference_path` 内容身份，以及 population/信息可见性等 scientific Config 共同覆盖。Manifest 中的 `scenario.definition_sha256` 是对当前一个有限摘要的描述性 hash，不是独立、完整的 Strict Replay 兼容键；兼容判断仍以 scientific config contract 为准。
 
-如果未来引入正式 `ScenarioSpec` / `EventStream`，Scenario payload、事件时间线、可见性策略和输入数据内容 hash 必须进入 `scientific_config_hash` 或独立且受 Strict Replay 约束的 `scenario_content_hash`；不得只依靠人类可读 label。Phase 1.1A.2 不实现 `ScenarioSpec`。
+当前仍没有通用 `ScenarioSpec` / `EventStream` 抽象。如果未来引入，Scenario payload、事件时间线、可见性策略和输入数据内容 hash 必须进入 `scientific_config_hash` 或独立且受 Strict Replay 约束的 `scenario_content_hash`；不得只依靠人类可读 label。
 
 ### Config mapping 输入
 
@@ -347,8 +354,8 @@ runtime/auth 信息只是历史证据，不表示 Replay 再次验证了当前�
 
 - 指纹边界是显式维护的文件集合；若未来新增会影响科学行为的模块而未纳入清单，可能出现错误兼容。新增机制必须同时更新清单和测试。
 - `decision_parser_schema_version` 需要在有意改变解析契约时人工升级；source hash 可捕获未升级但源码已变的情况。
-- Strict replay 验证应用层保存的最终响应，不包含 Provider SDK 内部 retry 的每次中间 request/response。
+- Strict replay 验证应用层保存的最终响应。Completion 1.1 保留应用层 attempt 证据，但不包含 Provider SDK 内部 retry 的每次中间 request/response；因此 multi-event 将 SDK retry 冻结为 0。
 - 即使科学指纹相同，Python/NumPy/Matplotlib 或平台差异仍可能影响数值边角和图像字节；manifest 中的环境版本用于解释这些差异。
 - Reparse 是 parser 差异审计，不是因果识别、反事实推演或统计重复。
 - Managed lifecycle 的 completion 是带单位 provenance 计数，不会让一次 Replay 或同一市场内的多条 Agent Decision 自动成为多个独立统计样本。
-- `nmsim/config.py` 仍在 scientific component allowlist 中，而且 Phase 1.1A.2 保持了它的原始字节和全部默认值。Strict ingestion 位于 allowlist 外的 `nmsim/config_ingestion.py`，由包初始化边界显式安装；因此 Prompt、Persona、simulation core source hash 和总 scientific fingerprint 保持基线身份。这不是将新市场规则移出 allowlist：ingestion 只拒绝未知/含糊输入，最终 effective Config 仍由配置 hash 约束，recording 结构变化则由 schema 1.2 约束。未来修改这个绑定边界时仍必须审查 config/recording schema 并保留 fail-closed 测试。
+- Phase 1.1A.2 当时曾保持 `nmsim/config.py` 原始字节与默认 identity，这是历史 sealing 事实。Wave 1 新增三个显式 opt-in Config 字段及新的科学源覆盖，因此 raw-default payload、`scientific_config_hash`、`model_request_config_hash`、`simulation_core_source_hash` 和总 `scientific_component_fingerprint` 有意迁移；Prompt 与 Persona source hash 未变。空 timeline、null decision schema 和未指定 SDK retry 保持 legacy 执行语义，但不表示配置或源码 identity 字节不变。

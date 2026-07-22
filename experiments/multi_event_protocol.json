@@ -1,0 +1,324 @@
+{
+  "schema_version": "multi_event_protocol_v1",
+  "protocol_id": "multi_event_distribution_v1",
+  "protocol_status": "preregistered_before_live_multi_event_grid",
+  "study_status": "preregistered_variance_components_pilot",
+  "confirmatory": false,
+  "design": {
+    "events": [
+      {
+        "event_id": "meta_2022_02_crash_v1",
+        "reference_csv": "nmsim/reference_data/v1/meta_2022_02_crash.csv",
+        "reference_csv_sha256": "5f0a39c4cff4cc70d732cea1518266b9502ddf7e806e4e7127f252394f09319a",
+        "news_timeline": "nmsim/reference_data/v1/meta_2022_02_crash_news_timeline.jsonl",
+        "news_timeline_sha256": "27a0a9794e3b86b6b841617cf62fb2255e3e497f9f8c51cdd0a709254503b9b2",
+        "selection_role": "crash_without_fast_recovery_anchor"
+      },
+      {
+        "event_id": "spy_2020_03_covid_v_recovery_v1",
+        "reference_csv": "nmsim/reference_data/v1/spy_2020_03_covid_v_recovery.csv",
+        "reference_csv_sha256": "6b4615af3eda402803852143d29a307a9c8090114bb9d6891451dba0e8fcb24d",
+        "news_timeline": "nmsim/reference_data/v1/spy_2020_03_covid_v_recovery_news_timeline.jsonl",
+        "news_timeline_sha256": "2b2cf2bce5d5c0fb1f939bc3068d68e35424e44d2923adf86ddb437ceace70aa",
+        "selection_role": "crash_with_v_recovery_contrast"
+      },
+      {
+        "event_id": "meta_2023_02_efficiency_jump_v1",
+        "reference_csv": "nmsim/reference_data/v1/meta_2023_02_efficiency_jump.csv",
+        "reference_csv_sha256": "5f419bbd078ef61f3819d8a14dca593cc1fe7e4e319843254327b81689d47a88",
+        "news_timeline": "nmsim/reference_data/v1/meta_2023_02_efficiency_jump_news_timeline.jsonl",
+        "news_timeline_sha256": "4c3e6a63fa280f0bbd41d00d90eaedbdbcc4367b4b6aad3218ac29ee73922706",
+        "selection_role": "positive_jump_sign_contrast"
+      }
+    ],
+    "arms": {
+      "social_off": false,
+      "social_on": true
+    },
+    "seeds": [11, 13, 17, 19, 23, 29, 31, 37],
+    "repeat_indices": [1, 2, 3],
+    "N": 8,
+    "K": 3,
+    "planned_runs": 144,
+    "primary_unit": "event_seed_complete_across_both_arms_and_all_repeats",
+    "complete_case_rule": "an event-seed enters that event's primary analysis only when both arms x every repeat child is identity-valid, health-accepted, and has a finite primary outcome; the cross-event aggregate uses the intersection complete across all three events",
+    "primary_outcome": "drop_depth",
+    "primary_realism_criterion": "the equal-weight balanced complete-case mean 25-point normalized-log trajectory for social_on must match the preregistered crash/full-recovery/positive-jump target for every event and the preregistered cross-event depth order; realism drop is min(exp(mean_log_path))-1",
+    "primary_social_estimand": "paired event-seed mean-K drop_depth(social_on)-mean-K drop_depth(social_off), plus an equally weighted cross-event mean over seeds complete in every event",
+    "treatment_effect": "mean_K(drop_depth_social_on)-mean_K(drop_depth_social_off)",
+    "effect_sign": "positive means social_on is less negative or more positive than social_off",
+    "estimand": "mean seed-level treatment effect, event-specific and equally weighted across the three events"
+  },
+  "reference_data_catalog": {
+    "path": "nmsim/reference_data/v1/catalog.json",
+    "sha256": "02dad9ff1d9c6c2aaf1ab9ad10665649680ad2fab00358e4d5baa70da3752166",
+    "schema_version": "reference_data_catalog_v1",
+    "data_version": "v1",
+    "binding_policy": "the selection must contain exactly this catalog input; every event_id, reference_csv, and news_timeline path must match both design.events and the unique catalog dataset before content hashes are accepted"
+  },
+  "acceptance_and_execution": {
+    "health_bad_frac_max": 0.15,
+    "max_child_attempts": 5,
+    "workers": 1,
+    "workers_role": "execution_only_not_a_scientific_factor",
+    "workers_policy": "record the effective value and hold it fixed within a study; changing it does not redefine the estimand but requires a new execution manifest",
+    "cache_enabled": false,
+    "temperature": 0.3,
+    "provider_determinism_claim": "not_claimed",
+    "record_replay_role": "audit_of_observed_runs_only",
+    "attempt_series_coordination": "the driver holds one nonblocking advisory lock at the canonical study output root for its entire preflight, execution, selection, and summary lifecycle; every launched child inherits the lock descriptor so an orphaned in-flight child retains ownership until it terminates",
+    "attempt_inflight_policy": "an occupied ACTIVE or running attempt is never classified as rejected and never advances the series; lock contention or an independently observed active attempt causes a safe parent stop, after which a later parent must reacquire the lock and reassess the exact attempt",
+    "attempt_budget_scope": "one bounded five-attempt budget per preregistered slot across all preserved canonical me-{slot_id}-*-ta* materializations in the single canonical repository results_multi_event root; selectable alternate live output roots, runtime-environment drift, and foreign attempt-series identities cannot reset the cap; deleting preserved canonical results is outside the protocol",
+    "live_source_snapshot_policy": "live execution requires a completely clean repository and HEAD exactly equal to the last commit that changed the canonical protocol artifact; every accepted live child must bind that same commit and scientific component fingerprint",
+    "launch_order_policy": "multi_event_launch_order_v1: iterate repeat position then seed position; rotate canonical event order by (repeat_position+seed_position)%3; launch both arms adjacently; social_on is first exactly when (repeat_position+seed_position+canonical_event_position)%2==1; each event occupies each temporal position eight times and has 12 on-first plus 12 off-first blocks",
+    "scientific_runtime_environment_policy": "every multi-event attempt series, child, plan, selection, and pooled study binds scientific_runtime_environment_v1: Python implementation/version, platform/architecture, and exact numpy/matplotlib/anthropic/openai/httpx versions including null; live accepted children must be uniform",
+    "raw_audit_artifact_policy": "every accepted child must register and preserve experiment_result.json, its canonical compatibility JSON, llm_records.jsonl, events.jsonl, and private_events.jsonl; private_events.jsonl and llm_records.jsonl must be non-symlink regular files with exact mode 0600",
+    "parent_network_policy": "the live parent truthfully records network_access=true for connectivity probes only; LLM provider calls belong to managed children; mock and dry parents record network_access=false",
+    "health_contract": "multi_event_health_v1 derives one exact terminal_status machine field per decision and never scans model-authored reasoning text; failure_union_counts has exactly strict_schema_invalid, legacy_parse_invalid, provider_exception_exhausted, provider_parse_exhausted, and valid_decisions as mutually exclusive exhaustive nonnegative integer buckets, with legacy_parse_invalid reserved at exact zero because every multi-event audit binds the strict multi_event_decision_response_v1 schema; bad_orders is the sum of the four failure buckets, total_llm_orders is the sum of all five buckets, bad_frac must equal round(bad_orders/total_llm_orders,4), and the acceptance threshold is applied to the unrounded ratio; total_llm_orders must equal manifest completion.agent_decisions.completed, bad_orders must equal completion.parsing.failed, and the two provider-exhaustion buckets must sum to completion.application_provider_attempts.exhausted_logical_requests"
+  },
+  "bootstrap": {
+    "method": "cluster_resample_complete_seed_ids_with_replacement",
+    "B": 10000,
+    "seed": 20260722,
+    "alpha": 0.05,
+    "interval": "percentile",
+    "cluster": "seed",
+    "event_weighting": "equal_within_each_resampled_seed"
+  },
+  "variance_components": {
+    "design": "balanced_two_arm_K_repeat_method_of_moments",
+    "within_arm_variance": "mean_across_complete_seeds_of_sample_variance_across_K_repeats",
+    "repeat_noise_contribution_to_seed_effect": "(within_social_on+within_social_off)/K",
+    "between_seed_effect_variance": "max(0,sample_variance(seed_effect)-repeat_noise_contribution)",
+    "K_review_target_max_repeat_noise_fraction": 0.25,
+    "K_extension_rule": "if reviewed and approved, add the same repeat index to every planned cell; never extend selected cells only",
+    "K_hard_no_go_above": 6
+  },
+  "trajectory_envelope": {
+    "unit": "event_arm_seed_mean_over_K_complete_case_paths",
+    "pointwise_lower_quantile": 0.1,
+    "pointwise_upper_quantile": 0.9,
+    "interpolation": "linear_type7",
+    "policy": "compute one pointwise mean path per complete seed across K, then take fixed pointwise 10th/90th percentiles across seeds; child repeats are not independent envelope units"
+  },
+  "reference_phase_transform": {
+    "schema_version": "1.0",
+    "transform_id": "event_phase_normalized_log_linear_25_v1",
+    "method": "linear_interpolation_in_normalized_log_price_over_full_post_t0_horizon",
+    "source_domain": "every captured reference observation from t0 through the terminal observation, inclusive",
+    "target_points": 25,
+    "target_indices": "integer t=0..24",
+    "formula": "u=t*(raw_post_t0_point_count-1)/24; value=(1-frac(u))*raw[floor(u)]+frac(u)*raw[ceil(u)]",
+    "normalization": "raw[i]=log(price[t0+i]/price[t0])",
+    "rmse_reference": "the exact 25-point transformed path",
+    "dtw_reference": "report both the 25-point transformed path and the raw full post-t0 episode",
+    "timeline_delivery_mapping": "sim_round=min(24,1+floor((max(1,delivery_t)-1)*24/terminal_t))",
+    "timeline_order": "stable source order for equal mapped rounds",
+    "no_curve_fit": "the same event-independent transform and fixed 25-point target are committed before any grid outcome; no outcome-dependent warping, truncation, or parameter fitting is allowed"
+  },
+  "qualitative_thresholds": {
+    "status": "preregistered_approved",
+    "thresholds_approved": true,
+    "approval_record": {
+      "authority": "implementation_default_selected_before_live_under_user_authorization_to_proceed",
+      "date": "2026-07-22",
+      "timing": "before_multi_event_grid_outcomes",
+      "scope": "reference-derived qualitative category thresholds and ordering margin",
+      "rationale": "reference-derived, fixed before any simulation outcomes; the user authorized proceeding but did not explicitly approve the numeric values"
+    },
+    "finite_value_policy": "every value entering a category or ordering comparison must be finite, otherwise that assessment is indeterminate and cannot pass",
+    "crash_threshold": {
+      "metric": "trajectory_drop_depth_min_exp_mean_norm_log_path_minus_one",
+      "operator": "less_than_or_equal",
+      "value": -0.15,
+      "inclusive": true
+    },
+    "positive_jump_threshold": {
+      "metric": "peak_normalized_price_minus_one_over_t0_to_t24",
+      "operator": "greater_than_or_equal",
+      "value": 0.1,
+      "inclusive": true
+    },
+    "full_recovery_threshold": {
+      "requires_crash": true,
+      "metric": "terminal_normalized_price_at_t24",
+      "operator": "greater_than_or_equal",
+      "value": 0.95,
+      "inclusive": true,
+      "supplementary_report": "mean recovery fraction"
+    },
+    "event_targets": {
+      "meta_2022_02_crash_v1": {
+        "crash": true,
+        "full_recovery": false,
+        "positive_jump": false
+      },
+      "spy_2020_03_covid_v_recovery_v1": {
+        "crash": true,
+        "full_recovery": true,
+        "positive_jump": false
+      },
+      "meta_2023_02_efficiency_jump_v1": {
+        "crash": false,
+        "full_recovery": false,
+        "positive_jump": true
+      }
+    },
+    "reference_depth_order_most_to_least_negative": [
+      "meta_2022_02_crash_v1",
+      "spy_2020_03_covid_v_recovery_v1",
+      "meta_2023_02_efficiency_jump_v1"
+    ],
+    "minimum_adjacent_ordering_margin": 0.01,
+    "minimum_adjacent_ordering_margin_operator": "greater_than_or_equal",
+    "policy": "the analyzer evaluates these exact inclusive thresholds without fitting them to simulation outcomes"
+  },
+  "effective_config_freeze": {
+    "source": "nmsim.config.Config executable defaults plus experiments.run_seed.build_population(m=0.5,total=30) and the existing run_seed seed_fraction override",
+    "config_hash_schema_version": "1.0",
+    "scientific": {
+      "seed": {
+        "factor": "design.seeds",
+        "values": [11, 13, 17, 19, 23, 29, 31, 37]
+      },
+      "decision_response_schema": "multi_event_decision_response_v1",
+      "n_rounds": 24,
+      "news_round": 1,
+      "news_text": "",
+      "news_timeline": {
+        "event_bound": "the exact normalized public delivery_t entries selected by event_id",
+        "identity_requirement": "content hash and normalized entries recorded in each child scientific input identity; no analyzer-side injection"
+      },
+      "initial_price": 100.0,
+      "fundamental_value": 100.0,
+      "recent_window": 5,
+      "kappa": 0.12,
+      "n_llm_agents": 6,
+      "n_noise_agents": 8,
+      "max_llm_agents": 40,
+      "population": {
+        "influencer_amplifier": 1,
+        "retail_crowd": 7,
+        "fomo_momentum": 7,
+        "value_institution": 5,
+        "contrarian_fund": 5,
+        "quant_arb": 5
+      },
+      "social_enabled": {
+        "factor": "design.arms",
+        "values": {
+          "social_off": false,
+          "social_on": true
+        }
+      },
+      "social_mode": "network",
+      "topology": "scale_free",
+      "n_neighbors": 2,
+      "social_weight": 1.0,
+      "broadcast_mode": "all",
+      "demote_influencer": false,
+      "leverage_enabled": false,
+      "leverage_ratio": 2.5,
+      "leverage_spread": 0.5,
+      "maintenance_margin": 0.25,
+      "leverage_fraction": 0.5,
+      "digest_size": 4,
+      "seed_fraction": 0.06666666666666667,
+      "reference_path": {
+        "event_bound": "design.events[].reference_csv",
+        "identity_requirement": "content hash recorded in each child scientific input identity"
+      }
+    },
+    "model_request": {
+      "provider": "openai",
+      "model": "MiniMax-M2.7",
+      "cheap_model": "",
+      "use_cheap_model": false,
+      "openai_base_url": "http://10.214.32.152:8000/v1",
+      "openai_model": "MiniMax-M2.7",
+      "temperature": 0.3,
+      "max_tokens": 1024,
+      "cache_enabled": false,
+      "provider_sdk_max_retries": 0,
+      "resolved_provider_and_model_policy": "every accepted child records requested and resolved identities; an alias or endpoint change is reported and cannot be silently pooled"
+    },
+    "execution": {
+      "openai_api_key": "environment_only_never_persisted",
+      "out_dir": "canonical_repository_root/results_multi_event_no_symlink_or_override_for_live",
+      "workers": 1,
+      "workers_role": "execution_only"
+    }
+  },
+  "analysis_input_contract": {
+    "schema_version": "1.0",
+    "selection": "one finished experiments.multi_event parent run_manifest.json; the analyzer derives and rehashes its registered sibling multi_event_selection.json, multi_event_plan.json, multi_event_attempts.jsonl, mode-0600 multi_event_attempts.private.jsonl, driver_summary.json, and mode-0600 driver_failures.private.jsonl; arbitrary standalone selection JSON is ineligible and no directory discovery or globbing is allowed",
+    "driver_parent_policy": "the parent must be terminal and output-complete with command_identity experiments.multi_event and the frozen protocol/input identities; an openai_live parent must bind the canonical repository results_multi_event root and clean protocol-owning source snapshot; plan slots, public attempt outcomes, accepted/missing selection cells, and driver completed/failed/honest-N counts must agree exactly",
+    "required_top_level": [
+      "schema_version",
+      "protocol_sha256",
+      "execution_plan",
+      "events",
+      "catalog_inputs",
+      "study_model_identity",
+      "children",
+      "missing_or_rejected_slots"
+    ],
+    "execution_plan_policy": "openai_live must exactly use the frozen 144-slot counterbalanced launch plan, the one canonical repository results_multi_event root, and the clean protocol-owning source snapshot; mock may declare a non-adherent subset and driver-selected temporary root for engineering acceptance, with an override reason and no preregistered realism claim; dry-run is explicitly non-live and makes no source-snapshot or output-root eligibility claim",
+    "attempt_ledger_policy": "every accepted child has non-empty unique attempt_run_ids bounded by max_child_attempts and accepted_run_id equal to identity.run_id; rejected slots list their unique bounded attempts, missing slots list none, and one managed run_id cannot be assigned to multiple slots; the canonical-root inherited advisory lock prevents concurrent parents or orphaned active children from advancing one series, and ACTIVE attempts are never counted as rejected technical attempts",
+    "required_study_model_identity": [
+      "execution_mode",
+      "model_request_config_hash",
+      "requested_provider",
+      "requested_model",
+      "resolved_provider",
+      "resolved_model",
+      "endpoint_identity",
+      "reported_model_aliases",
+      "invalid_reported_model_alias_count",
+      "scientific_runtime_environment_identity"
+    ],
+    "reported_model_alias_policy": "each live child binds exactly one endpoint-reported alias across application attempt evidence, selection identity, and experiment_result; an alias is accepted byte-exact only when it is 1..256 printable characters, equals its own strip result, has no leading/trailing whitespace or control characters, and may contain safe printable interior spaces; every non-null invalid raw alias increments invalid_reported_model_alias_count, accepted children and analyzer-facing child/study identities require that count to be exactly integer zero, invalid aliases are rejected and never silently dropped or trimmed; a single study alias permits pooling only under one homogeneous self-reported endpoint condition, underlying_model_identity_verified is always false, mixed live aliases prohibit alias-homogeneous pooling, and mock records an empty list",
+    "required_child_identity": [
+      "run_id",
+      "command_identity",
+      "config_hash_schema_version",
+      "scientific_config_hash",
+      "model_request_config_hash",
+      "scientific_input_identity",
+      "scenario_definition_hash",
+      "population_identity",
+      "requested_provider",
+      "requested_model",
+      "resolved_provider",
+      "resolved_model",
+      "endpoint_identity",
+      "reported_model_aliases",
+      "invalid_reported_model_alias_count",
+      "scientific_runtime_environment",
+      "scientific_runtime_environment_identity"
+    ],
+    "required_result_cell_identity": [
+      "schema_version",
+      "protocol_sha256",
+      "event_id",
+      "arm",
+      "seed",
+      "repeat_idx",
+      "reference_csv_sha256",
+      "news_timeline_sha256",
+      "reference_transform_sha256"
+    ],
+    "required_hashes": "the protocol freezes the authoritative catalog/reference/timeline SHA-256 values; the finished parent registers and hashes the selection, plan, public and private attempt ledgers, driver summary, and private driver-failures artifact; the selection repeats frozen input hashes, scientific runtime environment identity, and supplies SHA-256 for each child manifest and experiment_result.json"
+  },
+  "scientific_semantics_change": {
+    "changes_simulator": true,
+    "simulator_change": "adds opt-in Config.news_timeline delivery and public prompt observation plus opt-in multi_event_decision_response_v1 strict response validation; the empty timeline and null decision schema preserve the legacy one-shot news and coercive parser paths",
+    "changes_prompt_observation": "true only when news_timeline is non-empty",
+    "changes_persona": false,
+    "changes_market_logic": false,
+    "changes_private_to_public_information_boundary": false,
+    "changes_market_or_social_logic": false,
+    "analysis_change": "adds a preregistered complete-case, K-repeat distributional estimator, deterministic counterbalanced launch order, strict failure-union health gate, runtime-environment identity, and managed derived-artifact boundary",
+    "compatibility": "legacy flat results are not eligible inputs; existing analyzers and result schemas are unchanged"
+  }
+}

@@ -15,7 +15,7 @@ import hashlib
 import random
 from dataclasses import dataclass, field
 
-from .config import Config
+from .config import Config, normalize_news_timeline
 from .agents import make_agents, Agent, NoiseAgent
 from .market import clear_by_pressure
 from .types import Order, Statement
@@ -36,6 +36,7 @@ class SimResult:
     cfg: Config
     tracker: object
     liquidations: list = field(default_factory=list)   # LiquidationEvent log (leverage layer)
+    decision_audits: dict = field(default_factory=dict)
     # Populated by managed entry points (nmsim.run / experiments.run_seed).
     # Direct run_sim callers remain fully backward compatible.
     run_id: str | None = None
@@ -79,10 +80,18 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
 
     price = cfg.initial_price
     history = [price]
-    rows, traces = [], {}
+    rows, traces, decision_audits = [], {}, {}
     metrics = C.PropagationMetrics()
     last_statements: dict[str, Statement] = {}
     prev_sentiment = {nm: 0.0 for nm in llm_names}
+
+    # Validate again at the executable boundary because Config remains mutable
+    # for historical callers.  Empty means the exact established static-news
+    # path.  A non-empty timeline is cumulative: once public information is
+    # delivered it remains in directly informed agents' observation history.
+    news_timeline = normalize_news_timeline(
+        cfg.news_timeline, n_rounds=cfg.n_rounds
+    )
 
     seed_sign = 0.0  # direction of the seeded story; set endogenously at the news round (M4)
     pending_liq: list[Order] = []   # forced-liquidation sells carried into the NEXT round's flow
@@ -110,9 +119,43 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
             # The headline reaches ONLY the seed subset, directly. Everyone else
             # learns the story exclusively through the social channel (neighbor
             # digests) + the price tape -> contagion is the transmission path.
-            sees_news = (r >= cfg.news_round) and (a.name in seed_agents)
-            news = cfg.news_text if sees_news else ""
-            if sees_news and event_logger is not None:
+            if news_timeline:
+                active_events = tuple(
+                    event for event in news_timeline if event.round <= r
+                )
+                sees_news = bool(active_events) and (a.name in seed_agents)
+                news = (
+                    "\n\n".join(event.public_text for event in active_events)
+                    if sees_news
+                    else ""
+                )
+            else:
+                active_events = ()
+                sees_news = (r >= cfg.news_round) and (a.name in seed_agents)
+                news = cfg.news_text if sees_news else ""
+
+            if news_timeline and a.name in seed_agents and event_logger is not None:
+                for scenario_event in active_events:
+                    if scenario_event.round != r:
+                        continue
+                    event_payload = "{}\0{}\0{}".format(
+                        scenario_event.event_id,
+                        scenario_event.round,
+                        scenario_event.public_text,
+                    )
+                    event_logger.emit(
+                        "ScenarioEventDelivered", round_i=r, agent_id=a.name,
+                        data={
+                            "scenario_event": "news_timeline",
+                            "delivery": "direct_seed",
+                            "event_id": scenario_event.event_id,
+                            "event_sha256": _digest(event_payload),
+                            "public_text_sha256": _digest(
+                                scenario_event.public_text
+                            ),
+                        },
+                    )
+            elif sees_news and event_logger is not None:
                 event_logger.emit(
                     "ScenarioEventDelivered", round_i=r, agent_id=a.name,
                     data={
@@ -179,15 +222,43 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
             )
         completions = llm.complete_batch(prompts)
         orders: list[Order] = []
+        round_decision_audits: list[dict] = []
         statements: dict[str, Statement] = {}
         sentiments: dict[str, float] = {}
         flips = 0
         for a, raw in zip(order_owners, completions):
-            order = a.ingest(raw, r, price)
+            order = a.ingest(
+                raw,
+                r,
+                price,
+                response_schema=cfg.decision_response_schema,
+                direction_field="action" if mode == "real" else "side",
+            )
             orders.append(order)
             statements[a.name] = a.statement(order)
             sentiments[a.name] = order["sentiment"]
-            parse_failed = order["rationale"] == "parse-failed; holding"
+            validity = a.last_decision_validity
+            parse_failed = not bool(
+                validity is not None and getattr(validity, "valid", False)
+            )
+            decision_audit = {
+                "agent": a.name,
+                "decision_response_schema": getattr(
+                    validity, "schema_version", None
+                ),
+                "strict_schema_valid": (
+                    getattr(validity, "valid", None)
+                    if cfg.decision_response_schema is not None
+                    else None
+                ),
+                "strict_schema_error_code": getattr(
+                    validity, "error_code", None
+                ),
+                "terminal_status": getattr(
+                    validity, "terminal_status", None
+                ),
+            }
+            round_decision_audits.append(decision_audit)
             if event_logger is not None:
                 public_decision = {
                     "persona_id": a.persona_id,
@@ -197,6 +268,23 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
                     "sentiment": order["sentiment"],
                     "public_take": order["public_take"],
                     "parse_status": "error" if parse_failed else "parsed",
+                    "decision_response_schema": getattr(
+                        validity, "schema_version", None
+                    ),
+                    "decision_response_direction_field": getattr(
+                        validity, "direction_field", None
+                    ),
+                    "strict_schema_valid": (
+                        getattr(validity, "valid", None)
+                        if cfg.decision_response_schema is not None
+                        else None
+                    ),
+                    "strict_schema_error_code": getattr(
+                        validity, "error_code", None
+                    ),
+                    "terminal_status": getattr(
+                        validity, "terminal_status", None
+                    ),
                     "raw_response_sha256": _digest(raw),
                 }
                 event_logger.emit(
@@ -211,7 +299,13 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
                     event_logger.emit(
                         "AgentDecisionParseError", round_i=r, agent_id=a.name,
                         data={
-                            "error_code": "invalid_or_missing_json_object",
+                            "error_code": (
+                                getattr(validity, "error_code", None)
+                                or "invalid_or_missing_json_object"
+                            ),
+                            "decision_response_schema": getattr(
+                                validity, "schema_version", None
+                            ),
                             "raw_response_sha256": _digest(raw),
                         },
                     )
@@ -368,6 +462,7 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
         traces[r] = [(o["agent"], o["side"], o["quantity"], o["limit_price"],
                       o["sentiment"], o["public_take"], o["rationale"])
                      for o in orders if o["agent"] in llm_set]
+        decision_audits[r] = round_decision_audits
         non_seed = set(llm_names) - seed_agents
         metrics.record(r, sentiments, flips,
                        seed_sign if r >= cfg.news_round else 0.0,
@@ -399,4 +494,5 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
 
     return SimResult(history, rows, traces, agents, metrics,
                      adjacency, seed_agents, hub_names, cfg, tracker,
-                     liquidations=liquidations, run_id=run_id)
+                     liquidations=liquidations, decision_audits=decision_audits,
+                     run_id=run_id)

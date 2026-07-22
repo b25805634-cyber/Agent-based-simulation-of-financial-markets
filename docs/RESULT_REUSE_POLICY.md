@@ -1,10 +1,16 @@
 # Result Reuse Policy
 
-Phase 1.2A defines result-reuse policy `1.0`. Its purpose is narrow: an
+Phase 1.2A defined the sealed result-reuse baseline policy `1.0`; the current
+additive policy is `1.1`. Its purpose is narrow: an
 experiment driver may count an old child simulation as part of the current
 experiment only after the child's managed lifecycle, scientific identity,
 model-request identity, and artifact bytes have all been verified. A filename
 or a plausible-looking metric is not a run identity.
+
+Policy `1.1` preserves the complete `1.0` gate for callers that do not expect
+an experiment slot. When a multi-event slot is expected, it additionally
+authenticates the frozen slot/result/material identities, scientific runtime
+environment, and the bounded endpoint-reported model-alias health gate.
 
 The sealed Phase 1.2A policy reference is
 `phase1.2a-model-foundation-v1` at
@@ -24,7 +30,7 @@ run with the current Provider/model/configuration has executed.
 
 | Entrypoint / path | Phase 1.1 condition or behavior | Risk before 1.2A | Phase 1.2A rule | Class | Legacy flat files |
 |---|---|---|---|---|---|
-| `experiments.drive` | `g{gain}_s{seed}.json` existed and `health.bad_frac <= 0.15` | A result from another Provider, model, config, prompt, or code version could be called cached | Assess the managed child manifest with policy 1.0, then apply the driver health gate; otherwise launch a new immutable child | Driver resume | Never sufficient for reuse |
+| `experiments.drive` | `g{gain}_s{seed}.json` existed and `health.bad_frac <= 0.15` | A result from another Provider, model, config, prompt, or code version could be called cached | Assess the managed child manifest with sealed baseline policy 1.0, then apply the driver health gate; otherwise launch a new immutable child | Driver resume | Never sufficient for reuse |
 | `experiments.grid2x2` | `{cell}_s{seed}.json` existed and passed the same health threshold; bespoke code counted it as reused | Same identity confusion; manual counting also bypassed the central gate | Use the same centralized assessor and run-level accounting as every other driver | Driver resume | Never sufficient for reuse |
 | `experiments.sweep` | `m{m}_real_{on/off}_s{seed}[_r{rep}].json` existed and was healthy | Sampling repeat, population, rounds, Provider/model, and request settings were not authenticated | Build the expected identity from the final effective Config and validate its managed candidate | Driver resume | Never sufficient for reuse |
 | `experiments.ablate` | Arm filename existed and was healthy | An arm label did not prove the influencer/social configuration or model identity | Validate the complete child identity before health acceptance | Driver resume | Never sufficient for reuse |
@@ -76,7 +82,7 @@ still fails closed when it differs.
 
 ## Acceptance contract
 
-Policy `result_reuse_policy_version = "1.0"` accepts a candidate only when all
+Policy `result_reuse_policy_version = "1.1"` accepts a candidate only when all
 of the following hold:
 
 1. The candidate resolves safely inside the explicitly allowed result root.
@@ -106,6 +112,10 @@ of the following hold:
     the allowed result root, and resolves into that same immutable child run.
 12. Any driver-specific health gate also passes. Health is an additional
     quality check, never a substitute for identity.
+13. When the expected identity contains a multi-event slot, the exact slot,
+    result/material identity, scientific runtime-environment identity, and
+    endpoint-reported alias health gate all pass. A legacy caller without an
+    expected slot retains the complete policy 1.0 behavior.
 
 Validation is read-only. A rejected candidate is not overwritten, relabeled,
 or counted. The driver creates a new uniquely named managed child attempt. A
@@ -190,7 +200,7 @@ Every cell and driver total reports:
 - `executed_runs`: new child attempts actually launched in this invocation;
   each launched `run_seed` subprocess counts, so health retries may make it
   exceed planned replicates without increasing honest-N;
-- `reused_runs`: pre-existing children accepted by policy 1.0;
+- `reused_runs`: pre-existing children accepted by policy 1.1;
 - `reuse_candidates_examined` and `reuse_candidates_rejected`;
 - `completed_runs`: successful new children plus valid reused children;
 - `failed_runs`: newly executed children that failed;
@@ -223,7 +233,7 @@ second copy of the same runs.
   fail-closed，不能产生可复用的正式 Codex child。普通文档变化不会阻止
   reuse，但任何未来允许完整 no-tools contract 的代码/配置身份变化必须由
   `model_request_config_hash` 区分。
-- Policy 1.0 authenticates what the current manifest and hashes can represent;
+- Policy 1.1 authenticates what the current manifest and hashes can represent;
   it does not prove the causal validity of the experiment.
 - A cryptographic match does not make a real Provider deterministic.
 - Historical flat files remain usable for explicitly marked analysis, but are

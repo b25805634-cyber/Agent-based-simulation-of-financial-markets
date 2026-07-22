@@ -21,7 +21,7 @@
 
 | 报告中的声明 | 对应代码路径 | 当前状态 | 证据 | 建议处理 |
 |---|---|---|---|---|
-| `nmsim/config` 集中配置和本地随机种子 | `nmsim/config.py`, `sim.py`, `agents.py`, `contagion.py` | 部分一致 | `Config` 集中 38 个字段；本地 RNG 显式 seeded；但无校验/schema/version，真实 LLM 不用 seed | 保留当前默认；Phase 0 增 parameter-route tests 和 runtime manifest |
+| `nmsim/config` 集中配置和本地随机种子 | `nmsim/config.py`, `sim.py`, `agents.py`, `contagion.py` | 部分一致 | Phase 1 基线当时的 `Config` 集中 38 个字段；本地 RNG 显式 seeded；但无校验/schema/version，真实 LLM 不用 seed | 保留当前默认；Phase 0 增 parameter-route tests 和 runtime manifest |
 | `nmsim/types` 有 Order、Statement、Decision 等类型 | `nmsim/types.py` | 部分一致 | 只有 `Order`、`Statement` 和 `Side`；没有 `Decision`/Fill/Portfolio/Event | 文档改为当前事实；Phase 2 再引入类型，不做本次补写 |
 | `nmsim/llm` 有 Mock、Anthropic、OpenAI-compatible/vLLM、缓存、异步批量 | `nmsim/llm.py` | 一致（能力）/部分一致（可靠性） | 三 provider 路径、cache、gather 均存在；失败可静默 hold，cache key/记录不完整 | 先记录 degraded/provenance；再单独评审 fail-closed |
 | `nmsim/prompts` 有 6 类 Persona 和模板 | `nmsim/prompts.py` | 一致 | 六个 persona；real system/user builder 存在 | 给 prompt/source 加 hash 和版本 |

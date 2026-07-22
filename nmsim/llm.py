@@ -23,9 +23,20 @@ import random
 import asyncio
 import hashlib
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from .config import Config
+from .decision_contract import (
+    ADAPTER_TERMINAL_STATUS_FIELD,
+    DECISION_VALID,
+    DecisionResponseValidity,
+    LEGACY_PARSE_INVALID,
+    PROVIDER_EXCEPTION_EXHAUSTED,
+    PROVIDER_PARSE_EXHAUSTED,
+    STRICT_SCHEMA_INVALID,
+    exact_adapter_terminal_status,
+    validate_decision_response,
+)
 from .provider_attempts import (
     ProviderAttemptContext,
     ProviderAttemptContextCarrier,
@@ -96,7 +107,7 @@ def _user_last_price(user: str) -> float:
     return float(m.group(1)) if m else 100.0
 
 
-def parse_order(raw: str, last_price: float) -> Order:
+def _parse_order_legacy(raw: str, last_price: float) -> Order:
     """Parse the model's JSON into a normalized Order. Never raises.
 
     Accepts both ``action`` and legacy ``side`` for the order direction.
@@ -144,10 +155,131 @@ def parse_order(raw: str, last_price: float) -> Order:
                  sentiment=senti, public_take=public, rationale=reasoning)
 
 
-def _is_parse_failure(raw: str) -> bool:
+def parse_order_with_validity(
+    raw: str,
+    last_price: float,
+    *,
+    response_schema: str | None = None,
+    direction_field: str = "action",
+) -> tuple[Order, DecisionResponseValidity]:
+    """Parse under legacy coercion or one explicit strict response schema."""
+
+    if response_schema is None:
+        order = _parse_order_legacy(raw, last_price)
+        # Preserve the established null-schema parser semantics byte-for-byte.
+        failed = order["rationale"] == "parse-failed; holding"
+        return order, DecisionResponseValidity(
+            None,
+            None,
+            not failed,
+            "invalid_or_missing_json_object" if failed else None,
+            LEGACY_PARSE_INVALID if failed else DECISION_VALID,
+        )
+    value, validity = validate_decision_response(
+        raw,
+        schema_version=response_schema,
+        direction_field=direction_field,
+    )
+    adapter_status = exact_adapter_terminal_status(raw)
+    terminal_status = adapter_status or (
+        DECISION_VALID if validity.valid else STRICT_SCHEMA_INVALID
+    )
+    validity = replace(validity, terminal_status=terminal_status)
+    if value is None:
+        fallback_marker = {
+            PROVIDER_PARSE_EXHAUSTED: "parse-retries-exhausted",
+            PROVIDER_EXCEPTION_EXHAUSTED: "api-error",
+        }.get(adapter_status)
+        fallback_suffix = "; " + fallback_marker if fallback_marker else ""
+        return (
+            Order(
+                agent="",
+                side="hold",
+                quantity=0,
+                limit_price=last_price,
+                sentiment=0.0,
+                public_take="",
+                rationale="strict-schema-failed:{}; holding{}".format(
+                    validity.error_code, fallback_suffix
+                ),
+            ),
+            validity,
+        )
+    action = value[direction_field]
+    return (
+        Order(
+            agent="",
+            side=action,
+            quantity=value["quantity"],
+            limit_price=float(value["limit_price"]),
+            sentiment=float(value["sentiment"]),
+            public_take=value["public_take"][:140],
+            rationale=value["reasoning"][:240],
+        ),
+        validity,
+    )
+
+
+def _adapter_fallback_json(
+    *,
+    last_price: float,
+    terminal_status: str,
+    response_schema: str | None,
+    include_public_take: bool,
+) -> str:
+    """Preserve legacy fallback JSON; mark strict-study fallbacks explicitly."""
+
+    rationale = {
+        PROVIDER_PARSE_EXHAUSTED: "parse-retries-exhausted; holding",
+        PROVIDER_EXCEPTION_EXHAUSTED: "api-error; holding",
+    }[terminal_status]
+    payload = {
+        "side": "hold",
+        "quantity": 0,
+        "limit_price": last_price,
+        "sentiment": 0.0,
+    }
+    if include_public_take:
+        payload["public_take"] = ""
+    payload["rationale"] = rationale
+    if response_schema is not None:
+        payload[ADAPTER_TERMINAL_STATUS_FIELD] = terminal_status
+    return json.dumps(payload)
+
+
+def parse_order(
+    raw: str,
+    last_price: float,
+    *,
+    response_schema: str | None = None,
+    direction_field: str = "action",
+) -> Order:
+    """Parse one order; strict semantics are opt-in and legacy remains exact."""
+
+    order, _validity = parse_order_with_validity(
+        raw,
+        last_price,
+        response_schema=response_schema,
+        direction_field=direction_field,
+    )
+    return order
+
+
+def _is_parse_failure(
+    raw: str,
+    *,
+    response_schema: str | None = None,
+    direction_field: str = "action",
+) -> bool:
     # Share the parser's notion of failure so the retry-on-parse-failure gate and
     # parse_order cannot diverge (only truly non-JSON output is a parse failure).
-    return parse_order(raw, 100.0)["rationale"] == "parse-failed; holding"
+    _order, validity = parse_order_with_validity(
+        raw,
+        100.0,
+        response_schema=response_schema,
+        direction_field=direction_field,
+    )
+    return not validity.valid
 
 
 # ------------------------------- MockLLM -------------------------------
@@ -242,6 +374,7 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                           if cfg.use_cheap_model else _DEFAULT_MODEL))
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
+        self.decision_response_schema = cfg.decision_response_schema
         self.tracker = tracker
 
     def complete(self, system: str, user: str) -> str:
@@ -254,7 +387,11 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                 system=system, messages=[{"role": "user", "content": user}])
             self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
             text = msg.content[0].text
-            parse_failed = _is_parse_failure(text)
+            parse_failed = _is_parse_failure(
+                text,
+                response_schema=getattr(self, "decision_response_schema", None),
+                direction_field="action",
+            )
         except Exception as error:
             observe_provider_attempt(
                 context,
@@ -324,7 +461,11 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                     system=system, messages=[{"role": "user", "content": user}])
                 self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
                 text = msg.content[0].text
-                parse_failed = _is_parse_failure(text)
+                parse_failed = _is_parse_failure(
+                    text,
+                    response_schema=getattr(self, "decision_response_schema", None),
+                    direction_field="action",
+                )
             except Exception as error:
                 will_retry = attempt < retries
                 observe_provider_attempt(
@@ -344,9 +485,14 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                     ),
                 )
                 if attempt == retries:
-                    return json.dumps({"side": "hold", "quantity": 0,
-                                       "limit_price": last_price, "sentiment": 0.0,
-                                       "rationale": "api-error; holding"})
+                    return _adapter_fallback_json(
+                        last_price=last_price,
+                        terminal_status=PROVIDER_EXCEPTION_EXHAUSTED,
+                        response_schema=getattr(
+                            self, "decision_response_schema", None
+                        ),
+                        include_public_take=False,
+                    )
                 await asyncio.sleep(0.5 * (attempt + 1))
                 trigger = "provider_exception"
                 continue
@@ -383,8 +529,12 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
             # Preserve the existing cumulative retry nudge exactly.
             user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
             trigger = "parse_failure"
-        return json.dumps({"side": "hold", "quantity": 0, "limit_price": last_price,
-                           "sentiment": 0.0, "rationale": "parse-retries-exhausted; holding"})
+        return _adapter_fallback_json(
+            last_price=last_price,
+            terminal_status=PROVIDER_PARSE_EXHAUSTED,
+            response_schema=getattr(self, "decision_response_schema", None),
+            include_public_take=False,
+        )
 
     def complete_batch(self, prompts):
         prompt_list = list(prompts)
@@ -422,13 +572,22 @@ class OpenAILLM(ProviderAttemptContextCarrier):
         # cap at 40: enough headroom for one run, but workers*40 stays well under
         # the level that hung it (benchmark: a single client is healthy to 96+).
         _limits = httpx.Limits(max_connections=40, max_keepalive_connections=40)
-        self._async = AsyncOpenAI(base_url=base_url, api_key=api_key,
-                                  http_client=httpx.AsyncClient(trust_env=False, limits=_limits))
-        self._sync = OpenAI(base_url=base_url, api_key=api_key,
-                            http_client=httpx.Client(trust_env=False, limits=_limits))
+        client_options = {"base_url": base_url, "api_key": api_key}
+        if cfg.provider_sdk_max_retries is not None:
+            client_options["max_retries"] = cfg.provider_sdk_max_retries
+        self._async = AsyncOpenAI(
+            **client_options,
+            http_client=httpx.AsyncClient(trust_env=False, limits=_limits),
+        )
+        self._sync = OpenAI(
+            **client_options,
+            http_client=httpx.Client(trust_env=False, limits=_limits),
+        )
         self.model = os.getenv("LLM_MODEL") or cfg.model or cfg.openai_model
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
+        self.decision_response_schema = cfg.decision_response_schema
+        self.provider_sdk_max_retries = cfg.provider_sdk_max_retries
         self.tracker = tracker
 
     def _track(self, resp, system: str, user: str, text: str):
@@ -452,7 +611,11 @@ class OpenAILLM(ProviderAttemptContextCarrier):
                           {"role": "user", "content": user}])
             text = resp.choices[0].message.content or ""
             self._track(resp, system, user, text)
-            parse_failed = _is_parse_failure(text)
+            parse_failed = _is_parse_failure(
+                text,
+                response_schema=getattr(self, "decision_response_schema", None),
+                direction_field="action",
+            )
         except Exception as error:
             observe_provider_attempt(
                 context,
@@ -524,7 +687,11 @@ class OpenAILLM(ProviderAttemptContextCarrier):
                               {"role": "user", "content": user}])
                 text = resp.choices[0].message.content or ""
                 self._track(resp, system, user, text)
-                parse_failed = _is_parse_failure(text)
+                parse_failed = _is_parse_failure(
+                    text,
+                    response_schema=getattr(self, "decision_response_schema", None),
+                    direction_field="action",
+                )
             except Exception as error:
                 will_retry = attempt < retries
                 observe_provider_attempt(
@@ -544,9 +711,14 @@ class OpenAILLM(ProviderAttemptContextCarrier):
                     ),
                 )
                 if attempt == retries:
-                    return json.dumps({"side": "hold", "quantity": 0,
-                                       "limit_price": last_price, "sentiment": 0.0,
-                                       "public_take": "", "rationale": "api-error; holding"})
+                    return _adapter_fallback_json(
+                        last_price=last_price,
+                        terminal_status=PROVIDER_EXCEPTION_EXHAUSTED,
+                        response_schema=getattr(
+                            self, "decision_response_schema", None
+                        ),
+                        include_public_take=True,
+                    )
                 await asyncio.sleep(0.5 * (attempt + 1))
                 trigger = "provider_exception"
                 continue
@@ -584,9 +756,12 @@ class OpenAILLM(ProviderAttemptContextCarrier):
             # Preserve the existing cumulative retry nudge exactly.
             user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
             trigger = "parse_failure"
-        return json.dumps({"side": "hold", "quantity": 0, "limit_price": last_price,
-                           "sentiment": 0.0, "public_take": "",
-                           "rationale": "parse-retries-exhausted; holding"})
+        return _adapter_fallback_json(
+            last_price=last_price,
+            terminal_status=PROVIDER_PARSE_EXHAUSTED,
+            response_schema=getattr(self, "decision_response_schema", None),
+            include_public_take=True,
+        )
 
     def complete_batch(self, prompts):
         prompt_list = list(prompts)

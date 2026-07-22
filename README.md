@@ -120,6 +120,42 @@ manifest-free flat result is preserved and does not count as completion.
 Historical flat files may still be used by an explicitly managed analysis as
 hashed `legacy_unverified_input`; that is analysis input, not child-run reuse.
 
+`experiments.aggregate_multi_event` is the Provider-free managed analyzer for
+the Wave 1 N=8/K=3 variance-components pilot. Its trust anchor is one finished
+`experiments.multi_event` parent manifest; it derives and rehashes that
+parent's registered plan, public/private attempt ledgers, selection, summary,
+and private failure log. Live work is accepted only from the repository's
+non-symlink `results_multi_event` root under the clean Git snapshot that owns
+the frozen protocol; analysis re-runs current `HEAD`, protocol-last-change, and
+clean-worktree checks instead of trusting the recorded declaration. The plan
+must use the exact counterbalanced launch order
+(adjacent arm pairs, rotated event positions, balanced arm-first parity), the
+inherited output-root lock, and one five-attempt same-slot budget that foreign
+attempt-series materializations cannot reset. Analysis obtains that lock
+exclusively and nonblocking from selection preparation through final output
+hashing, so parent/child/orphan activity fails closed.
+
+Every child is rechecked against its independently reconstructed command,
+runtime environment identity (Python/platform plus exact dependency versions),
+raw/public/private artifact hashes and `0600` private-file modes. OpenAI SDK
+retries are frozen to zero; only application-adapter attempts are observable.
+Their exact public schema, three-attempt limit, per-logical-request contiguous
+indices/retry transitions, terminal event, aliases, and completion counts are
+recomputed from public attempt events. Invalid
+reported-model aliases cannot be silently dropped: every accepted child and
+the study require an exact zero invalid-alias count. Health is derived from
+mutually exclusive statuses recomputed from unique public decision cells and
+closed against completion accounting, never from rationale substrings.
+Selection, ledger, and analyzer rejection reasons are restricted to registered
+public-safe codes; private diagnostics cannot flow into the summary. Accepted and missing/rejected
+slots exactly partition all 144 live cells or an explicitly labeled smaller
+mock-only grid. The analyzer emits event-complete and cross-event-intersection
+honest N; mock/non-adherent output is never eligible for a preregistered
+realism claim. The pilot's fixed
+qualitative matching criterion is distinct from its paired social estimand and
+is not confirmatory significance evidence. See
+[`docs/MULTI_EVENT_PROTOCOL.md`](docs/MULTI_EVENT_PROTOCOL.md).
+
 `experiments.model_qualification` is a managed non-market entrypoint with
 `run_kind=model_qualification`. It freezes engineering checks and relative
 behavioral diagnostics before any real-model sampling; it is not a

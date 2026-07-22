@@ -287,7 +287,7 @@ Experiment driver 的独立汇总单位是 `runs`：
 - `completed_runs`：经 driver 验收为成功的 child run 数；
 - `failed_runs`：失败 child run 数；
 - `honest_n_runs`：被接受的成功 child run 数，必须等于 `completed_runs`；
-- `reused_runs`：通过 result-reuse policy 1.0 全部身份和 artifact 校验的既有 child run 数；复用会增加 completed/honest/reused，但不增加 started/executed；
+- `reused_runs`：通过 result-reuse policy 1.1 全部身份和 artifact 校验的既有 child run 数；复用会增加 completed/honest/reused，但不增加 started/executed；
 - `reuse_candidates_examined`：实际进入集中复用门的候选数；
 - `reuse_candidates_rejected`：至少一项身份、完整性、路径安全或 health 条件不满足的候选数；
 - `reuse_rejection_codes`：公共、稳定且脱敏的拒绝 reason-code 计数。
@@ -305,7 +305,7 @@ honest_n_runs = 1
 
 某个底层 child run 即使包含 144 个 completed Agent Decision，它也仍只贡献一个 `honest_n_runs`。Agent decision 行存在依赖、共享市场状态和同一 seed，不能当作 144 个独立实验样本。
 
-同一 grid 合法重跑时，若所有 child 都通过 policy 1.0，则
+同一 grid 合法重跑时，若所有 child 都通过 policy 1.1，则
 `executed_runs=0`、`reused_runs=planned_runs`、`completed_runs=honest_n_runs=planned_runs`。
 这不是增加新独立样本，只是对同一批已验证 replicate 的合法恢复。无 child manifest 的历史平铺文件只能作为显式标记的 `legacy_unverified_input` 进入分析，不进入上述 run-level 计数。
 

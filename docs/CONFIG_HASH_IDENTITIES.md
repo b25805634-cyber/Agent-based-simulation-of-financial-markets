@@ -6,6 +6,8 @@ base directory；不得只写模糊的“Config hash”。
 
 ## 2026-07-15 sealing cross-version check
 
+> 本节的 38/27/9 字段计数和精确 hash 只描述 2026-07-15 的封存 fixture，不代表当前 Wave 1 Config。当前分类为 41 字段：29 scientific、10 model-request、2 execution；报告当前运行时必须从该次 manifest 取得具名 identity，不得沿用下方历史值。
+
 使用同一固定 fixture 分别执行 `phase1.1-complete-v1` 与 Phase 1.2A
 sealing commit 的 `nmsim.config_contract`：
 

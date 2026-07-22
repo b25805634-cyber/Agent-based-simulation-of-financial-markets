@@ -13,13 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-import re
 import threading
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
 
 PROVIDER_ATTEMPT_SCHEMA = "provider_attempt_v1"
-_SAFE_REPORTED_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,199}$")
+REPORTED_MODEL_ALIAS_MAX_CHARS = 256
 
 
 def sha256_text(value: str) -> str:
@@ -36,12 +35,17 @@ def prompt_hash(system: str, user: str) -> str:
 
 
 def safe_reported_model(value: Any) -> Optional[str]:
-    """Return a bounded public endpoint model id, or ``None`` if unsafe."""
+    """Return one exact bounded printable alias, or ``None`` without trimming."""
 
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
-    return candidate if _SAFE_REPORTED_MODEL.fullmatch(candidate) else None
+    if (
+        not 1 <= len(value) <= REPORTED_MODEL_ALIAS_MAX_CHARS
+        or value != value.strip()
+        or not value.isprintable()
+    ):
+        return None
+    return value
 
 
 @runtime_checkable
@@ -103,6 +107,7 @@ class ProviderAttemptObservation:
     def public_payload(self, context: ProviderAttemptContext) -> dict[str, Any]:
         """Return a public-safe event payload containing identities and codes."""
 
+        reported_model = safe_reported_model(self.reported_model)
         return {
             "provider_attempt_schema": PROVIDER_ATTEMPT_SCHEMA,
             "logical_sequence": int(context.logical_sequence),
@@ -116,7 +121,10 @@ class ProviderAttemptObservation:
             "max_attempts": int(self.max_attempts),
             "provider": str(self.provider),
             "model": None if self.model is None else str(self.model),
-            "reported_model": safe_reported_model(self.reported_model),
+            "reported_model": reported_model,
+            "reported_model_alias_invalid": bool(
+                self.reported_model is not None and reported_model is None
+            ),
             "original_prompt_hash": context.original_prompt_hash,
             "attempted_prompt_hash": prompt_hash(
                 self.attempted_system, self.attempted_user
@@ -211,6 +219,7 @@ def observe_provider_attempt(
 
 __all__ = [
     "PROVIDER_ATTEMPT_SCHEMA",
+    "REPORTED_MODEL_ALIAS_MAX_CHARS",
     "ProviderAttemptContext",
     "ProviderAttemptContextCarrier",
     "ProviderAttemptObservation",

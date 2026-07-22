@@ -5,16 +5,21 @@ from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
 import json
+import math
 import os
 from pathlib import Path
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
+from nmsim.config import Config
+from nmsim.decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
 from nmsim.run_context import ManagedRunContext
 from nmsim.result_reuse import (
     ExpectedRunIdentity,
+    ARTIFACT_INVALID,
     HEALTH_GATE_REJECTED,
     RESULT_REUSE_POLICY_VERSION,
     ReusableRunCandidate,
@@ -24,6 +29,42 @@ from nmsim.result_reuse import (
 
 
 DRIVER_SUMMARY_SCHEMA_VERSION = "1.0"
+MULTI_EVENT_PRIVATE_ARTIFACTS = (
+    "llm_records.jsonl",
+    "private_events.jsonl",
+)
+
+
+def _gate_multi_event_private_artifacts(
+    decision: ReuseDecision, expected: ExpectedRunIdentity
+) -> ReuseDecision:
+    """Require exact private-file type and mode without changing legacy reuse."""
+
+    if (
+        not decision.reusable
+        or expected.experiment_slot is None
+        or decision.manifest_path is None
+    ):
+        return decision
+    run_dir = decision.manifest_path.parent
+    try:
+        for relative in MULTI_EVENT_PRIVATE_ARTIFACTS:
+            path = run_dir / relative
+            info = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise ValueError("private artifact policy mismatch")
+    except (OSError, ValueError):
+        return replace(
+            decision,
+            reusable=False,
+            reason_codes=(ARTIFACT_INVALID,),
+            cross_commit_same_scientific_fingerprint=False,
+        )
+    return decision
 
 
 @dataclass(frozen=True)
@@ -267,9 +308,14 @@ class ManagedDriverCompletion:
             )
             self._sync()
 
-    def _public_summary(self, *, legacy_failures_log: Optional[str]) -> dict[str, Any]:
+    def _public_summary(
+        self,
+        *,
+        legacy_failures_log: Optional[str],
+        summary_extra: Optional[Mapping[str, Any]] = None,
+    ) -> dict[str, Any]:
         totals = self._totals()
-        return {
+        payload = {
             "schema_version": DRIVER_SUMMARY_SCHEMA_VERSION,
             "result_reuse_policy_version": RESULT_REUSE_POLICY_VERSION,
             "run_id": self.context.manifest["run_id"],
@@ -294,14 +340,30 @@ class ManagedDriverCompletion:
             "private_failure_details": self.PRIVATE_FAILURES_NAME,
             "legacy_failures_log": legacy_failures_log,
         }
+        extra = dict(summary_extra or {})
+        overlap = sorted(set(extra) & set(payload))
+        if overlap:
+            raise ValueError(
+                "driver summary extra cannot replace core fields: {}".format(overlap)
+            )
+        payload.update(extra)
+        return payload
 
-    def _write_artifacts(self, *, legacy_failures_log: Optional[str]) -> Path:
+    def _write_artifacts(
+        self,
+        *,
+        legacy_failures_log: Optional[str],
+        summary_extra: Optional[Mapping[str, Any]] = None,
+    ) -> Path:
         public_path = self.run_dir / self.PUBLIC_SUMMARY_NAME
         private_path = self.run_dir / self.PRIVATE_FAILURES_NAME
 
         with public_path.open("x", encoding="utf-8") as handle:
             json.dump(
-                self._public_summary(legacy_failures_log=legacy_failures_log),
+                self._public_summary(
+                    legacy_failures_log=legacy_failures_log,
+                    summary_extra=summary_extra,
+                ),
                 handle,
                 indent=2,
                 sort_keys=True,
@@ -317,7 +379,12 @@ class ManagedDriverCompletion:
         os.chmod(private_path, 0o600)
         return public_path
 
-    def finish(self, *, legacy_failures_log: Optional[str] = None) -> Path:
+    def finish(
+        self,
+        *,
+        legacy_failures_log: Optional[str] = None,
+        summary_extra: Optional[Mapping[str, Any]] = None,
+    ) -> Path:
         """Write non-overwriting driver artifacts and finish the parent run."""
 
         with self._lock:
@@ -331,7 +398,8 @@ class ManagedDriverCompletion:
                 raise RuntimeError("driver honest_n_runs must equal accepted completed runs")
             self._sync()
             summary_path = self._write_artifacts(
-                legacy_failures_log=legacy_failures_log
+                legacy_failures_log=legacy_failures_log,
+                summary_extra=summary_extra,
             )
             self.context.finish()
             self._finished = True
@@ -485,24 +553,74 @@ def expected_run_seed_identity(command: Sequence[str]) -> ExpectedRunIdentity:
     from experiments.run_seed import build_argparser, config_from_args
 
     args = build_argparser().parse_args(tokens[module_index + 1 :])
-    cfg = config_from_args(args)
-    rep_suffix = "_r{}".format(args.rep) if args.rep is not None else ""
-    basename = "{}_s{}{}.json".format(args.label, args.seed, rep_suffix)
+    effective_environment = None
+    if args.reference_csv is not None:
+        # Multi-event expected identity is reconstructed from the explicit
+        # child command and frozen protocol, never from the analyzer/driver's
+        # ambient shell at the later reuse-check time.
+        effective_environment = {"LLM_PROVIDER": str(args.provider)}
+        if args.provider == "openai":
+            effective_environment.update(
+                {
+                    "LLM_MODEL": str(args.model or Config().openai_model),
+                    "OPENAI_BASE_URL": Config().openai_base_url,
+                }
+            )
+    cfg = config_from_args(args, environment=effective_environment)
+    if args.multi_event_material is not None:
+        from nmsim.multi_event import (
+            canonical_multi_event_basename,
+            multi_event_material_identity,
+            multi_event_result_identity,
+        )
+
+        basename = canonical_multi_event_basename(args.experiment_slot)
+        result_cell_identity = multi_event_result_identity(
+            args.multi_event_material, args.experiment_slot
+        )
+        material_identity = multi_event_material_identity(
+            args.multi_event_material, args.experiment_slot
+        )
+    else:
+        rep_suffix = (
+            "_r{}".format(args.repeat_idx)
+            if args.repeat_idx is not None
+            else ""
+        )
+        basename = "{}_s{}{}.json".format(args.label, args.seed, rep_suffix)
+        result_cell_identity = None
+        material_identity = None
     input_paths: dict[str, str] = {}
     for label, attribute in (
         ("price_csv", "price_csv"),
         ("traces_csv", "traces_csv"),
         ("propagation_csv", "propagation_csv"),
+        ("news_timeline_jsonl", "news_timeline_jsonl"),
+        ("multi_event_protocol", "protocol"),
+        ("reference_catalog", "catalog"),
     ):
         value = getattr(args, attribute, None)
         if value:
             input_paths[label] = str(value)
+    required_artifacts = ["experiment_result.json", basename]
+    if args.multi_event_material is not None:
+        required_artifacts.extend(
+            (
+                "llm_records.jsonl",
+                "events.jsonl",
+                "private_events.jsonl",
+            )
+        )
     return ExpectedRunIdentity.from_effective_config(
         cfg,
         command_identity="python -m experiments.run_seed",
         run_kind="simulation",
         input_paths=input_paths or None,
-        required_artifacts=("experiment_result.json", basename),
+        required_artifacts=required_artifacts,
+        experiment_slot=args.experiment_slot,
+        multi_event_identity=result_cell_identity,
+        multi_event_material_identity=material_identity,
+        effective_environment=effective_environment,
     )
 
 
@@ -522,14 +640,128 @@ def assess_run_seed_reuse(
     decision = validate_child_run_reuse(
         ReusableRunCandidate(candidate, Path(allowed_result_root)), expected
     )
+    decision = _gate_multi_event_private_artifacts(decision, expected)
     if not decision.reusable or max_bad_frac is None:
         return decision
+    # The canonical health projection lives in the registered result artifact,
+    # irrespective of whether the caller selected the compatibility result,
+    # the managed run directory, or run_manifest.json as its candidate.  The
+    # central reuse gate above has already re-hashed this exact artifact.
+    if decision.manifest_path is None:
+        return replace(
+            decision,
+            reusable=False,
+            reason_codes=(HEALTH_GATE_REJECTED,),
+            cross_commit_same_scientific_fingerprint=False,
+        )
+    result_path = decision.manifest_path.parent / "experiment_result.json"
     try:
-        with candidate.open(encoding="utf-8") as stream:
-            bad_frac = float(json.load(stream)["health"]["bad_frac"])
-    except (OSError, TypeError, ValueError, KeyError, json.JSONDecodeError):
-        bad_frac = float("inf")
-    if bad_frac > float(max_bad_frac):
+        with result_path.open(encoding="utf-8") as stream:
+            health = json.load(stream)["health"]
+        with decision.manifest_path.open(encoding="utf-8") as stream:
+            manifest = json.load(stream)
+        bad_orders = health["bad_orders"]
+        total_orders = health["total_llm_orders"]
+        declared_fraction = float(health["bad_frac"])
+        if (
+            isinstance(bad_orders, bool)
+            or not isinstance(bad_orders, int)
+            or isinstance(total_orders, bool)
+            or not isinstance(total_orders, int)
+            or bad_orders < 0
+            or total_orders <= 0
+            or bad_orders > total_orders
+        ):
+            raise ValueError("invalid health counts")
+        raw_fraction = bad_orders / total_orders if total_orders else 0.0
+        if expected.experiment_slot is not None:
+            if set(health) != {
+                "bad_orders",
+                "total_llm_orders",
+                "bad_frac",
+                "schema_version",
+                "decision_response_schema",
+                "failure_union",
+                "failure_union_counts",
+            }:
+                raise ValueError("multi-event health schema changed")
+            union_counts = health["failure_union_counts"]
+            count_keys = {
+                "strict_schema_invalid",
+                "legacy_parse_invalid",
+                "provider_exception_exhausted",
+                "provider_parse_exhausted",
+                "valid_decisions",
+            }
+            if (
+                health["schema_version"] != "multi_event_health_v1"
+                or health["decision_response_schema"]
+                != MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+                or health["failure_union"]
+                != "exact_terminal_decision_status"
+                or not isinstance(union_counts, Mapping)
+                or set(union_counts) != count_keys
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    for value in union_counts.values()
+                )
+                or sum(union_counts.values()) != total_orders
+                or union_counts["legacy_parse_invalid"] != 0
+                or sum(
+                    union_counts[key]
+                    for key in count_keys - {"valid_decisions"}
+                )
+                != bad_orders
+            ):
+                raise ValueError("multi-event health union is inconsistent")
+            completion = manifest.get("completion")
+            decisions = (
+                completion.get("agent_decisions")
+                if isinstance(completion, Mapping)
+                else None
+            )
+            parsing = (
+                completion.get("parsing")
+                if isinstance(completion, Mapping)
+                else None
+            )
+            attempts = (
+                completion.get("application_provider_attempts")
+                if isinstance(completion, Mapping)
+                else None
+            )
+            if (
+                not isinstance(decisions, Mapping)
+                or not isinstance(parsing, Mapping)
+                or not isinstance(attempts, Mapping)
+                or decisions.get("completed") != total_orders
+                or parsing.get("failed") != bad_orders
+                or (
+                    union_counts["provider_exception_exhausted"]
+                    + union_counts["provider_parse_exhausted"]
+                )
+                != attempts.get("exhausted_logical_requests")
+            ):
+                raise ValueError(
+                    "multi-event health does not close against completion"
+                )
+        if (
+            not math.isfinite(declared_fraction)
+            or not 0.0 <= declared_fraction <= 1.0
+            or declared_fraction != round(raw_fraction, 4)
+        ):
+            raise ValueError("invalid health fraction")
+    except (
+        OSError,
+        TypeError,
+        ValueError,
+        KeyError,
+        json.JSONDecodeError,
+    ):
+        raw_fraction = float("inf")
+    if raw_fraction > float(max_bad_frac):
         return replace(
             decision,
             reusable=False,

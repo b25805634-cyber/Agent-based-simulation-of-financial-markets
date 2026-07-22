@@ -10,18 +10,27 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 from types import SimpleNamespace
+import types
 import tempfile
 import unittest
 from unittest import mock
 
 from nmsim.config import Config
 from nmsim.config_contract import build_effective_config_contract
+from nmsim.decision_contract import (
+    ADAPTER_TERMINAL_STATUS_FIELD,
+    MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+    PROVIDER_EXCEPTION_EXHAUSTED,
+    PROVIDER_PARSE_EXHAUSTED,
+)
 from nmsim.fingerprint import scientific_compatibility_metadata
 from nmsim.llm import AnthropicLLM, CachingLLM, CostTracker, OpenAILLM
 from nmsim.provider_attempts import (
     ProviderAttemptContext,
     prompt_hash,
+    safe_reported_model,
     sha256_text,
 )
 from nmsim.recording import RecordingLLM, ReplayLLM
@@ -200,6 +209,56 @@ def _outcomes(observer):
 
 
 class OpenAIProviderAttemptTests(unittest.TestCase):
+    def test_reported_model_alias_contract_is_exact_and_never_trims(self):
+        self.assertEqual(safe_reported_model("MiniMax M2.7"), "MiniMax M2.7")
+        for value in (
+            "",
+            " ",
+            " MiniMax",
+            "MiniMax ",
+            "Mini\nMax",
+            "Mini\x00Max",
+            "x" * 257,
+        ):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(safe_reported_model(value))
+
+    def test_invalid_non_null_reported_alias_keeps_public_evidence_flag(self):
+        observer = CollectingObserver()
+        llm, _, _ = _openai(async_script=[(VALID, " bad")])
+        llm.set_provider_attempt_contexts([_context(1, observer)])
+        self.assertEqual(
+            asyncio.run(llm.acomplete("SYSTEM", "LATEST PRICE: 100\nUSER")),
+            VALID,
+        )
+        context, attempt = observer.items[0]
+        public = attempt.public_payload(context)
+        self.assertIsNone(public["reported_model"])
+        self.assertTrue(public["reported_model_alias_invalid"])
+
+    def test_multi_event_sdk_retry_zero_reaches_both_openai_clients(self):
+        fake_openai = types.ModuleType("openai")
+        fake_openai.AsyncOpenAI = mock.Mock(return_value=SimpleNamespace())
+        fake_openai.OpenAI = mock.Mock(return_value=SimpleNamespace())
+        fake_httpx = types.ModuleType("httpx")
+        fake_httpx.Limits = mock.Mock(return_value=SimpleNamespace())
+        fake_httpx.AsyncClient = mock.Mock(return_value=SimpleNamespace())
+        fake_httpx.Client = mock.Mock(return_value=SimpleNamespace())
+        cfg = Config(
+            provider="openai",
+            provider_sdk_max_retries=0,
+            cache_enabled=False,
+        )
+        with mock.patch.dict(
+            sys.modules, {"openai": fake_openai, "httpx": fake_httpx}
+        ):
+            llm = OpenAILLM(cfg, CostTracker())
+        self.assertEqual(llm.provider_sdk_max_retries, 0)
+        self.assertEqual(
+            fake_openai.AsyncOpenAI.call_args.kwargs["max_retries"], 0
+        )
+        self.assertEqual(fake_openai.OpenAI.call_args.kwargs["max_retries"], 0)
+
     def test_first_valid_response_is_byte_exact_one_attempt_with_reported_model(self):
         observer = CollectingObserver()
         llm, client, _ = _openai(async_script=[(VALID, "HiggsAI")])
@@ -281,6 +340,19 @@ class OpenAIProviderAttemptTests(unittest.TestCase):
             json.loads(parse_result)["rationale"],
             "parse-retries-exhausted; holding",
         )
+        self.assertEqual(
+            parse_result,
+            json.dumps(
+                {
+                    "side": "hold",
+                    "quantity": 0,
+                    "limit_price": 101.0,
+                    "sentiment": 0.0,
+                    "public_take": "",
+                    "rationale": "parse-retries-exhausted; holding",
+                }
+            ),
+        )
         self.assertEqual(parse_llm.tracker.calls, 3)
         self.assertEqual(
             _outcomes(parse_observer), ["response_parse_failed"] * 3
@@ -306,6 +378,44 @@ class OpenAIProviderAttemptTests(unittest.TestCase):
         self.assertEqual(error_llm.tracker.calls, 0)
         self.assertEqual(_outcomes(error_observer), ["provider_exception"] * 3)
         self.assertEqual(sleep.await_count, 2)
+
+    def test_strict_fallbacks_carry_machine_terminal_status(self):
+        parse_llm, _, _ = _openai(async_script=[INVALID, INVALID, INVALID])
+        parse_llm.decision_response_schema = MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+        parse_llm.set_provider_attempt_contexts(
+            [_context(1, CollectingObserver())]
+        )
+        parse_result = json.loads(
+            asyncio.run(
+                parse_llm.acomplete("SYSTEM", "LATEST PRICE: 101\nUSER")
+            )
+        )
+        self.assertEqual(
+            parse_result[ADAPTER_TERMINAL_STATUS_FIELD],
+            PROVIDER_PARSE_EXHAUSTED,
+        )
+        self.assertEqual(
+            parse_result["rationale"], "parse-retries-exhausted; holding"
+        )
+
+        error_llm, _, _ = _openai(
+            async_script=[RuntimeError("one"), RuntimeError("two"), RuntimeError("three")]
+        )
+        error_llm.decision_response_schema = MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+        error_llm.set_provider_attempt_contexts(
+            [_context(2, CollectingObserver())]
+        )
+        with mock.patch("nmsim.llm.asyncio.sleep", new=mock.AsyncMock()):
+            error_result = json.loads(
+                asyncio.run(
+                    error_llm.acomplete("SYSTEM", "LATEST PRICE: 99\nUSER")
+                )
+            )
+        self.assertEqual(
+            error_result[ADAPTER_TERMINAL_STATUS_FIELD],
+            PROVIDER_EXCEPTION_EXHAUSTED,
+        )
+        self.assertEqual(error_result["rationale"], "api-error; holding")
 
     def test_observer_write_failure_propagates_without_retry_or_fallback(self):
         observer = CollectingObserver(fail=True)
@@ -354,6 +464,40 @@ class CorrelationCacheReplayTests(unittest.TestCase):
                 execution_context={"test_boundary": "provider-attempt-provenance"},
             ),
         }
+
+    def test_managed_alias_aggregation_preserves_mixed_invalid_evidence(self):
+        context = ManagedRunContext.create(
+            Config(
+                provider="mock",
+                n_rounds=1,
+                n_llm_agents=1,
+                n_noise_agents=0,
+                out_dir=str(self.root / "mixed-alias"),
+            ),
+            run_id="mixed-alias-evidence",
+            repo_root=REPO_ROOT,
+            command_identity="tests:mixed-alias-evidence",
+        )
+        provider, _, _ = _openai(
+            sync_script=[(VALID, "HiggsAI"), (VALID, " bad")]
+        )
+        recorder = RecordingLLM(
+            CachingLLM(provider, provider.tracker, enabled=False),
+            context.run_dir,
+            event_logger=context.events,
+            compatibility_metadata=context.replay_compatibility,
+        )
+        for index in range(2):
+            recorder.set_batch_context(
+                index + 1,
+                [{"agent_id": "a{}".format(index), "persona_id": "p"}],
+            )
+            recorder.complete("SYSTEM", "LATEST PRICE: 100\nUSER {}".format(index))
+        attempts = context.manifest["completion"][
+            "application_provider_attempts"
+        ]
+        self.assertEqual(attempts["reported_models"], ["HiggsAI"])
+        self.assertEqual(attempts["invalid_reported_model_alias_count"], 1)
 
     def test_recording_cache_miss_then_hit_emits_one_attempt_and_two_final_records(self):
         provider, _, client = _openai(sync_script=[VALID])

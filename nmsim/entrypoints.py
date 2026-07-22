@@ -181,6 +181,27 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
             "drive", "grid2x2", "sweep", "ablate", "lev2x2", "phase2b", "critsweep"
         )
     ),
+    _spec(
+        "experiments.multi_event", "experiments/multi_event.py",
+        "python3 -m experiments.multi_event",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DELEGATED_MANAGED_DRIVER,
+        (
+            "driver bootstrap",
+            "frozen protocol and source-byte validation",
+            "managed immutable execution plan",
+            "identity-gated experiments.run_seed attempts",
+            "immutable selection and retry ledger",
+        ),
+        (
+            "multi_event_plan.json",
+            "multi_event_selection.json",
+            "public/private technical-attempt ledgers",
+            "driver_summary.json",
+            "managed child runs",
+        ),
+        PROVIDER_INDIRECT, True,
+        "Dry-run constructs no Provider; real OpenAI-compatible children require --live and the exact frozen 144-slot protocol.",
+    ),
 
     # Derived research artifacts.  These do not run a market or call a Provider,
     # but their inputs and outputs still need immutable provenance.
@@ -191,6 +212,25 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         ("managed analysis attempt", "load per-run JSON", "aggregate", "export"),
         ("grid_summary.json", "envelope_2x2.png"), PROVIDER_NONE, True,
         "Management records the existing statistic; it does not validate its identification design.",
+    ),
+    _spec(
+        "experiments.aggregate_multi_event",
+        "experiments/aggregate_multi_event.py",
+        "python3 -m experiments.aggregate_multi_event",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT,
+        ANALYSIS_MANAGED,
+        (
+            "managed analysis attempt",
+            "validate finished driver parent and registered artifacts",
+            "validate explicit execution-plan selection partition",
+            "validate managed child identities and artifacts",
+            "complete-case clustered analysis",
+            "export",
+        ),
+        ("multi_event_summary.json", "multi_event_three_panel.png"),
+        PROVIDER_NONE,
+        True,
+        "Provider-free preregistered variance-components pilot; no globbing, legacy-flat promotion, or confirmatory significance claim.",
     ),
     _spec(
         "experiments.aggregate_seeds", "experiments/aggregate_seeds.py",

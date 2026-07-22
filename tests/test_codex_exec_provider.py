@@ -799,11 +799,11 @@ class CodexExecProviderTests(unittest.TestCase):
         )
         self.assertEqual(
             default_contract["scientific_config_hash"],
-            "891609d7ff29b8579fc51dd011c1ebcda9f2f8d8ef71c304a83211089fcc1b12",
+            "0d405ada90b2d8a3a3580e1b52db6a9ec23bfd35909b259a7ea8dace09542a5c",
         )
         self.assertEqual(
             default_contract["model_request_config_hash"],
-            "161ee24c72dcf446453c588654aba1e7694c0137b3bacd5eb8f6f071e869b960",
+            "3ebfb99a377b7184878b779fdbd252e2711dd847f167a3f85567478a11e6250a",
         )
 
         cfg = Config(provider="codex_exec", model="test-codex-model")

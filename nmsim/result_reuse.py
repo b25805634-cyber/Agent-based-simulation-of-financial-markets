@@ -10,7 +10,7 @@ managed child run merely because its filename looks familiar.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import json
 import os
@@ -20,12 +20,18 @@ from typing import Any, Mapping, Optional, Sequence
 
 from .config_contract import build_effective_config_contract
 from .fingerprint import scientific_compatibility_metadata
-from .provenance import MANIFEST_SCHEMA_VERSION, sha256_file
+from .provenance import (
+    MANIFEST_SCHEMA_VERSION,
+    SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION,
+    scientific_runtime_environment_identity,
+    sha256_file,
+)
+from .provider_attempts import safe_reported_model
 from .recording import runtime_model_config
 from .recording_schema import CURRENT_RECORDING_SCHEMA_VERSION
 
 
-RESULT_REUSE_POLICY_VERSION = "1.0"
+RESULT_REUSE_POLICY_VERSION = "1.1"
 
 MANIFEST_MISSING = "manifest_missing"
 MANIFEST_INVALID = "manifest_invalid"
@@ -63,6 +69,9 @@ UNSAFE_ARTIFACT_PATH = "unsafe_artifact_path"
 LEGACY_LINK_IDENTITY_MISMATCH = "legacy_link_identity_mismatch"
 LEGACY_FLAT_RESULT_UNVERIFIED = "legacy_flat_result_unverified"
 HEALTH_GATE_REJECTED = "health_gate_rejected"
+EXPERIMENT_SLOT_MISMATCH = "experiment_slot_mismatch"
+REPORTED_MODEL_GATE_REJECTED = "reported_model_gate_rejected"
+RUNTIME_ENVIRONMENT_MISMATCH = "runtime_environment_mismatch"
 
 REUSE_REASON_CODES = frozenset(
     {
@@ -102,11 +111,37 @@ REUSE_REASON_CODES = frozenset(
         LEGACY_LINK_IDENTITY_MISMATCH,
         LEGACY_FLAT_RESULT_UNVERIFIED,
         HEALTH_GATE_REJECTED,
+        EXPERIMENT_SLOT_MISMATCH,
+        REPORTED_MODEL_GATE_REJECTED,
+        RUNTIME_ENVIRONMENT_MISMATCH,
     }
 )
 
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _RUN_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_MULTI_EVENT_RESULT_KEYS = frozenset(
+    {
+        "schema_version",
+        "protocol_sha256",
+        "event_id",
+        "arm",
+        "seed",
+        "repeat_idx",
+        "reference_csv_sha256",
+        "news_timeline_sha256",
+        "reference_transform_sha256",
+    }
+)
+_MULTI_EVENT_MATERIAL_KEYS = frozenset(
+    {
+        *_MULTI_EVENT_RESULT_KEYS,
+        "catalog_sha256",
+        "event_definition_sha256",
+        "reference_transform_id",
+        "timeline_transform_sha256",
+        "combined_transform_sha256",
+    }
+)
 
 
 class ResultReuseError(ValueError):
@@ -188,6 +223,13 @@ class ChildRunIdentity:
     temperature: float
     max_tokens: int
     cache_enabled: bool
+    experiment_slot: Optional[Mapping[str, Any]]
+    multi_event_identity: Optional[Mapping[str, Any]]
+    multi_event_material_identity: Optional[Mapping[str, Any]]
+    scientific_runtime_environment: Optional[Mapping[str, Any]]
+    scientific_runtime_environment_identity: Optional[str]
+    reported_model_aliases: Optional[tuple[str, ...]]
+    invalid_reported_model_alias_count: Optional[int]
     artifacts: tuple[ArtifactIdentity, ...]
     legacy_links: tuple[LegacyLinkIdentity, ...]
     git_commit: Optional[str]
@@ -227,6 +269,27 @@ class ChildRunIdentity:
             git = _mapping(raw, "git")
 
             input_identity, reference_hash = _input_identity(raw.get("inputs"))
+            experiment_slot = _optional_experiment_slot(
+                raw.get("experiment_slot")
+            )
+            multi_event_identity = _manifest_multi_event_identity(
+                raw, experiment_slot
+            )
+            multi_event_material_identity = (
+                _manifest_multi_event_material_identity(
+                    raw, experiment_slot, multi_event_identity
+                )
+            )
+            (
+                reported_model_aliases,
+                invalid_reported_model_alias_count,
+            ) = _manifest_reported_model_aliases(
+                raw, experiment_slot
+            )
+            (
+                runtime_environment,
+                runtime_environment_identity,
+            ) = _manifest_runtime_environment_identity(raw, experiment_slot)
             artifacts = _artifact_identities(raw.get("results"))
             legacy_links = _legacy_link_identities(raw.get("compatibility"))
             endpoint_identity = _endpoint_identity(raw, model_config)
@@ -291,6 +354,17 @@ class ChildRunIdentity:
                 temperature=_required_number(llm, "temperature"),
                 max_tokens=_required_int(llm, "max_tokens"),
                 cache_enabled=_required_bool(llm, "cache_enabled"),
+                experiment_slot=experiment_slot,
+                multi_event_identity=multi_event_identity,
+                multi_event_material_identity=multi_event_material_identity,
+                scientific_runtime_environment=runtime_environment,
+                scientific_runtime_environment_identity=(
+                    runtime_environment_identity
+                ),
+                reported_model_aliases=reported_model_aliases,
+                invalid_reported_model_alias_count=(
+                    invalid_reported_model_alias_count
+                ),
                 artifacts=artifacts,
                 legacy_links=legacy_links,
                 git_commit=_optional_text(git.get("commit")),
@@ -345,6 +419,11 @@ class ExpectedRunIdentity:
     temperature: float
     max_tokens: int
     cache_enabled: bool
+    experiment_slot: Optional[Mapping[str, Any]]
+    multi_event_identity: Optional[Mapping[str, Any]]
+    multi_event_material_identity: Optional[Mapping[str, Any]]
+    scientific_runtime_environment: Optional[Mapping[str, Any]]
+    scientific_runtime_environment_identity: Optional[str]
     required_artifacts: tuple[str, ...]
     git_commit: Optional[str]
 
@@ -389,6 +468,15 @@ class ExpectedRunIdentity:
             temperature=child.temperature,
             max_tokens=child.max_tokens,
             cache_enabled=child.cache_enabled,
+            experiment_slot=child.experiment_slot,
+            multi_event_identity=child.multi_event_identity,
+            multi_event_material_identity=child.multi_event_material_identity,
+            scientific_runtime_environment=(
+                child.scientific_runtime_environment
+            ),
+            scientific_runtime_environment_identity=(
+                child.scientific_runtime_environment_identity
+            ),
             required_artifacts=required,
             git_commit=child.git_commit if git_commit is None else git_commit,
         )
@@ -418,6 +506,10 @@ class ExpectedRunIdentity:
         input_paths: Any = None,
         repo_root: Optional[os.PathLike[str] | str] = None,
         base_dir: Optional[os.PathLike[str] | str] = None,
+        experiment_slot: Optional[Mapping[str, Any]] = None,
+        multi_event_identity: Optional[Mapping[str, Any]] = None,
+        multi_event_material_identity: Optional[Mapping[str, Any]] = None,
+        effective_environment: Optional[Mapping[str, str]] = None,
     ) -> "ExpectedRunIdentity":
         """Build the pre-execution identity without constructing a Provider.
 
@@ -438,7 +530,12 @@ class ExpectedRunIdentity:
         working = Path(base_dir or Path.cwd()).resolve()
         source = scientific_compatibility_metadata(root)
         contract = build_effective_config_contract(cfg, base_dir=working)
-        model_config = runtime_model_config(cfg)
+        environment = (
+            os.environ
+            if effective_environment is None
+            else effective_environment
+        )
+        model_config = runtime_model_config(cfg, environment=environment)
         input_identity, reference_hash = _effective_input_identity(
             cfg, input_paths=input_paths, base_dir=working
         )
@@ -449,15 +546,20 @@ class ExpectedRunIdentity:
             model_config.get("endpoint_sha256"),
         )
         requested_provider = str(
-            os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
+            environment.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
         )
         requested_model = (
-            os.environ.get("LLM_MODEL") or getattr(cfg, "model", "") or None
+            environment.get("LLM_MODEL") or getattr(cfg, "model", "") or None
         )
         resolved_provider = str(model_config.get("resolved_provider") or "")
         resolved_model = _resolved_model_without_provider(cfg, model_config)
         if not resolved_provider or not resolved_model:
             raise ResultReuseError(MANIFEST_INVALID, "resolved_model_identity")
+        runtime_environment = (
+            scientific_runtime_environment_identity()
+            if experiment_slot is not None
+            else None
+        )
         return cls(
             run_kind=str(run_kind),
             command_identity=str(command_identity),
@@ -492,6 +594,33 @@ class ExpectedRunIdentity:
             temperature=float(getattr(cfg, "temperature")),
             max_tokens=int(getattr(cfg, "max_tokens")),
             cache_enabled=bool(getattr(cfg, "cache_enabled")),
+            experiment_slot=(
+                _optional_experiment_slot(experiment_slot)
+                if experiment_slot is not None
+                else None
+            ),
+            multi_event_identity=(
+                _normalize_multi_event_result_identity(multi_event_identity)
+                if multi_event_identity is not None
+                else None
+            ),
+            multi_event_material_identity=(
+                _normalize_multi_event_material_identity(
+                    multi_event_material_identity
+                )
+                if multi_event_material_identity is not None
+                else None
+            ),
+            scientific_runtime_environment=(
+                runtime_environment["environment"]
+                if runtime_environment is not None
+                else None
+            ),
+            scientific_runtime_environment_identity=(
+                runtime_environment["sha256"]
+                if runtime_environment is not None
+                else None
+            ),
             required_artifacts=required,
             git_commit=_optional_text(source.get("git_commit")),
         )
@@ -753,6 +882,47 @@ def validate_child_run_reuse(
     )
     for actual, wanted, code in comparisons:
         _mismatch(reasons, actual, wanted, code)
+    # Policy 1.1 is additive: a legacy caller that does not expect a slot keeps
+    # the complete 1.0 compatibility behavior.  A multi-event caller fails
+    # closed when the child omits or changes any canonical slot field.
+    if expected.experiment_slot is not None:
+        _mismatch(
+            reasons,
+            child.experiment_slot,
+            expected.experiment_slot,
+            EXPERIMENT_SLOT_MISMATCH,
+        )
+        _mismatch(
+            reasons,
+            child.multi_event_identity,
+            expected.multi_event_identity,
+            RESULT_IDENTITY_MISMATCH,
+        )
+        _mismatch(
+            reasons,
+            child.multi_event_material_identity,
+            expected.multi_event_material_identity,
+            RESULT_IDENTITY_MISMATCH,
+        )
+        _mismatch(
+            reasons,
+            (
+                child.scientific_runtime_environment,
+                child.scientific_runtime_environment_identity,
+            ),
+            (
+                expected.scientific_runtime_environment,
+                expected.scientific_runtime_environment_identity,
+            ),
+            RUNTIME_ENVIRONMENT_MISMATCH,
+        )
+        aliases = child.reported_model_aliases
+        if (
+            aliases is None
+            or (expected.requested_provider == "openai" and len(aliases) != 1)
+            or (expected.requested_provider == "mock" and aliases != ())
+        ):
+            reasons.append(REPORTED_MODEL_GATE_REJECTED)
     if not child.population_complete:
         reasons.append(POPULATION_MISMATCH)
 
@@ -869,6 +1039,262 @@ def _stable_hash(value: Any) -> str:
     return hashlib.sha256(_canonical_json(value)).hexdigest()
 
 
+def _optional_experiment_slot(value: Any) -> Optional[Mapping[str, Any]]:
+    if value is None:
+        return None
+    try:
+        from .multi_event import validate_experiment_slot
+
+        return validate_experiment_slot(value)
+    except (TypeError, ValueError) as error:
+        raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH) from error
+
+
+def _input_hashes_by_label(value: Any) -> dict[str, str]:
+    if not isinstance(value, list):
+        raise ResultReuseError(MANIFEST_INVALID, "inputs")
+    result: dict[str, str] = {}
+    for item in value:
+        if not isinstance(item, Mapping):
+            raise ResultReuseError(MANIFEST_INVALID, "inputs")
+        label = _required_text(item, "label")
+        if label in result:
+            raise ResultReuseError(MANIFEST_INVALID, "inputs")
+        result[label] = _required_hash(item, "sha256")
+    return result
+
+
+def _manifest_multi_event_identity(
+    raw: Mapping[str, Any],
+    slot: Optional[Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    value = raw.get("multi_event")
+    if slot is None:
+        if value is None:
+            return None
+        raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH)
+    if not isinstance(value, Mapping):
+        raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH)
+    try:
+        protocol_hash = _required_hash(value, "protocol_sha256")
+        reference_hash = _required_hash(value, "reference_csv_sha256")
+        timeline_hash = _required_hash(value, "news_timeline_sha256")
+        transform_hash = _required_hash(value, "reference_transform_sha256")
+        if value.get("schema_version") != "1.0":
+            raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH)
+        if value.get("event_id") != slot["event_id"]:
+            raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH)
+        if protocol_hash != slot["protocol_hash"]:
+            raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH)
+        input_hashes = _input_hashes_by_label(raw.get("inputs"))
+        expected_inputs = {
+            "reference_path": reference_hash,
+            "news_timeline_jsonl": timeline_hash,
+            "multi_event_protocol": protocol_hash,
+            "reference_catalog": _required_hash(value, "catalog_sha256"),
+        }
+        if any(input_hashes.get(label) != digest for label, digest in expected_inputs.items()):
+            raise ResultReuseError(INPUT_IDENTITY_MISMATCH)
+    except KeyError as error:
+        raise ResultReuseError(EXPERIMENT_SLOT_MISMATCH) from error
+    return {
+        "schema_version": "1.0",
+        "protocol_sha256": protocol_hash,
+        "event_id": slot["event_id"],
+        "arm": slot["social_arm"],
+        "seed": slot["seed"],
+        "repeat_idx": slot["repeat_idx"],
+        "reference_csv_sha256": reference_hash,
+        "news_timeline_sha256": timeline_hash,
+        "reference_transform_sha256": transform_hash,
+    }
+
+
+def _normalize_multi_event_result_identity(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or frozenset(value) != _MULTI_EVENT_RESULT_KEYS:
+        raise ResultReuseError(RESULT_IDENTITY_MISMATCH, "multi_event_identity")
+    try:
+        normalized = {
+            "schema_version": "1.0",
+            "protocol_sha256": _required_hash(value, "protocol_sha256"),
+            "event_id": _required_text(value, "event_id"),
+            "arm": _required_text(value, "arm"),
+            "seed": _required_int(value, "seed"),
+            "repeat_idx": _required_int(value, "repeat_idx"),
+            "reference_csv_sha256": _required_hash(
+                value, "reference_csv_sha256"
+            ),
+            "news_timeline_sha256": _required_hash(
+                value, "news_timeline_sha256"
+            ),
+            "reference_transform_sha256": _required_hash(
+                value, "reference_transform_sha256"
+            ),
+        }
+    except ResultReuseError as error:
+        raise ResultReuseError(
+            RESULT_IDENTITY_MISMATCH, "multi_event_identity"
+        ) from error
+    if (
+        value.get("schema_version") != "1.0"
+        or normalized["arm"] not in {"social_on", "social_off"}
+        or normalized["repeat_idx"] < 1
+        or dict(value) != normalized
+    ):
+        raise ResultReuseError(RESULT_IDENTITY_MISMATCH, "multi_event_identity")
+    return normalized
+
+
+def _normalize_multi_event_material_identity(value: Any) -> Mapping[str, Any]:
+    if not isinstance(value, Mapping) or frozenset(value) != _MULTI_EVENT_MATERIAL_KEYS:
+        raise ResultReuseError(
+            RESULT_IDENTITY_MISMATCH, "multi_event_material_identity"
+        )
+    result = _normalize_multi_event_result_identity(
+        {key: value[key] for key in _MULTI_EVENT_RESULT_KEYS}
+    )
+    try:
+        normalized = {
+            **result,
+            "catalog_sha256": _required_hash(value, "catalog_sha256"),
+            "event_definition_sha256": _required_hash(
+                value, "event_definition_sha256"
+            ),
+            "reference_transform_id": _required_text(
+                value, "reference_transform_id"
+            ),
+            "timeline_transform_sha256": _required_hash(
+                value, "timeline_transform_sha256"
+            ),
+            "combined_transform_sha256": _required_hash(
+                value, "combined_transform_sha256"
+            ),
+        }
+    except ResultReuseError as error:
+        raise ResultReuseError(
+            RESULT_IDENTITY_MISMATCH, "multi_event_material_identity"
+        ) from error
+    if dict(value) != normalized:
+        raise ResultReuseError(
+            RESULT_IDENTITY_MISMATCH, "multi_event_material_identity"
+        )
+    return normalized
+
+
+def _manifest_multi_event_material_identity(
+    raw: Mapping[str, Any],
+    slot: Optional[Mapping[str, Any]],
+    result_identity: Optional[Mapping[str, Any]],
+) -> Optional[Mapping[str, Any]]:
+    if slot is None:
+        return None
+    value = raw.get("multi_event")
+    if not isinstance(value, Mapping) or result_identity is None:
+        raise ResultReuseError(RESULT_IDENTITY_MISMATCH, "multi_event")
+    candidate = {
+        **result_identity,
+        "catalog_sha256": value.get("catalog_sha256"),
+        "event_definition_sha256": value.get("event_definition_sha256"),
+        "reference_transform_id": value.get("reference_transform_id"),
+        "timeline_transform_sha256": value.get("timeline_transform_sha256"),
+        "combined_transform_sha256": value.get("combined_transform_sha256"),
+    }
+    return _normalize_multi_event_material_identity(candidate)
+
+
+def _normalized_aliases(value: Any) -> tuple[str, ...]:
+    if not isinstance(value, list) or any(
+        safe_reported_model(alias) != alias for alias in value
+    ):
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    aliases = tuple(value)
+    if list(aliases) != sorted(set(aliases)):
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    return aliases
+
+
+def _manifest_runtime_environment_identity(
+    raw: Mapping[str, Any], slot: Optional[Mapping[str, Any]]
+) -> tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    environment = raw.get("environment")
+    if not isinstance(environment, Mapping):
+        if slot is None:
+            return None, None
+        raise ResultReuseError(MANIFEST_INVALID, "environment")
+    runtime = environment.get("scientific_runtime_environment")
+    digest = environment.get("scientific_runtime_environment_identity")
+    if runtime is None and digest is None and slot is None:
+        return None, None
+    if not isinstance(runtime, Mapping) or not isinstance(digest, str):
+        raise ResultReuseError(MANIFEST_INVALID, "scientific_runtime_environment")
+    expected_keys = {
+        "schema_version",
+        "python_implementation",
+        "python_version",
+        "platform",
+        "architecture",
+        "dependencies",
+    }
+    dependencies = runtime.get("dependencies")
+    if (
+        set(runtime) != expected_keys
+        or runtime.get("schema_version")
+        != SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION
+        or not all(
+            isinstance(runtime.get(field), str) and runtime.get(field)
+            for field in (
+                "python_implementation",
+                "python_version",
+                "platform",
+                "architecture",
+            )
+        )
+        or not isinstance(dependencies, Mapping)
+        or set(dependencies)
+        != {"numpy", "matplotlib", "anthropic", "openai", "httpx"}
+        or any(
+            value is not None and (not isinstance(value, str) or not value)
+            for value in dependencies.values()
+        )
+        or not _HEX_SHA256.fullmatch(digest)
+        or _stable_hash(runtime) != digest
+    ):
+        raise ResultReuseError(MANIFEST_INVALID, "scientific_runtime_environment")
+    return dict(runtime), digest
+
+
+def _manifest_reported_model_aliases(
+    raw: Mapping[str, Any], slot: Optional[Mapping[str, Any]]
+) -> tuple[Optional[tuple[str, ...]], Optional[int]]:
+    if slot is None:
+        return None, None
+    multi_event = raw.get("multi_event")
+    completion = raw.get("completion")
+    if not isinstance(multi_event, Mapping) or not isinstance(completion, Mapping):
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    attempts = completion.get("application_provider_attempts")
+    if (
+        not isinstance(attempts, Mapping)
+        or attempts.get("reported_models_truncated") is not False
+    ):
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    invalid_count = attempts.get("invalid_reported_model_alias_count")
+    if (
+        isinstance(invalid_count, bool)
+        or not isinstance(invalid_count, int)
+        or invalid_count != 0
+        or multi_event.get("invalid_reported_model_alias_count") != 0
+    ):
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    manifest_aliases = _normalized_aliases(
+        multi_event.get("reported_model_aliases")
+    )
+    completion_aliases = _normalized_aliases(attempts.get("reported_models"))
+    if manifest_aliases != completion_aliases:
+        raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
+    return manifest_aliases, invalid_count
+
+
 def _input_identity(value: Any) -> tuple[str, Optional[str]]:
     if not isinstance(value, list):
         raise ResultReuseError(MANIFEST_INVALID, "inputs")
@@ -940,10 +1366,29 @@ def _scenario_definition_hash(cfg: Any) -> str:
             "n_rounds": getattr(cfg, "n_rounds", None),
             "news_round": getattr(cfg, "news_round", None),
             "news_text": getattr(cfg, "news_text", None),
+            "news_timeline": _scenario_jsonable(
+                getattr(cfg, "news_timeline", ())
+            ),
             "population": getattr(cfg, "population", None),
             "seed_fraction": getattr(cfg, "seed_fraction", None),
         }
     )
+
+
+def _scenario_jsonable(value: Any) -> Any:
+    """Mirror provenance._jsonable for the offline scenario identity."""
+
+    if is_dataclass(value):
+        return _scenario_jsonable(asdict(value))
+    if isinstance(value, Mapping):
+        return {str(key): _scenario_jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set, frozenset)):
+        return [_scenario_jsonable(item) for item in value]
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return repr(value)
 
 
 def _resolved_model_without_provider(
@@ -1293,7 +1738,7 @@ def _verify_result_identity(child: ChildRunIdentity) -> list[str]:
         result_completion = _mapping(result, "completion")
         run_completion = _mapping(result_completion, "simulation_runs")
         decisions = _mapping(result_completion, "agent_decisions")
-        checks = (
+        checks = [
             result.get("run_id") == child.run_id,
             result.get("seed") == child.seed,
             result.get("model") == child.resolved_model,
@@ -1302,7 +1747,38 @@ def _verify_result_identity(child: ChildRunIdentity) -> list[str]:
             decisions.get("completed") == child.agent_decisions_completed,
             decisions.get("failed") == child.agent_decisions_failed,
             _stable_hash(result_completion) == child.completion_identity,
-        )
+        ]
+        if child.experiment_slot is not None:
+            material = {
+                **dict(child.multi_event_identity or {}),
+                "catalog_sha256": result.get("catalog_sha256"),
+                "event_definition_sha256": result.get(
+                    "event_definition_sha256"
+                ),
+                "reference_transform_id": result.get("reference_transform_id"),
+                "timeline_transform_sha256": result.get(
+                    "timeline_transform_sha256"
+                ),
+                "combined_transform_sha256": result.get(
+                    "combined_transform_sha256"
+                ),
+            }
+            checks.extend(
+                (
+                    result.get("experiment_slot") == child.experiment_slot,
+                    result.get("multi_event_identity")
+                    == child.multi_event_identity,
+                    result.get("repeat_idx")
+                    == child.experiment_slot["repeat_idx"],
+                    result.get("rep")
+                    == child.experiment_slot["repeat_idx"],
+                    tuple(result.get("reported_model_aliases", ()))
+                    == child.reported_model_aliases,
+                    result.get("invalid_reported_model_alias_count")
+                    == child.invalid_reported_model_alias_count,
+                    material == child.multi_event_material_identity,
+                )
+            )
         return [] if all(checks) else [RESULT_IDENTITY_MISMATCH]
     except (OSError, UnicodeError, json.JSONDecodeError, ResultReuseError):
         return [RESULT_IDENTITY_MISMATCH]
@@ -1311,6 +1787,9 @@ def _verify_result_identity(child: ChildRunIdentity) -> list[str]:
 __all__ = [
     "RESULT_REUSE_POLICY_VERSION",
     "REUSE_REASON_CODES",
+    "EXPERIMENT_SLOT_MISMATCH",
+    "REPORTED_MODEL_GATE_REJECTED",
+    "RUNTIME_ENVIRONMENT_MISMATCH",
     "ArtifactIdentity",
     "ChildRunIdentity",
     "ExpectedRunIdentity",

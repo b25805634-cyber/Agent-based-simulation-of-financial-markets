@@ -91,7 +91,9 @@ class RunProvenanceTests(unittest.TestCase):
         self.assertEqual(manifest["scenario"]["id"], "unit-scenario")
         self.assertEqual(manifest["rng"]["seed"], self.cfg.seed)
 
-        original_config = asdict(self.cfg)
+        # Normalize tuple-backed immutable config fields through JSON before
+        # comparing them with the persisted JSON manifest representation.
+        original_config = json.loads(json.dumps(asdict(self.cfg)))
         self.assertEqual(set(manifest["config"]), set(original_config))
         self.assertEqual(manifest["config"]["openai_api_key"], "<redacted>")
         for key, expected in original_config.items():

@@ -17,6 +17,7 @@ import threading
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from .config import Config
+from .provider_attempts import safe_reported_model
 from .provenance import RunManager, redact_secrets
 
 
@@ -146,6 +147,7 @@ def completion_template(
             "exhausted_logical_requests": 0,
             "reported_models": [],
             "reported_models_truncated": False,
+            "invalid_reported_model_alias_count": 0,
             "coverage": (
                 "OpenAI/Anthropic application retry loops only; excludes SDK, "
                 "transport, proxy, and server-internal retries"
@@ -471,7 +473,13 @@ class ManagedRunContext:
                     and outcome in {"response_parse_failed", "provider_exception"}
                 ):
                     attempts["exhausted_logical_requests"] += 1
-                reported_model = data.get("reported_model")
+                raw_reported_model = data.get("reported_model")
+                reported_model = safe_reported_model(raw_reported_model)
+                invalid_alias = data.get("reported_model_alias_invalid") is True
+                if invalid_alias or (
+                    raw_reported_model is not None and reported_model is None
+                ):
+                    attempts["invalid_reported_model_alias_count"] += 1
                 reported_models = attempts["reported_models"]
                 if (
                     isinstance(reported_model, str)
@@ -488,11 +496,21 @@ class ManagedRunContext:
                 parsing = completion["parsing"]
                 parsing["attempted"] += 1
                 parse_failed = data.get("parse_status") == "error"
-                rationale = str(private_data.get("private_rationale") or "")
-                fallback = parse_failed or rationale in {
-                    "api-error; holding",
-                    "parse-retries-exhausted; holding",
-                }
+                if data.get("decision_response_schema") is None:
+                    # Preserve legacy null-schema accounting. Strict studies
+                    # below never infer outcome from model-authored rationale.
+                    rationale = str(
+                        private_data.get("private_rationale") or ""
+                    )
+                    fallback = parse_failed or rationale in {
+                        "api-error; holding",
+                        "parse-retries-exhausted; holding",
+                    }
+                else:
+                    fallback = parse_failed or data.get("terminal_status") in {
+                        "provider_exception_exhausted",
+                        "provider_parse_exhausted",
+                    }
                 if parse_failed:
                     parsing["failed"] += 1
                 else:

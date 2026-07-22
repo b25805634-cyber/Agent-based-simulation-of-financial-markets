@@ -246,9 +246,13 @@ def dtw_distance(a: list[float], b: list[float]):
     return total, total / path_len
 
 
-def compare_to_reference(sim_prices: list[float], sim_shock: int,
-                         ref_path: str) -> dict:
-    """Compare a simulated path to a real episode.
+def compare_to_reference_prices(
+    sim_prices: list[float],
+    sim_shock: int,
+    ref_prices: list[float],
+    ref_shock: int,
+) -> dict:
+    """Compare simulated prices with an already validated reference path.
 
     PRIMARY: trajectory distance over the whole shock-aligned path
       - rmse_logprice : RMSE of normalized log-price (main score; lower = closer)
@@ -256,7 +260,6 @@ def compare_to_reference(sim_prices: list[float], sim_shock: int,
     SUPPLEMENTARY (kept, but no longer the whole story):
       - depth / speed / recovery match of the 3-point reaction shape.
     """
-    ref_prices, ref_shock = load_reference(ref_path)
     sim_r = reaction_shape(sim_prices, sim_shock)
     ref_r = reaction_shape(ref_prices, ref_shock)
 
@@ -292,3 +295,18 @@ def compare_to_reference(sim_prices: list[float], sim_shock: int,
                 ref_r.speed / max(1, len(ref_prices) - ref_shock))),
         },
     }
+
+
+def compare_to_reference(sim_prices: list[float], sim_shock: int,
+                         ref_path: str) -> dict:
+    """Compare a simulated path to a reference CSV.
+
+    This compatibility wrapper retains the established CSV loading semantics;
+    multi-event callers pass their explicitly transformed path to
+    :func:`compare_to_reference_prices` instead.
+    """
+
+    ref_prices, ref_shock = load_reference(ref_path)
+    return compare_to_reference_prices(
+        sim_prices, sim_shock, ref_prices, ref_shock
+    )
