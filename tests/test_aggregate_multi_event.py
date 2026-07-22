@@ -809,7 +809,7 @@ class AggregateMultiEventTests(unittest.TestCase):
             ), redirect_stderr(stderr), self.assertRaises(SystemExit) as failed:
                 A.main(
                     [
-                        "--input-manifest", "not-read-because-claim-gate.json",
+                        "--driver-manifest", "not-read-because-claim-gate.json",
                         "--child-root", str(root),
                         "--out", str(out),
                         "--require-confirmatory",
@@ -845,12 +845,14 @@ class AggregateMultiEventTests(unittest.TestCase):
                     "protocol": A.PROTOCOL_PATH,
                     "analysis_selection": selection_path,
                 },
+                selection_path,
+                "mock-driver-parent",
             )
             references = {
                 event["event_id"]: _path(event["event_id"])
                 for event in self.protocol["design"]["events"]
             }
-            with mock.patch.object(A, "prepare_selection", return_value=prepared), mock.patch.object(
+            with mock.patch.object(A, "prepare_driver_selection", return_value=prepared), mock.patch.object(
                 A,
                 "validate_selected_children",
                 return_value=(
@@ -865,7 +867,7 @@ class AggregateMultiEventTests(unittest.TestCase):
             ), redirect_stdout(io.StringIO()):
                 A.main(
                     [
-                        "--input-manifest", str(selection_path),
+                        "--driver-manifest", str(selection_path),
                         "--child-root", str(root),
                         "--reference-root", str(root),
                         "--out", str(out),
