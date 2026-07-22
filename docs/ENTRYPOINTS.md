@@ -105,6 +105,7 @@ limitations, and Phase 1.1B must not alter their numerical formulas.
 | Entrypoint | Actual input → output | Phase 1.1A overwrite behavior | Formal research after 1.1B |
 |---|---|---|---|
 | experiments.aggregate_grid | per-cell result JSON → grid_summary.json and envelope_2x2.png | write/savefig replace flat paths (aggregate_grid.py:112-168) | Yes after analysis management; retain independent-sample/health-filter caveats |
+| experiments.aggregate_multi_event | explicit execution-plan selection + identity-validated managed children + hashed catalog/event inputs → complete-case event/cross-event estimates, multi_event_summary.json and three-panel PNG | New in Wave 1 | Yes, analysis_managed and Provider-free; live adherence partitions all 144 preregistered slots, while a smaller mock subset is explicitly non-adherent engineering output with no realism-claim eligibility; no glob or legacy-flat input |
 | experiments.aggregate_seeds | gain/seed JSON → summary JSON and envelope PNG | replaces flat outputs (aggregate_seeds.py:80-118) | Yes after analysis management; historical gain semantics remain explicit |
 | experiments.aggregate_sweep | paired sweep JSON → stdout statistics and sweep_main.png | replaces plot (aggregate_sweep.py:125-126) | Yes after analysis management; do not silently change historical CI |
 | experiments.calib_n | calibration replicate JSON → calib_N.txt | replaces file (calib_n.py:54-55) | Yes; this file becomes scientific input to the next stage |
@@ -194,7 +195,7 @@ no-scientific-semantics-change statement.
 | experiments.additive_test | load result JSON → print regressions and CI | No | No | No |
 | python3 -m unittest discover -s tests -v | test discovery and helpers/low-level APIs | Temporary files only | No real Provider | No |
 
-The seventeen test files that also have standalone unittest.main guards are:
+The eighteen test files that also have standalone unittest.main guards are:
 
 - tests/test_phase1_integration.py
 - tests/test_privacy_invariant.py
@@ -213,6 +214,7 @@ The seventeen test files that also have standalone unittest.main guards are:
 - tests/test_model_qualification.py
 - tests/test_codex_exec_provider.py
 - tests/test_endpoint_stochasticity.py
+- tests/test_aggregate_multi_event.py
 
 They share the test-suite registry policy; individual execution does not create
 a formal research run.

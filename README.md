@@ -120,6 +120,18 @@ manifest-free flat result is preserved and does not count as completion.
 Historical flat files may still be used by an explicitly managed analysis as
 hashed `legacy_unverified_input`; that is analysis input, not child-run reuse.
 
+`experiments.aggregate_multi_event` is the Provider-free managed analyzer for
+the Wave 1 N=8/K=3 variance-components pilot. It accepts one explicit selection
+manifest whose accepted children and missing/rejected slots exactly partition
+the declared execution plan: all 144 cells for protocol-adherent live work, or
+an explicitly labeled smaller mock-only engineering grid. It revalidates
+managed identities and artifacts, and emits event-complete and
+cross-event-intersection honest N. Mock/non-adherent output is never eligible
+for a preregistered realism claim. The pilot's fixed
+qualitative matching criterion is distinct from its paired social estimand and
+is not confirmatory significance evidence. See
+[`docs/MULTI_EVENT_PROTOCOL.md`](docs/MULTI_EVENT_PROTOCOL.md).
+
 `experiments.model_qualification` is a managed non-market entrypoint with
 `run_kind=model_qualification`. It freezes engineering checks and relative
 behavioral diagnostics before any real-model sampling; it is not a
