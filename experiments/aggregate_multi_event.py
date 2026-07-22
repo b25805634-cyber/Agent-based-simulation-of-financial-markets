@@ -10,7 +10,7 @@ network operation and is used by the synthetic numerical tests.
 """
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
@@ -58,6 +58,12 @@ PLOT_FILENAME = "multi_event_three_panel.png"
 ARMS = ("social_off", "social_on")
 RESULT_ARTIFACT = "experiment_result.json"
 RUN_SEED_COMMAND = "python -m experiments.run_seed"
+DRIVER_COMMAND = "experiments.multi_event"
+DRIVER_MANIFEST_FILENAME = "run_manifest.json"
+DRIVER_PLAN_FILENAME = "multi_event_plan.json"
+DRIVER_SELECTION_FILENAME = "multi_event_selection.json"
+DRIVER_ATTEMPT_LEDGER_FILENAME = "multi_event_attempts.jsonl"
+DRIVER_SUMMARY_FILENAME = "driver_summary.json"
 _HASH_HEX = frozenset("0123456789abcdef")
 
 
@@ -115,6 +121,8 @@ class PreparedSelection:
     declared_missing_or_rejected: tuple[Mapping[str, Any], ...]
     catalog_inputs: tuple[Path, ...]
     input_paths: Mapping[str, Path]
+    driver_manifest_path: Optional[Path] = None
+    driver_run_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -1116,6 +1124,411 @@ def prepare_selection(
     )
 
 
+def _registered_driver_artifacts(
+    manifest: Mapping[str, Any], run_dir: Path
+) -> Mapping[str, Path]:
+    """Re-hash every artifact registered by a finished driver parent."""
+
+    artifacts: dict[str, Path] = {}
+    for raw in _list(manifest.get("results"), "driver manifest results"):
+        item = _mapping(raw, "driver manifest results[]")
+        relative = Path(_text(item.get("path"), "driver result path"))
+        if (
+            relative.is_absolute()
+            or not relative.parts
+            or ".." in relative.parts
+            or item.get("inside_run_directory") is not True
+        ):
+            raise MultiEventInputError(
+                "driver result artifact must be a relative in-run path"
+            )
+        key = relative.as_posix()
+        if key in artifacts:
+            raise MultiEventInputError("driver result artifact path is duplicated")
+        try:
+            path = (run_dir / relative).resolve(strict=True)
+            path.relative_to(run_dir)
+        except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
+            raise MultiEventInputError(
+                "driver result artifact is missing or escapes its run"
+            ) from error
+        if (
+            not path.is_file()
+            or item.get("exists") is not True
+            or item.get("kind") != "file"
+            or item.get("error") is not None
+        ):
+            raise MultiEventInputError("driver result artifact is not a valid file")
+        expected_hash = _sha256(item.get("sha256"), "driver result sha256")
+        expected_size = _integer(item.get("size_bytes"), "driver result size_bytes")
+        try:
+            actual_size = path.stat().st_size
+        except OSError as error:
+            raise MultiEventInputError("driver result artifact cannot be stated") from error
+        if actual_size != expected_size or sha256_file(path) != expected_hash:
+            raise MultiEventInputError("registered driver artifact integrity mismatch")
+        artifacts[key] = path
+    required = {
+        DRIVER_PLAN_FILENAME,
+        DRIVER_SELECTION_FILENAME,
+        DRIVER_ATTEMPT_LEDGER_FILENAME,
+        DRIVER_SUMMARY_FILENAME,
+    }
+    if not required <= set(artifacts):
+        raise MultiEventInputError(
+            "driver parent did not register every required analysis artifact"
+        )
+    return artifacts
+
+
+def _read_jsonl_objects(path: Path, field: str) -> list[Mapping[str, Any]]:
+    records: list[Mapping[str, Any]] = []
+    try:
+        with path.open("r", encoding="utf-8") as handle:
+            for line_number, line in enumerate(handle, 1):
+                if not line.strip():
+                    raise MultiEventInputError(
+                        f"{field} contains a blank record at line {line_number}"
+                    )
+                try:
+                    value = json.loads(line)
+                except json.JSONDecodeError as error:
+                    raise MultiEventInputError(
+                        f"{field} contains invalid JSON at line {line_number}"
+                    ) from error
+                records.append(_mapping(value, f"{field} line {line_number}"))
+    except (OSError, UnicodeError) as error:
+        raise MultiEventInputError(f"{field} is unreadable") from error
+    return records
+
+
+def _driver_plan_cells(
+    plan: Mapping[str, Any],
+    *,
+    protocol: Mapping[str, Any],
+    execution_plan: Mapping[str, Any],
+) -> tuple[Mapping[tuple[str, str, int, int], Mapping[str, Any]], set[tuple[str, str, int, int]]]:
+    if plan.get("schema_version") != "multi_event_plan_v1":
+        raise MultiEventInputError("driver plan schema_version is unsupported")
+    if plan.get("protocol_sha256") != protocol_sha256():
+        raise MultiEventInputError("driver plan protocol SHA-256 mismatch")
+    if plan.get("dry_run") is not False or plan.get("pre_run_plan") is not True:
+        raise MultiEventInputError("analysis requires a non-dry-run precommitted plan")
+    listed_plan = _validated_execution_plan(plan.get("execution_plan"), protocol)
+    if dict(listed_plan) != dict(execution_plan):
+        raise MultiEventInputError("driver plan and selection execution plans disagree")
+    jobs: dict[tuple[str, str, int, int], Mapping[str, Any]] = {}
+    max_attempts = int(protocol["acceptance_and_execution"]["max_child_attempts"])
+    for raw in _list(plan.get("jobs"), "driver plan jobs"):
+        job = _mapping(raw, "driver plan jobs[]")
+        cell = _selection_slot(job, "driver plan jobs[]")
+        if cell in jobs:
+            raise MultiEventInputError("driver plan contains duplicate cells")
+        allowed = _list(
+            job.get("allowed_attempt_run_ids"),
+            "driver plan jobs[].allowed_attempt_run_ids",
+        )
+        if (
+            len(allowed) != max_attempts
+            or any(not isinstance(run_id, str) or not run_id for run_id in allowed)
+            or len(allowed) != len(set(allowed))
+        ):
+            raise MultiEventInputError(
+                "driver plan must freeze exactly five unique attempt run IDs per cell"
+            )
+        _text(job.get("attempt_series_id"), "driver plan jobs[].attempt_series_id")
+        jobs[cell] = job
+    planned = _planned_cells(protocol, execution_plan)
+    if set(jobs) != planned:
+        raise MultiEventInputError("driver plan jobs do not equal the execution grid")
+    all_allowed = [
+        run_id for job in jobs.values() for run_id in job["allowed_attempt_run_ids"]
+    ]
+    if len(all_allowed) != len(set(all_allowed)):
+        raise MultiEventInputError("attempt run IDs are not unique across plan cells")
+    return jobs, planned
+
+
+def _validate_driver_attempt_ledger(
+    records: Sequence[Mapping[str, Any]],
+    *,
+    jobs: Mapping[tuple[str, str, int, int], Mapping[str, Any]],
+    selection: Mapping[str, Any],
+) -> None:
+    """Bind durable launch/terminal records to the selected ordered prefixes."""
+
+    selected_by_cell: dict[tuple[str, str, int, int], Mapping[str, Any]] = {}
+    for field in ("children", "missing_or_rejected_slots"):
+        for raw in _list(selection.get(field), field):
+            item = _mapping(raw, f"{field}[]")
+            selected_by_cell[_selection_slot(item, f"{field}[]")] = item
+    by_run_id: dict[str, list[Mapping[str, Any]]] = {}
+    records_by_cell: dict[
+        tuple[str, str, int, int], list[Mapping[str, Any]]
+    ] = {cell: [] for cell in jobs}
+    for raw in records:
+        record = _mapping(raw, "driver attempt ledger[]")
+        cell = _selection_slot(record, "driver attempt ledger[]")
+        if cell not in jobs:
+            raise MultiEventInputError("attempt ledger contains an unplanned cell")
+        status = _text(record.get("status"), "attempt ledger status")
+        if status not in {"launched", "accepted", "rejected", "not_launched"}:
+            raise MultiEventInputError("attempt ledger status is unsupported")
+        run_id = record.get("run_id")
+        if run_id is None:
+            if status != "not_launched":
+                raise MultiEventInputError("only not_launched may omit run_id")
+        else:
+            run_id = _text(run_id, "attempt ledger run_id")
+            if run_id not in jobs[cell]["allowed_attempt_run_ids"]:
+                raise MultiEventInputError("attempt ledger run_id is not frozen by plan")
+            by_run_id.setdefault(run_id, []).append(record)
+        records_by_cell[cell].append(record)
+
+    for cell, job in jobs.items():
+        selected = selected_by_cell[cell]
+        selected_attempts = list(selected.get("attempt_run_ids", []))
+        allowed = list(job["allowed_attempt_run_ids"])
+        if selected_attempts != allowed[: len(selected_attempts)]:
+            raise MultiEventInputError(
+                "selection attempt_run_ids are not the plan's contiguous prefix"
+            )
+        ledger_attempts = [
+            run_id for run_id in allowed if run_id in by_run_id
+        ]
+        if ledger_attempts != selected_attempts:
+            raise MultiEventInputError(
+                "selection attempt prefix disagrees with durable attempt ledger"
+            )
+        accepted_run_ids: list[str] = []
+        for run_id in selected_attempts:
+            run_records = by_run_id[run_id]
+            statuses = [str(record["status"]) for record in run_records]
+            terminal = [status for status in statuses if status in {"accepted", "rejected"}]
+            resumed_terminal_only = bool(
+                len(statuses) == 1
+                and terminal
+                and run_records[0].get("source") == "resumed_attempt"
+            )
+            if not resumed_terminal_only and (
+                statuses[0] != "launched"
+                or len(statuses) != 2
+                or len(terminal) != 1
+            ):
+                raise MultiEventInputError(
+                    "each launched attempt requires one durable terminal transition"
+                )
+            if terminal == ["accepted"]:
+                accepted_run_ids.append(run_id)
+        if len(accepted_run_ids) > 1:
+            raise MultiEventInputError("one plan cell has multiple accepted attempts")
+        if accepted_run_ids and accepted_run_ids[0] != selected_attempts[-1]:
+            raise MultiEventInputError("attempts continue after an accepted child")
+        if "accepted_run_id" in selected:
+            if accepted_run_ids != [selected.get("accepted_run_id")]:
+                raise MultiEventInputError(
+                    "selection accepted child disagrees with attempt ledger"
+                )
+        else:
+            if accepted_run_ids:
+                raise MultiEventInputError(
+                    "selection omits a child accepted by the durable ledger"
+                )
+            status = selected.get("status")
+            if status == "missing" and selected_attempts:
+                raise MultiEventInputError("missing selection cell has attempts")
+            if status == "rejected" and not selected_attempts:
+                raise MultiEventInputError("rejected selection cell has no attempts")
+
+
+def prepare_driver_selection(
+    driver_manifest_path: Path,
+    *,
+    protocol: Mapping[str, Any],
+    protocol_path: Path,
+    child_root: Path,
+    reference_root: Path,
+) -> PreparedSelection:
+    """Derive analysis input only from one terminal registered driver parent."""
+
+    child_root = Path(child_root).resolve(strict=True)
+    supplied = Path(driver_manifest_path)
+    supplied = supplied if supplied.is_absolute() else child_root / supplied
+    if supplied.is_symlink():
+        raise MultiEventInputError("driver manifest trust anchor cannot be a symlink")
+    try:
+        manifest_path = supplied.resolve(strict=True)
+        manifest_path.relative_to(child_root)
+    except (FileNotFoundError, OSError, RuntimeError, ValueError) as error:
+        raise MultiEventInputError("driver manifest is missing or outside child-root") from error
+    run_dir = manifest_path.parent
+    if (
+        manifest_path.name != DRIVER_MANIFEST_FILENAME
+        or run_dir.parent.name != "runs"
+        or run_dir.parent.parent != child_root
+        or run_dir.name == ""
+    ):
+        raise MultiEventInputError(
+            "driver manifest must be child-root/runs/<run_id>/run_manifest.json"
+        )
+    manifest = _read_json(manifest_path, "driver parent manifest")
+    managed = _mapping(manifest.get("managed_context"), "managed_context")
+    if (
+        manifest.get("run_id") != run_dir.name
+        or manifest.get("status") != "finished"
+        or manifest.get("managed_run_completed") is not True
+        or manifest.get("outputs_complete") is not True
+        or manifest.get("failure_stage") is not None
+        or managed.get("state") != "FINISHED"
+        or managed.get("run_kind") != "experiment_driver"
+        or managed.get("command_identity") != DRIVER_COMMAND
+        or managed.get("full_validation_completed") is not True
+    ):
+        raise MultiEventInputError("driver parent is not a terminal multi-event run")
+    expected_protocol_hash = protocol_sha256(protocol_path)
+    parent_identity = _mapping(
+        manifest.get("multi_event_driver"), "multi_event_driver"
+    )
+    if parent_identity.get("protocol_sha256") != expected_protocol_hash:
+        raise MultiEventInputError("driver parent protocol SHA-256 mismatch")
+    expected_input_hashes = {
+        "protocol": expected_protocol_hash,
+        "catalog": protocol["reference_data_catalog"]["sha256"],
+    }
+    for index, event in enumerate(protocol["design"]["events"]):
+        expected_input_hashes[f"reference_{index:02d}"] = event[
+            "reference_csv_sha256"
+        ]
+        expected_input_hashes[f"timeline_{index:02d}"] = event[
+            "news_timeline_sha256"
+        ]
+    parent_inputs: dict[str, Mapping[str, Any]] = {}
+    for raw in _list(manifest.get("inputs"), "driver manifest inputs"):
+        item = _mapping(raw, "driver manifest inputs[]")
+        label = _text(item.get("label"), "driver manifest input label")
+        if label in parent_inputs:
+            raise MultiEventInputError("driver manifest input label is duplicated")
+        parent_inputs[label] = item
+    if set(parent_inputs) != set(expected_input_hashes):
+        raise MultiEventInputError("driver parent scientific input labels mismatch")
+    for label, expected_hash in expected_input_hashes.items():
+        item = parent_inputs[label]
+        if (
+            item.get("exists") is not True
+            or item.get("kind") != "file"
+            or item.get("error") is not None
+            or item.get("sha256") != expected_hash
+        ):
+            raise MultiEventInputError(
+                "driver parent scientific input identity mismatch"
+            )
+
+    artifacts = _registered_driver_artifacts(manifest, run_dir)
+    selection_path = artifacts[DRIVER_SELECTION_FILENAME]
+    plan = _read_json(artifacts[DRIVER_PLAN_FILENAME], "driver plan")
+    selection = _read_json(selection_path, "driver selection")
+    summary = _read_json(artifacts[DRIVER_SUMMARY_FILENAME], "driver summary")
+    execution_plan = _validated_execution_plan(
+        selection.get("execution_plan"), protocol
+    )
+    if (
+        parent_identity.get("execution_mode") != execution_plan["execution_mode"]
+        or parent_identity.get("protocol_adherence")
+        is not execution_plan["protocol_adherence"]
+    ):
+        raise MultiEventInputError("driver parent execution identity mismatch")
+    jobs, planned = _driver_plan_cells(
+        plan, protocol=protocol, execution_plan=execution_plan
+    )
+    _validate_selection_partition(
+        _list(selection.get("children"), "children"),
+        _list(selection.get("missing_or_rejected_slots"), "missing_or_rejected_slots"),
+        protocol,
+        execution_plan,
+    )
+    ledger = _read_jsonl_objects(
+        artifacts[DRIVER_ATTEMPT_LEDGER_FILENAME], "driver attempt ledger"
+    )
+    _validate_driver_attempt_ledger(ledger, jobs=jobs, selection=selection)
+
+    accepted_count = len(selection["children"])
+    failed_count = len(selection["missing_or_rejected_slots"])
+    accepted_cells = {
+        _selection_slot(item, "children[]") for item in selection["children"]
+    }
+    complete_pairs_by_event: dict[str, int] = {}
+    for event_id in _planned_values(protocol)[0]:
+        complete_pairs_by_event[event_id] = sum(
+            1
+            for seed in execution_plan["seeds"]
+            if {
+                (event_id, arm, seed, repeat_idx)
+                for arm in ARMS
+                for repeat_idx in execution_plan["repeat_indices"]
+            }
+            <= accepted_cells
+        )
+    complete_pairs = sum(complete_pairs_by_event.values())
+    if (
+        summary.get("schema_version") != "1.0"
+        or summary.get("run_id") != manifest["run_id"]
+        or summary.get("driver") != DRIVER_COMMAND
+        or summary.get("planned_runs") != len(planned)
+        or summary.get("completed_runs") != accepted_count
+        or summary.get("failed_runs") != failed_count
+        or summary.get("honest_n_runs") != accepted_count
+        or summary.get("multi_event_protocol_sha256") != expected_protocol_hash
+        or summary.get("multi_event_selection") != DRIVER_SELECTION_FILENAME
+        or summary.get("honest_n_complete_seed_pairs") != complete_pairs
+        or summary.get("honest_n_complete_seed_pairs_by_event")
+        != complete_pairs_by_event
+        or summary.get("incomplete") is not bool(failed_count)
+        or summary.get("reported_model_aliases")
+        != selection.get("study_model_identity", {}).get("reported_model_aliases")
+        or summary.get("underlying_model_identity_verified") is not False
+        or summary.get("model_specific_inference_allowed") is not False
+    ):
+        raise MultiEventInputError("driver summary disagrees with registered selection")
+    experiment_completion = _mapping(
+        manifest.get("experiment_completion"), "experiment_completion"
+    )
+    if any(
+        experiment_completion.get(field) != expected
+        for field, expected in {
+            "planned_runs": len(planned),
+            "completed_runs": accepted_count,
+            "failed_runs": failed_count,
+            "honest_n_runs": accepted_count,
+        }.items()
+    ):
+        raise MultiEventInputError(
+            "driver manifest completion disagrees with selection"
+        )
+
+    prepared = prepare_selection(
+        selection_path,
+        protocol=protocol,
+        protocol_path=protocol_path,
+        child_root=child_root,
+        reference_root=reference_root,
+    )
+    anchored_inputs = dict(prepared.input_paths)
+    anchored_inputs.update(
+        {
+            "driver_parent_manifest": manifest_path,
+            "driver_plan": artifacts[DRIVER_PLAN_FILENAME],
+            "driver_attempt_ledger": artifacts[DRIVER_ATTEMPT_LEDGER_FILENAME],
+            "driver_summary": artifacts[DRIVER_SUMMARY_FILENAME],
+        }
+    )
+    return replace(
+        prepared,
+        input_paths=anchored_inputs,
+        driver_manifest_path=manifest_path,
+        driver_run_id=str(manifest["run_id"]),
+    )
+
+
 def _child_actual_identity(child: Any) -> Mapping[str, Any]:
     return {
         "run_id": child.run_id,
@@ -1268,18 +1681,23 @@ def model_identity_interpretation(
 ) -> Mapping[str, Any]:
     aliases = list(study_model_identity.get("reported_model_aliases", []))
     mode = study_model_identity.get("execution_mode")
-    model_specific = bool(mode == "openai_live" and len(aliases) == 1)
+    homogeneous_reported_alias = bool(
+        mode == "openai_live" and len(aliases) == 1
+    )
     return {
         "reported_model_aliases": aliases,
-        "model_specific_inference_allowed": model_specific,
-        "pooling_scope": (
-            "single_reported_model_alias"
-            if model_specific
-            else "endpoint_mixture_or_mock_not_model_specific"
+        "underlying_model_identity_verified": False,
+        "model_specific_inference_allowed": False,
+        "reported_alias_homogeneous_pooling_allowed": homogeneous_reported_alias,
+        "attribution_scope": (
+            "endpoint_condition_with_homogeneous_self_reported_alias"
+            if homogeneous_reported_alias
+            else "endpoint_alias_mixture_or_mock_descriptive_only"
         ),
         "policy": (
-            "mixed, absent, or mock served-model aliases prohibit pooled "
-            "model-specific inference"
+            "reported_model is endpoint self-report and never verifies underlying "
+            "weights; homogeneous live aliases permit only alias-stratified endpoint "
+            "pooling, while mixed, absent, or mock aliases prohibit that pooling"
         ),
     }
 
@@ -2255,7 +2673,14 @@ def _write_outputs(
 
 def build_argparser() -> RaisingArgumentParser:
     parser = RaisingArgumentParser(allow_abbrev=False)
-    parser.add_argument("--input-manifest", required=True)
+    parser.add_argument(
+        "--driver-manifest",
+        required=True,
+        help=(
+            "finished experiments.multi_event run_manifest.json below child-root; "
+            "standalone selection JSON is intentionally ineligible"
+        ),
+    )
     parser.add_argument("--child-root", required=True)
     parser.add_argument("--reference-root", default=".")
     parser.add_argument("--protocol", default=str(PROTOCOL_PATH))
@@ -2296,8 +2721,8 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             raise ApprovalRequiredError(
                 "the preregistered variance-components pilot is not confirmatory"
             )
-        prepared = prepare_selection(
-            Path(args.input_manifest),
+        prepared = prepare_driver_selection(
+            Path(args.driver_manifest),
             protocol=protocol,
             protocol_path=protocol_path,
             child_root=Path(args.child_root),
@@ -2339,6 +2764,9 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         ),
         "execution_plan": dict(prepared.execution_plan),
         "selection_mode": "explicit_manifest_no_glob",
+        "trust_anchor": "finished_registered_experiments.multi_event_parent",
+        "driver_run_id": prepared.driver_run_id,
+        "driver_manifest_sha256": sha256_file(prepared.driver_manifest_path),
         "study_model_identity": dict(prepared.study_model_identity),
     }
     managed.manifest.write_atomic()
@@ -2373,6 +2801,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             summary = dict(summary)
             summary["protocol_sha256"] = prepared.protocol_sha256
             summary["selection_manifest_sha256"] = sha256_file(prepared.selection_path)
+            summary["driver_parent_run_id"] = prepared.driver_run_id
+            summary["driver_parent_manifest_sha256"] = sha256_file(
+                prepared.driver_manifest_path
+            )
             summary["study_model_identity"] = dict(prepared.study_model_identity)
             summary["model_identity_interpretation"] = (
                 model_identity_interpretation(prepared.study_model_identity)

@@ -221,6 +221,7 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         ANALYSIS_MANAGED,
         (
             "managed analysis attempt",
+            "validate finished driver parent and registered artifacts",
             "validate explicit execution-plan selection partition",
             "validate managed child identities and artifacts",
             "complete-case clustered analysis",

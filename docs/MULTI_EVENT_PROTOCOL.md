@@ -321,10 +321,20 @@ contract, but it is held at one for this pilot and recorded in the execution
 manifest. Changing workers does not change the stated estimand; it does create
 a different execution identity and must not be mixed invisibly into one study.
 
-## Explicit managed analyzer input
+## Managed driver-anchored analyzer input
 
-The official analyzer accepts one explicit selection manifest and never scans
-a result directory. Each event entry supplies the authoritative `event_id`,
+The official analyzer accepts one explicit finished
+`experiments.multi_event` parent `run_manifest.json`; it does not accept an
+arbitrary standalone selection and never scans a result directory. From that
+trust anchor it derives the sibling selection named by the parent, rehashes
+every registered in-run artifact, and requires the registered
+`multi_event_plan.json`, public attempt ledger, `multi_event_selection.json`,
+and `driver_summary.json`. Plan slots, attempt outcomes, selection cells, and
+driver completed/failed/honest-N counts must agree exactly. This prevents a
+hand-edited selection from relabeling an existing valid but unfavorable child
+as `missing` to create an outcome-aware complete case.
+
+Within the derived selection, each event entry supplies the authoritative `event_id`,
 reference CSV, timeline, and their expected SHA-256 values. Each child entry
 supplies its exact planned cell, managed `run_manifest.json` path and hash,
 registered `experiment_result.json` hash, and the expected config/input/model
@@ -334,7 +344,8 @@ protocol and the catalog dataset before hashes are considered. Paths are
 resolved under explicit child and reference roots; traversal or escaping
 symlinks fail closed.
 
-The driver writes `multi_event_selection.json` only after child finalization.
+The driver writes `multi_event_selection.json` only after child finalization,
+then registers it before the parent becomes terminal.
 Its `children` array contains accepted managed children only. Its separate
 `missing_or_rejected_slots` array names every other planned cell, a status of
 `missing` or `rejected`, and non-empty public reason codes. For a
@@ -377,7 +388,10 @@ absolute path string. For live calls, endpoint-reported model aliases bind
 three ways across application-attempt evidence, selection identity, and the
 result projection. Each child has exactly one non-empty alias and the study
 records their sorted union. A mixed union is an endpoint-mixture result and
-prohibits pooled model-specific inference. Mock runs fabricate no alias.
+prohibits even alias-homogeneous pooling. A single alias permits only
+endpoint-condition analysis stratified by that self-reported alias; it does
+not verify underlying model weights, and model-specific inference remains
+disallowed. Mock runs fabricate no alias.
 
 Every raw post-`t0` reference episode is transformed to exactly 25 points
 (`t=0..24`) by linear interpolation in normalized log price over the entire

@@ -301,14 +301,21 @@ class AggregateMultiEventTests(unittest.TestCase):
             }
         )
         self.assertFalse(mixed["model_specific_inference_allowed"])
-        self.assertEqual(mixed["pooling_scope"], "endpoint_mixture_or_mock_not_model_specific")
+        self.assertFalse(mixed["underlying_model_identity_verified"])
+        self.assertFalse(mixed["reported_alias_homogeneous_pooling_allowed"])
         single = A.model_identity_interpretation(
             {
                 "execution_mode": "openai_live",
                 "reported_model_aliases": ["HiggsAI"],
             }
         )
-        self.assertTrue(single["model_specific_inference_allowed"])
+        self.assertFalse(single["model_specific_inference_allowed"])
+        self.assertFalse(single["underlying_model_identity_verified"])
+        self.assertTrue(single["reported_alias_homogeneous_pooling_allowed"])
+        self.assertEqual(
+            single["attribution_scope"],
+            "endpoint_condition_with_homogeneous_self_reported_alias",
+        )
 
     def test_population_order_and_frozen_identity_are_independently_checked(self):
         scientific = self.protocol["effective_config_freeze"]["scientific"]
@@ -526,6 +533,64 @@ class AggregateMultiEventTests(unittest.TestCase):
             claims["realism_assessment_status"],
             "engineering_only_nonadherent_or_mock_not_claim_eligible",
         )
+
+    def test_outcome_aware_accepted_child_cannot_be_relabelled_missing(self):
+        cell = ("meta_2022_02_crash_v1", "social_off", 11, 1)
+        jobs = {
+            cell: {
+                "event_id": cell[0],
+                "arm": cell[1],
+                "seed": cell[2],
+                "repeat_idx": cell[3],
+                "allowed_attempt_run_ids": [
+                    "attempt-1",
+                    "attempt-2",
+                    "attempt-3",
+                    "attempt-4",
+                    "attempt-5",
+                ],
+            }
+        }
+        selection = {
+            "children": [],
+            "missing_or_rejected_slots": [
+                {
+                    "event_id": cell[0],
+                    "arm": cell[1],
+                    "seed": cell[2],
+                    "repeat_idx": cell[3],
+                    "status": "missing",
+                    "reason_codes": ["hand_edited_omission"],
+                    "attempt_run_ids": [],
+                }
+            ],
+        }
+        ledger = [
+            {
+                "event_id": cell[0],
+                "arm": cell[1],
+                "seed": cell[2],
+                "repeat_idx": cell[3],
+                "run_id": "attempt-1",
+                "status": "launched",
+                "source": "executed",
+            },
+            {
+                "event_id": cell[0],
+                "arm": cell[1],
+                "seed": cell[2],
+                "repeat_idx": cell[3],
+                "run_id": "attempt-1",
+                "status": "accepted",
+                "source": "executed",
+            },
+        ]
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "disagrees with durable attempt ledger"
+        ):
+            A._validate_driver_attempt_ledger(
+                ledger, jobs=jobs, selection=selection
+            )
 
     def test_explicit_selection_paths_hashes_and_transform_are_validated(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:

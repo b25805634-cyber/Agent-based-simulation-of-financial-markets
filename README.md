@@ -121,8 +121,10 @@ Historical flat files may still be used by an explicitly managed analysis as
 hashed `legacy_unverified_input`; that is analysis input, not child-run reuse.
 
 `experiments.aggregate_multi_event` is the Provider-free managed analyzer for
-the Wave 1 N=8/K=3 variance-components pilot. It accepts one explicit selection
-manifest whose accepted children and missing/rejected slots exactly partition
+the Wave 1 N=8/K=3 variance-components pilot. Its trust anchor is one finished
+`experiments.multi_event` parent manifest; it derives and rehashes that
+parent's registered selection, plan, attempt ledger, and driver summary. The
+selection's accepted children and missing/rejected slots exactly partition
 the declared execution plan: all 144 cells for protocol-adherent live work, or
 an explicitly labeled smaller mock-only engineering grid. It revalidates
 managed identities and artifacts, and emits event-complete and
