@@ -1252,7 +1252,7 @@ def main(argv=None) -> None:
             ),
         }
         managed.context.manifest.write_atomic()
-    
+
         health_threshold = float(
             protocol["acceptance_and_execution"]["health_bad_frac_max"]
         )
@@ -1278,7 +1278,7 @@ def main(argv=None) -> None:
         ] = {job.key: None for job in jobs}
         reuse_checks: list[tuple[MultiEventJob, ReuseDecision]] = []
         lock = threading.Lock()
-    
+
         def record_attempt(
             job: MultiEventJob,
             *,
@@ -1311,7 +1311,7 @@ def main(argv=None) -> None:
                         private_ledger_path, private_record, mode=0o600
                     )
                     private_attempt_ledger.append(private_record)
-    
+
         # The official reuse surface is exactly the deterministic five-attempt
         # series.  A compatibility alias is never trusted as a selector: accepting
         # arbitrary aliases would permit unlimited off-protocol sampling followed
@@ -1421,7 +1421,7 @@ def main(argv=None) -> None:
             if accepted_at is None and occupied_count >= max_attempts:
                 preflight_block_reason[job.key] = "attempt_budget_exhausted"
                 final_reasons[job.key].append("attempt_budget_exhausted")
-    
+
         todo = [job for job in jobs if not decisions.get(job.key, None) or not decisions[job.key].reusable]
         print(
             "multi-event: {} planned, {} reusable, {} to execute (workers={})".format(
@@ -1429,7 +1429,7 @@ def main(argv=None) -> None:
             ),
             flush=True,
         )
-    
+
         def execute(job: MultiEventJob) -> DriverJobResult:
             managed.record_started(job.cell)
             launched = 0
@@ -1693,7 +1693,7 @@ def main(argv=None) -> None:
                 attempts=launched,
                 reason_code=last_reason,
             )
-    
+
         def execute_guarded(job: MultiEventJob) -> DriverJobResult:
             try:
                 return execute(job)
@@ -1730,7 +1730,7 @@ def main(argv=None) -> None:
                     attempts=len(attempt_run_ids[job.key]),
                     reason_code=reason,
                 )
-    
+
         failures: list[DriverJobResult] = []
         for job, decision in reuse_checks:
             managed.record_reuse_candidate(

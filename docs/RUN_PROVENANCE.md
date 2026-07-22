@@ -163,11 +163,11 @@ requested `MiniMax-M2.7` 而 response 报告 `HiggsAI` 时，运行必须保留�
 
 Phase 1.2A 的 driver summary 另记录 `executed_runs`、`reused_runs`、
 `reuse_candidates_examined`、`reuse_candidates_rejected` 和按稳定
-reason code 汇总的拒绝数。身份门使用 `result_reuse_policy_version=1.0`，同时校验 lifecycle、scientific source/config、model request、Scenario/input、seed/population、安全路径和每个 canonical artifact 字节。文件存在不等于 run 可复用；细则见 [RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)。
+reason code 汇总的拒绝数。身份门使用 `result_reuse_policy_version=1.1`；在 1.0 的 lifecycle、scientific source/config、model request、Scenario/input、seed/population、安全路径和 canonical artifact 字节校验上，multi-event 候选还必须匹配冻结 slot/material identity、科学运行时环境和 reported-model alias 门。文件存在不等于 run 可复用；细则见 [RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)。
 
 Provider capability schema `1.0` 记录当前 adapter 能力的保守、脱敏快照。它不改变 Provider 行为，不声称 temperature 0 使真实模型确定，也不进入 recording schema 1.2 的必填契约。因此缺少该快照的 Phase 1.1 schema 1.2 recording 仍按原 Strict Replay 规则处理。见 [PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md)。
 
-`full_effective_config_hash` 基于应用默认值、配置文件与 CLI 后的最终 `Config`，而不是用户显式输入的 CLI token。字段排序后以 UTF-8 规范 JSON 序列化；float 使用 `float.hex()`，Enum/tuple/set/bytes 有类型标记，Path 和 endpoint 只保存 identity hash，秘密只保存脱敏 configured 状态。`population` 同时保存排序 counts 和顺序敏感的 `effective_cast`，以匹配当前 Agent 创建/请求顺序。完整 38 字段分类表和精确 hash payload 见 [Replay 兼容性契约](REPLAY_COMPATIBILITY.md#运行时-effective-config-契约)。
+`full_effective_config_hash` 基于应用默认值、配置文件与 CLI 后的最终 `Config`，而不是用户显式输入的 CLI token。字段排序后以 UTF-8 规范 JSON 序列化；float 使用 `float.hex()`，Enum/tuple/set/bytes 有类型标记，Path 和 endpoint 只保存 identity hash，秘密只保存脱敏 configured 状态。`population` 同时保存排序 counts 和顺序敏感的 `effective_cast`，以匹配当前 Agent 创建/请求顺序。完整 41 字段分类表和精确 hash payload 见 [Replay 兼容性契约](REPLAY_COMPATIBILITY.md#运行时-effective-config-契约)。
 
 不得再使用无字段名的“默认 Config hash”。`f0508c23…` 是
 `asdict(Config())` 的 legacy raw-default JSON hash；`1a36131b…` 才是固定

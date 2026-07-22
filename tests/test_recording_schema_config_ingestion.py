@@ -522,7 +522,7 @@ class StrictConfigIngestionTests(unittest.TestCase):
             with self.subTest(path=path.relative_to(REPO_ROOT).as_posix()):
                 self.assertNotIn("strict=False", path.read_text(encoding="utf-8"))
 
-    def test_prompt_persona_and_frozen_scientific_source_identity_are_unchanged(self):
+    def test_prompt_persona_and_wave1_scientific_identities_are_pinned(self):
         metadata = scientific_compatibility_metadata(REPO_ROOT)
         self.assertEqual(
             metadata["prompt_source_hash"],
@@ -534,11 +534,11 @@ class StrictConfigIngestionTests(unittest.TestCase):
         )
         self.assertEqual(
             metadata["simulation_core_source_hash"],
-            "dea1d39d287a10e53674c30ae3410729407b13366f2f2c79739bde3924e0d286",
+            "3c48125de035359037385556da926bdfb920d915c5f151a44e253ae68cd0132d",
         )
         self.assertEqual(
             metadata["scientific_component_fingerprint"],
-            "f1015b7587e3add3cf887a15091483773f6ef74769da9950be964305ad3e4379",
+            "47a2e6fcbf73a7c279174b8d176b5a994791cb9778db570ee9b231fdf90419fc",
         )
         defaults = Config()
         self.assertEqual(defaults.n_rounds, 24)
@@ -552,7 +552,7 @@ class StrictConfigIngestionTests(unittest.TestCase):
         ).encode("utf-8")
         self.assertEqual(
             hashlib.sha256(default_payload).hexdigest(),
-            "62b06df18c81278073117039897a4f27ede46ad417c03d942881d09caf68c364",
+            "5d271f9a673f522b7f7d2f937ba003374e6e45c2bdaa707f6dc7f8824935ef5d",
         )
 
 

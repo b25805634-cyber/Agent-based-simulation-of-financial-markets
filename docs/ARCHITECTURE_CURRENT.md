@@ -2,13 +2,13 @@
 
 本文描述 2026-07-22 工作区中的实际实现，不描述理想架构。核心入口是 `python3 -m nmsim.run`；`narrative_market_sim.py` 是已经分叉的旧 Phase-1 脚本。
 
-> Phase 1–1.2B-CX1 更新：核心回合顺序和科学语义未变；Phase 1.1A 建立 strict LLM Record/Replay、离线 reparse audit、科学源/运行时 Config 契约和正式 recording schema 1.2，Phase 1.1B 统一 `ManagedRunContext`、两阶段 CLI、入口 registry 以及带单位 completion / honest-N。Phase 1.2A 在实验编排边界新增 child-result 身份门、Provider capability 描述层和不运行市场的模型资格协议；Phase 1.2B-CX1 增加实验性的本机官方 `codex exec` 适配器、工具事件拒绝和真实资格试跑保护，但未运行真实模型任务。Wave 0 又新增不运行市场的 endpoint stochasticity managed 诊断，定量而不消除真实 Provider 首次采样噪声。详细见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md)、[RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)、[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md)、[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md)、[CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md)、[ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md) 以及既有 Replay/生命周期/完成量文档。下文关于市场、观察和随机性的描述仍是 compatibility baseline。
+> Phase 1–1.2B-CX1 与 Wave 0 建立 strict Record/Replay、统一 managed lifecycle、child reuse、Provider capability、Codex qualification 和 endpoint stochasticity 诊断。Wave 1 multi-event 又加入显式 opt-in public news timeline、strict decision-response schema、机器终态 health 和可见应用层 retry 证据；空 timeline、null decision schema 与未指定 SDK retry 继续保留 legacy 执行路径，但 Config/source identity 因新增机制而有意迁移。详细见 [RUN_PROVENANCE.md](RUN_PROVENANCE.md)、[RESULT_REUSE_POLICY.md](RESULT_REUSE_POLICY.md)、[PROVIDER_CAPABILITIES.md](PROVIDER_CAPABILITIES.md)、[MODEL_QUALIFICATION_PROTOCOL.md](MODEL_QUALIFICATION_PROTOCOL.md)、[CODEX_EXEC_PROVIDER.md](CODEX_EXEC_PROVIDER.md)、[ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md) 和 [MULTI_EVENT_PROTOCOL.md](MULTI_EVENT_PROTOCOL.md)。下文关于既有市场、社交和风控语义仍是 compatibility baseline。
 
 ## 模块责任
 
 | 模块 | 当前责任 | 不负责的内容 |
 |---|---|---|
-| `nmsim/config.py` | 单一 `Config` dataclass、默认值和 JSON 序列化；原始字节保持 scientific fingerprint 基线 | 没有独立 `ScenarioSpec`、完整取值/跨字段 domain validation、Config schema version 或 secret redaction |
+| `nmsim/config.py` | 单一 `Config` dataclass、默认值和 JSON 序列化；包含 opt-in `news_timeline`、`decision_response_schema` 与 `provider_sdk_max_retries` | 没有独立 `ScenarioSpec`、完整取值/跨字段 domain validation、Config schema version 或 secret redaction |
 | `nmsim/config_ingestion.py` | strict-default mapping ingestion、集中 alias、unknown/duplicate-source 校验和安全建议 | 不改默认值；不提供 `strict=False` 宽松迁移；不属于市场科学 allowlist |
 | `nmsim/__init__.py` | 在正常包导入时将 strict ingestion 显式绑定到 `Config`，并回填 `nmsim.config` 的 alias/异常导出 | 不改 Config dataclass 字段或仿真语义 |
 | `nmsim/config_contract.py` | 对最终有效 `Config` 逐字段 fail-closed 分类，生成稳定、脱敏的 scientific/model-request/execution 摘要与 hash | 不修改 Config 值；不替代 source fingerprint 或实际 resolved model config |
@@ -30,7 +30,7 @@
 | `nmsim/run_context.py` | `ManagedRunContext` 统一 Record/Replay、事件 observer、completion、failure stage、终态、artifact 登记和成功后兼容投影；`NullRunContext` 是显式 no-op 边界 | 不做 Agent 决策、Prompt、市场、社交、风控或指标计算 |
 | `nmsim/managed_cli.py` | 两阶段 CLI bootstrap、安全 run id/output root、配置失败受管封存和公共脱敏错误 | `--help`/`--version` 不创建 run；不解释市场科学语义 |
 | `nmsim/entrypoints.py` | 集中、可测试的入口分类与 management policy | 不 import Provider、不创建目录或运行仿真 |
-| `nmsim/result_reuse.py` | policy 1.0 的 `ChildRunIdentity` / `ExpectedRunIdentity` / candidate 验证；校验 lifecycle、科学源/配置、模型请求、Scenario/input、population/seed、路径与 artifact hash | 不运行 child、不覆盖旧结果、不把 legacy flat input 伪造成 managed run |
+| `nmsim/result_reuse.py` | policy 1.1 的 `ChildRunIdentity` / `ExpectedRunIdentity` / candidate 验证；校验 lifecycle、科学源/配置、模型请求、Scenario/input、population/seed、runtime environment、multi-event slot、路径与 artifact hash | 不运行 child、不覆盖旧结果、不把 legacy flat input 伪造成 managed run |
 | `nmsim/provider_capabilities.py` | capability schema 1.0；对 resolved Mock/Anthropic/OpenAI-compatible、实验性 CodexExec 及 qualification-only Fake 提供保守、脱敏、fail-closed 的描述快照 | 不选择/构造 Provider，不读 credential，不测量模型质量或确定性 |
 | `nmsim/run.py` | 主 CLI、Config 覆盖、通过 `ManagedRunContext` 组装 record/replay、六类兼容输出和终端摘要 | 不暴露全部 Config；不改变旧 market/social/risk 语义 |
 | `experiments/run_seed.py` | 单个实验、Meta 对齐、health、compact orders、统一 provenance/record/replay；`--price-csv` 是另行标记的 historical analysis input | CSV analysis 不产生新 LLM events、不代表 child resume；旧根 JSON 只作兼容投影 |
@@ -38,6 +38,8 @@
 | 正式派生分析入口 | 在 managed analysis attempt 中读取历史 JSON/trace，把 legacy input 路径/大小/hash 和未验证身份计数入 manifest，并计算原有表/图 | 不伪造 child manifest；不统一或静默修改历史 analyzer 的过滤、配对和 CI 公式 |
 | `experiments/model_qualification.py` | `run_kind=model_qualification` 的 managed 入口；加载冻结 protocol/fixtures/rubric，构造 6×8=48 cases，执行 Mock/Fake，支持 CodexExec 安全 dry-run，并以确认参数和 case 上限保护未来小规模真实试跑 | 不调用市场、不产生价格路径；Phase 1.2B-CX1 未执行真实 Codex case；低层函数不是绕过 CLI 确认的正式入口 |
 | `experiments/endpoint_stochasticity.py` | `run_kind=endpoint_stochasticity` 的 managed Wave 0 入口；验证 qualification 48-case universe 和冻结 6-case 子集，执行 temp×K×concurrency 网格、独立 same-seed probe、pairwise byte agreement 与 within-case pooled sigma | 不调用 `run_sim`、不生成价格路径或市场 replicate；dry-run 不构造 Provider；真实 OpenAI-compatible 路径必须显式 `--live` |
+| `experiments/multi_event.py` | 冻结三事件×双臂×N=8×K=3 网格、counterbalanced acquisition、五次技术尝试上限、canonical live root 与受管 child selection | 不聚合结果、不把 ACTIVE/foreign-series materialization 当作可跳过失败、不声称真实 Provider 确定性 |
+| `experiments/aggregate_multi_event.py` | 从一个完成的父 manifest 重验 plan/ledger/selection、源码/runtime/alias/health/private artifact，并输出 complete-case seed-cluster 统计 | 不按 glob 或 legacy flat 文件选择样本；不构造 Provider；该 pilot 不升级为 confirmatory claim |
 | `qualification/*.json` | protocol 1.1、字节不变的 8 个 Observation fixtures、rubric 1.1 和 field-level visibility contract 1.0 | 不包含未来价格、private rationale、评价答案或 rubric 泄漏到 Observation；真实 Prompt 不可见的 fundamental anchor 明确 not-scored |
 
 ## Scientific Component Fingerprint
@@ -54,6 +56,10 @@
 8. `nmsim/sim.py`：回合编排、事件顺序和状态更新。
 9. `nmsim/types.py`：科学数据类型/schema。
 10. `nmsim/validation.py`：会进入结果的验证指标。
+11. `nmsim/decision_contract.py`：opt-in strict decision-response schema 与机器终态。
+12. `nmsim/multi_event.py`：冻结协议、事件材料、slot/attempt identity 与参考路径变换。
+13. `nmsim/reference_data/__init__.py`：公开 news timeline 的严格加载与 delivery 语义。
+14. `experiments/run_seed.py`：正式单运行配置路由、multi-event result/health 组装。
 
 稳定性规则如下：
 
@@ -62,13 +68,13 @@
 - `prompt_source_hash` 保持 Phase 1 口径，为 `nmsim/prompts.py` 原始字节 hash；`persona_source_hash` 是对该文件中字面量 `PERSONAS` 做排序紧凑 JSON 序列化后的 hash。`Agent.build_prompt` 另由 core 集合覆盖。
 - 总指纹对 `fingerprint_schema_version`、parser schema/hash、Prompt/Persona hash、core hash 和固定文件列表的 canonical JSON 做 SHA-256。`event_schema_version` 和 `recording_schema_version` 不被混入总指纹，而是 strict replay 中的独立必匹配字段。
 
-`README`、`docs/`、测试、实验 driver、`nmsim/run.py`、`nmsim/run_context.py`、`nmsim/managed_cli.py`、`nmsim/entrypoints.py`、`nmsim/events.py` 及 fingerprint/provenance/recording/reparse instrumentation、run directories、results 和 private logs 均不进入科学文件集。Event/recording 变化由独立 schema 版本管理；fingerprint 算法本身变化必须同步提升 `fingerprint_schema_version`。因此单纯文档或 Phase 1.1B 生命周期编排变化不应拒绝 replay。但这是保守集合：上述科学源文件按原始字节计算，即使只改其中的普通注释，也会使 core hash 改变并触发 strict replay 拒绝。`git_commit`/`git_dirty` 依然记录于 manifest 和 recording，但 commit 本身不是唯一兼容键。
+`README`、`docs/`、测试、除 `experiments/run_seed.py` 外的实验 driver、`nmsim/run.py`、`nmsim/run_context.py`、`nmsim/managed_cli.py`、`nmsim/entrypoints.py`、`nmsim/events.py` 及 fingerprint/provenance/recording/reparse instrumentation、run directories、results 和 private logs 均不进入科学文件集。Event/recording 变化由独立 schema 版本管理；fingerprint 算法本身变化必须同步提升 `fingerprint_schema_version`。因此单纯文档或生命周期编排变化不应拒绝 replay。但这是保守集合：上述科学源文件按原始字节计算，即使只改其中的普通注释，也会使 core hash 改变并触发 strict replay 拒绝。`git_commit`/`git_dirty` 依然记录于 manifest 和 recording，但 commit 本身不是唯一兼容键。
 
 ## Effective Config 契约
 
 Scientific Component Fingerprint 回答“执行的科学源码是否兼容”；`nmsim/config_contract.py` 另行回答“这次运行实际使用的配置是否兼容”。它对 CLI/实验脚本已合并到 `Config` 的最终值做稳定规范化，不改写任何配置或市场状态。`nmsim.run.run` 中原有的 `news_round > n_rounds` clamp 发生在 `RunManager.create` 之前，所以该入口 hash 的是 clamp 后的真实有效值；Phase 1.1A.1 没有为其他入口新增 clamp 或改变默认值。
 
-38 个 `Config` 字段必须在显式 registry 中有 category 和 rationale，没有默认落入 execution 的分支。若 dataclass 新增字段而 registry 未同步，或 registry 残留已删除字段，`validate_config_classification` 立即抛出错误。当前分类边界是：
+41 个 `Config` 字段必须在显式 registry 中有 category 和 rationale，没有默认落入 execution 的分支。若 dataclass 新增字段而 registry 未同步，或 registry 残留已删除字段，`validate_config_classification` 立即抛出错误。当前分类为 29 个 scientific、10 个 model-request 和 2 个 execution 字段；边界是：
 
 | 类别 | 典型字段/运行项 | hash 与 Strict Replay 行为 |
 |---|---|---|
@@ -96,7 +102,7 @@ Phase 1.1B 把 CLI 启动分成 bootstrap 和 full validation。`--help`/`--vers
 
 ### Scenario label 不是科学内容身份
 
-`scenario_id`/label 当前是人类可读 execution metadata，修改 label 本身不阻止 Replay。当前真实 Scenario 内容由 `news_round`、`news_text`、`seed_fraction`、`reference_path` 内容身份以及 population/信息可见性等 scientific Config 约束。Manifest 的 `scenario.definition_sha256` 只是当前有限摘要的描述性 hash，不替代 scientific config contract。未来引入 `ScenarioSpec` / `EventStream` 时，payload、事件时间线、可见性策略和输入数据 hash 必须进入 scientific config 或独立 `scenario_content_hash`，不得只依靠 label。Phase 1.1A.2 不实现 `ScenarioSpec`。
+`scenario_id`/label 当前是人类可读 execution metadata，修改 label 本身不阻止 Replay。当前真实 Scenario 内容由 `news_round`、`news_text`、受限的 opt-in `news_timeline`、`seed_fraction`、`reference_path` 内容身份以及 population/信息可见性等 scientific Config 约束。Manifest 的 `scenario.definition_sha256` 只是当前有限摘要的描述性 hash，不替代 scientific config contract。当前仍没有通用 `ScenarioSpec` / `EventStream` 抽象；未来引入时，payload、事件时间线、可见性策略和输入数据 hash 必须进入 scientific config 或独立 `scenario_content_hash`，不得只依靠 label。
 
 ## Phase 1.2A 实验编排边界
 
@@ -106,7 +112,7 @@ Phase 1.1B 把 CLI 启动分成 bootstrap 和 full validation。`--help`/`--vers
 driver final child command
   -> ExpectedRunIdentity.from_effective_config
   -> ReusableRunCandidate(path, allowed_root)
-  -> validate_child_run_reuse(policy 1.0)
+  -> validate_child_run_reuse(policy 1.1)
      -> reject: audit reason(s), preserve candidate, execute new managed child
      -> accept: re-hash artifacts, count exactly one reused simulation replicate
 ```
@@ -376,7 +382,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 
 ### `Config`
 
-38 个字段，完整实效表见 [CODEX_HANDOFF_AUDIT.md](CODEX_HANDOFF_AUDIT.md)。它同时混合 timeline、population、provider、social、leverage、validation 和 output concern，没有独立 Scenario/Policy/Engine 配置。Phase 1.1A.1 没有拆分该 dataclass，只在边界将其 27 个 scientific、9 个 model-request 和 2 个 execution 字段逐一登记到 `CONFIG_FIELD_RULES`；任一未分类新字段都使契约构建 fail closed。Phase 1.1A.2 保持 `config.py` dataclass/默认值的原始字节，由 package bootstrap 将外部 strict `from_dict` contract 绑定到 class，当前不接受任何未经证据的 alias，并提供 unknown/duplicate-source 错误且明确不支持 `strict=False`。
+41 个字段，完整实效表的历史基线见 [CODEX_HANDOFF_AUDIT.md](CODEX_HANDOFF_AUDIT.md)。它同时混合 timeline、population、provider、social、leverage、validation 和 output concern，没有独立 Scenario/Policy/Engine 配置。当前边界将 29 个 scientific、10 个 model-request 和 2 个 execution 字段逐一登记到 `CONFIG_FIELD_RULES`；任一未分类新字段都使契约构建 fail closed。Wave 1 新增三个显式 opt-in 字段，因此默认执行路径保持兼容但 dataclass 原始字节、默认 payload hash 和科学/模型请求 config hash 有意迁移。Package bootstrap 继续将外部 strict `from_dict` contract 绑定到 class，不接受未经证据的 alias，并提供 unknown/duplicate-source 错误且明确不支持 `strict=False`。
 
 ### `Order` (`TypedDict`)
 
@@ -495,4 +501,4 @@ runtime identity，每条 request 再绑定 `final_combined_input_hash`。Replay
 
 仍未完整记录/实现：Provider SDK 中间 retry/request id、显式 market-maker inventory、phantom seller 账本、独立 adjacency artifact，以及没有 `.git` 时的 commit/diff。只有 `FINISHED` 且 `managed_run_completed=true` / `outputs_complete=true` 的成功 run 才发布兼容链接；flat link 直接指向生成 artifact 的不可变 run，普通历史文件永不覆盖。部分 artifact 可以被失败 manifest 登记和 hash，但不等于成功样本。
 
-需要单独记住这个边界设计：`nmsim/config.py` 仍在 scientific source allowlist 中，且 Phase 1.1A.2 保持了该文件原始字节和所有默认值，所以 simulation core source hash 和总 scientific fingerprint 保持基线身份。`nmsim/config_ingestion.py` 是 package/configuration instrumentation，由 `nmsim/__init__.py` 在正常包导入时安装 strict contract，未被伪装为市场规则。Phase 1.1B 的 lifecycle 文件以及 Phase 1.2A 的 `result_reuse.py`、`provider_capabilities.py`、qualification/driver instrumentation 也位于 scientific allowlist 之外；Wave 0 endpoint diagnostic/entrypoint/documentation 同样不进入核心科学源集。它们收紧实验身份、增强可观测性、冻结资格协议或测量 Provider 噪声，不改 Agent observation、Prompt、Persona、parser、市场、社交、风控、Config 默认值或既有输出 schema。完整 Phase 1.1A schema 1.2 recording 在所有既有 strict 身份一致时仍可 Replay；capability snapshot 是可选 provenance，不改变这一契约。最终 effective Config 由运行时 config hash 约束，recording evidence 结构仍由 schema 1.2 约束。
+需要单独记住这个边界设计：`nmsim/config.py` 仍在 scientific source allowlist 中。Wave 1 为多事件运行增加 opt-in timeline、strict response schema、机器终态与 SDK retry 控制，因此 simulation core source hash、总 scientific fingerprint、默认 Config payload hash 以及分类 config hash 均有意迁移；不能再声称原始字节身份未变。空 timeline、null response schema 与 null SDK retry 保留 legacy 执行行为，Prompt、Persona、市场、社交和风控公式未改，但旧 recording 只有在其全部 strict source/config identity 与当前值一致时才可 Replay。`nmsim/config_ingestion.py` 仍是 allowlist 外的 package instrumentation；lifecycle、capability、qualification、endpoint diagnostic 和普通 driver/documentation 也不进入科学源集，`experiments/run_seed.py` 则因正式 multi-event 组装语义进入 allowlist。最终 effective Config 由运行时 config hash 约束，recording evidence 结构仍由 schema 1.2 约束。
