@@ -104,8 +104,11 @@ successful sample: check `status=finished`, `managed_run_completed=true` and
 
 The manifest also carries unitized completion for runs, rounds, Agent
 decisions, logical requests, response sources, Provider-interface calls and
-parsing. Legacy top-level `honest_n` means completed Agent decisions and is
-deprecated; experiment summaries use run-level `honest_n_runs`.
+OpenAI/Anthropic application-level retry attempts, plus parsing. Attempt events
+keep hashes and safe codes public while secret-redacted prompts/raw/error detail
+remain in the `0600` private stream. Legacy top-level `honest_n` means completed
+Agent decisions and is deprecated; experiment summaries use run-level
+`honest_n_runs`.
 
 Formal experiment resume is stricter than file existence. Result-reuse policy
 `1.0` accepts an old child only when its managed lifecycle, scientific source

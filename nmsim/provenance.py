@@ -624,7 +624,17 @@ class RunManager:
             self.manifest["warnings"].append(self._sanitize_text(warning))
             self._write()
 
-    def _sanitize_text(self, value: Any) -> str:
+    def _sanitize_text(
+        self, value: Any, *, max_length: Optional[int] = 8000
+    ) -> str:
+        """Redact configured/environment credentials from arbitrary text.
+
+        Existing manifest diagnostics retain their historical 8000-character
+        bound.  Restricted raw provenance may pass ``max_length=None`` so
+        ordinary non-secret bytes remain exact while known credentials are
+        still removed.
+        """
+
         text = str(value)
         secret_values = []
         if is_dataclass(self.cfg):
@@ -642,7 +652,7 @@ class RunManager:
         for secret in sorted(set(secret_values), key=len, reverse=True):
             if secret and secret != "EMPTY":
                 text = text.replace(secret, "<redacted>")
-        return text[:8000]
+        return text if max_length is None else text[:max_length]
 
     def _failure_summaries(self, error: Any) -> tuple[str, str]:
         """Return a public-safe summary and a private, secret-redacted detail."""

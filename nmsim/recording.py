@@ -36,6 +36,10 @@ from .fingerprint import (
     STRICT_COMPATIBILITY_FIELDS,
     scientific_compatibility_metadata,
 )
+from .provider_attempts import (
+    ProviderAttemptContext,
+    forward_provider_attempt_contexts,
+)
 from .recording_schema import (
     CURRENT_RECORDING_SCHEMA_VERSION,
     RECORD_TYPE,
@@ -684,6 +688,36 @@ class RecordingLLM(_ContextMixin):
             self._emit_request(call)
         return calls
 
+    def _provider_attempt_contexts(
+        self, calls: Sequence[Mapping[str, Any]]
+    ) -> list[ProviderAttemptContext]:
+        observer = (
+            self.event_logger
+            if callable(
+                getattr(self.event_logger, "observe_provider_attempt", None)
+            )
+            else None
+        )
+        contexts = []
+        for call in calls:
+            request = call["request"]
+            contexts.append(
+                ProviderAttemptContext(
+                    logical_sequence=int(call["sequence"]),
+                    round_i=call["round"],
+                    batch_sequence=int(call["batch_sequence"]),
+                    batch_index=int(call["batch_index"]),
+                    batch_size=int(call["batch_size"]),
+                    agent=call["agent_id"],
+                    persona=call["persona_id"],
+                    original_system_hash=str(request["system_hash"]),
+                    original_user_hash=str(request["user_hash"]),
+                    original_prompt_hash=str(request["prompt_hash"]),
+                    observer=observer,
+                )
+            )
+        return contexts
+
     def _store_responses(
         self, calls: Sequence[Mapping[str, Any]], responses: Sequence[str]
     ) -> None:
@@ -718,6 +752,9 @@ class RecordingLLM(_ContextMixin):
     def complete(self, system: str, user: str) -> str:
         with self._lock:
             calls = self._make_calls([(system, user)])
+            forward_provider_attempt_contexts(
+                self.inner, self._provider_attempt_contexts(calls)
+            )
             response = self.inner.complete(system, user)
             self._store_responses(calls, [response])
             return response
@@ -726,6 +763,9 @@ class RecordingLLM(_ContextMixin):
         prompt_list = list(prompts)
         with self._lock:
             calls = self._make_calls(prompt_list)
+            forward_provider_attempt_contexts(
+                self.inner, self._provider_attempt_contexts(calls)
+            )
             responses = list(self.inner.complete_batch(prompt_list))
             self._store_responses(calls, responses)
             return responses

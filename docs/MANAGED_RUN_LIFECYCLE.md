@@ -159,7 +159,7 @@ status = failed
 
 ## Record / Replay 生命周期边界
 
-新 Record 继续只写 `recording_schema_version=1.2`。Phase 1.1A 产生的完整 schema 1.2 recording，只要科学源码、运行时科学 Config、model request 和逐请求 identity 匹配，仍可在当前代码上 Strict Replay。
+新 Record 继续只写 `recording_schema_version=1.2`，每个逻辑请求仍只有一条最终 response record。Phase 1.1A 产生的完整 schema 1.2 recording，只要科学源码、运行时科学 Config、model request 和逐请求 identity 匹配，仍可在当前代码上 Strict Replay。Provider-attempt instrumentation 修改了属于科学源清单的 `nmsim/llm.py`，因此该改动前的 recording 会按 source-identity mismatch 保守拒绝；不会弱化 fingerprint 边界。
 
 Replay preflight 在第一轮、第一条历史响应消费和任何 Provider 构造之前完成。Mismatch 没有网络 fallback，失败 manifest 中 Provider call 保持 0。Git commit 可以不同；compatibility 仍由既有 scientific fingerprint、schema/hash 和 request identity 契约决定。详细规则见 [REPLAY_COMPATIBILITY.md](REPLAY_COMPATIBILITY.md)。
 
@@ -187,7 +187,7 @@ Batch driver 的 parent `ManagedRunContext` 在启动 child 前使用
 - private rationale、原始私有错误和敏感记录只进入权限为 `0600` 的私有文件；
 - 公共事件、公共 CLI 错误和 driver summary 不包含 private rationale 正文；
 - `network_access` 表示当前 LLM 路径是否允许/需要网络：Mock 和 Replay 为 `false`。它不是逐个 TCP/HTTP 包的抓包证明；
-- Provider call 只统计穿透 cache/replay 后抵达 Provider 接口的逻辑请求。SDK 内部不可观察的 retry 不在覆盖范围内；
+- Provider call 只统计穿透 cache/replay 后抵达 Provider 接口的逻辑请求；OpenAI/Anthropic 应用层 retry 逐尝试另由 completion `1.1` 和 `LLMProviderAttemptObserved` 记录。SDK/传输/服务端内部不可观察的 retry 仍不在覆盖范围内；
 - finalization 只能处理进程可捕获的异常；不能承诺处理 `SIGKILL` 或机器故障；
 - `NullRunContext` 输出没有完整 provenance，不能与 managed finished run 等价。
 

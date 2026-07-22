@@ -22,9 +22,17 @@ import json
 import random
 import asyncio
 import hashlib
+import time
 from dataclasses import dataclass, field
 
 from .config import Config
+from .provider_attempts import (
+    ProviderAttemptContext,
+    ProviderAttemptContextCarrier,
+    ProviderAttemptObservation,
+    forward_provider_attempt_contexts,
+    observe_provider_attempt,
+)
 from .types import Order
 
 # Default models (overridable by env LLM_MODEL / config). Newest Claude as of
@@ -53,6 +61,17 @@ def _price_for(model: str):
 
 def _approx_tokens(s: str) -> int:
     return max(1, len(s) // 4)
+
+
+def _latency_ms(started: float) -> float:
+    return round(max(0.0, (time.monotonic() - started) * 1000.0), 3)
+
+
+def _optional_int(value):
+    try:
+        return None if value is None else int(value)
+    except (TypeError, ValueError):
+        return None
 
 
 # ------------------------------- parsing -------------------------------
@@ -209,12 +228,13 @@ def _sampling_kwargs(model: str, temperature: float) -> dict:
     return {"temperature": temperature}
 
 
-class AnthropicLLM:
+class AnthropicLLM(ProviderAttemptContextCarrier):
     """Real provider using the async Anthropic client for batched calls."""
     kind = "anthropic"
 
     def __init__(self, cfg: Config, tracker: "CostTracker"):
         from anthropic import AsyncAnthropic, Anthropic  # lazy import
+        self._init_provider_attempt_contexts()
         self._async = AsyncAnthropic()
         self._sync = Anthropic()
         self.model = (os.getenv("LLM_MODEL") or cfg.model
@@ -225,16 +245,78 @@ class AnthropicLLM:
         self.tracker = tracker
 
     def complete(self, system: str, user: str) -> str:
-        msg = self._sync.messages.create(
-            model=self.model, max_tokens=self.max_tokens,
-            **_sampling_kwargs(self.model, self.temperature),
-            system=system, messages=[{"role": "user", "content": user}])
-        self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
-        return msg.content[0].text
+        context = self._take_provider_attempt_contexts(1)[0]
+        started = time.monotonic()
+        try:
+            msg = self._sync.messages.create(
+                model=self.model, max_tokens=self.max_tokens,
+                **_sampling_kwargs(self.model, self.temperature),
+                system=system, messages=[{"role": "user", "content": user}])
+            self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
+            text = msg.content[0].text
+            parse_failed = _is_parse_failure(text)
+        except Exception as error:
+            observe_provider_attempt(
+                context,
+                ProviderAttemptObservation(
+                    attempt_index=1,
+                    max_attempts=1,
+                    provider=self.kind,
+                    model=self.model,
+                    attempted_system=system,
+                    attempted_user=user,
+                    trigger="initial",
+                    outcome="provider_exception",
+                    exception=error,
+                    latency_ms=_latency_ms(started),
+                    will_retry=False,
+                ),
+            )
+            raise
+        observe_provider_attempt(
+            context,
+            ProviderAttemptObservation(
+                attempt_index=1,
+                max_attempts=1,
+                provider=self.kind,
+                model=self.model,
+                attempted_system=system,
+                attempted_user=user,
+                trigger="initial",
+                outcome=(
+                    "response_parse_failed" if parse_failed else "response_parseable"
+                ),
+                reported_model=getattr(msg, "model", None),
+                response_text=text,
+                latency_ms=_latency_ms(started),
+                prompt_tokens=_optional_int(getattr(msg.usage, "input_tokens", None)),
+                completion_tokens=_optional_int(
+                    getattr(msg.usage, "output_tokens", None)
+                ),
+                will_retry=False,
+            ),
+        )
+        return text
 
     async def acomplete(self, system: str, user: str, retries: int = 2) -> str:
+        context = self._take_provider_attempt_contexts(1)[0]
+        return await self._acomplete_with_context(
+            system, user, retries=retries, context=context
+        )
+
+    async def _acomplete_with_context(
+        self,
+        system: str,
+        user: str,
+        *,
+        retries: int,
+        context: ProviderAttemptContext | None,
+    ) -> str:
         last_price = _user_last_price(user)
+        trigger = "initial"
         for attempt in range(retries + 1):
+            attempted_user = user
+            started = time.monotonic()
             try:
                 msg = await self._async.messages.create(
                     model=self.model, max_tokens=self.max_tokens,
@@ -242,27 +324,83 @@ class AnthropicLLM:
                     system=system, messages=[{"role": "user", "content": user}])
                 self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
                 text = msg.content[0].text
-                if not _is_parse_failure(text):
-                    return text
-                # retry-on-parse-failure with a stricter nudge
-                user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
-            except Exception:
+                parse_failed = _is_parse_failure(text)
+            except Exception as error:
+                will_retry = attempt < retries
+                observe_provider_attempt(
+                    context,
+                    ProviderAttemptObservation(
+                        attempt_index=attempt + 1,
+                        max_attempts=retries + 1,
+                        provider=self.kind,
+                        model=self.model,
+                        attempted_system=system,
+                        attempted_user=attempted_user,
+                        trigger=trigger,
+                        outcome="provider_exception",
+                        exception=error,
+                        latency_ms=_latency_ms(started),
+                        will_retry=will_retry,
+                    ),
+                )
                 if attempt == retries:
                     return json.dumps({"side": "hold", "quantity": 0,
                                        "limit_price": last_price, "sentiment": 0.0,
                                        "rationale": "api-error; holding"})
                 await asyncio.sleep(0.5 * (attempt + 1))
+                trigger = "provider_exception"
+                continue
+            will_retry = parse_failed and attempt < retries
+            observe_provider_attempt(
+                context,
+                ProviderAttemptObservation(
+                    attempt_index=attempt + 1,
+                    max_attempts=retries + 1,
+                    provider=self.kind,
+                    model=self.model,
+                    attempted_system=system,
+                    attempted_user=attempted_user,
+                    trigger=trigger,
+                    outcome=(
+                        "response_parse_failed"
+                        if parse_failed
+                        else "response_parseable"
+                    ),
+                    reported_model=getattr(msg, "model", None),
+                    response_text=text,
+                    latency_ms=_latency_ms(started),
+                    prompt_tokens=_optional_int(
+                        getattr(msg.usage, "input_tokens", None)
+                    ),
+                    completion_tokens=_optional_int(
+                        getattr(msg.usage, "output_tokens", None)
+                    ),
+                    will_retry=will_retry,
+                ),
+            )
+            if not parse_failed:
+                return text
+            # Preserve the existing cumulative retry nudge exactly.
+            user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
+            trigger = "parse_failure"
         return json.dumps({"side": "hold", "quantity": 0, "limit_price": last_price,
                            "sentiment": 0.0, "rationale": "parse-retries-exhausted; holding"})
 
     def complete_batch(self, prompts):
+        prompt_list = list(prompts)
+        contexts = self._take_provider_attempt_contexts(len(prompt_list))
         async def _gather():
-            return await asyncio.gather(*[self.acomplete(s, u) for s, u in prompts])
+            return await asyncio.gather(
+                *[
+                    self._acomplete_with_context(s, u, retries=2, context=context)
+                    for (s, u), context in zip(prompt_list, contexts)
+                ]
+            )
         return asyncio.run(_gather())
 
 
 # ------------------------------ OpenAILLM ------------------------------
-class OpenAILLM:
+class OpenAILLM(ProviderAttemptContextCarrier):
     """OpenAI-compatible provider (e.g. a local vLLM / minimax endpoint).
 
     Uses the `openai` SDK against a custom base_url; the async/batched path uses
@@ -273,6 +411,7 @@ class OpenAILLM:
     def __init__(self, cfg: Config, tracker: "CostTracker"):
         import httpx                                # openai dependency
         from openai import AsyncOpenAI, OpenAI      # lazy import
+        self._init_provider_attempt_contexts()
         base_url = os.getenv("OPENAI_BASE_URL") or cfg.openai_base_url
         api_key = os.getenv("OPENAI_API_KEY") or cfg.openai_api_key
         # trust_env=False -> hit the endpoint directly, ignoring any ambient
@@ -303,17 +442,80 @@ class OpenAILLM:
         self.tracker.add(self.model, in_tok, out_tok)
 
     def complete(self, system: str, user: str) -> str:
-        resp = self._sync.chat.completions.create(
-            model=self.model, max_tokens=self.max_tokens, temperature=self.temperature,
-            messages=[{"role": "system", "content": system},
-                      {"role": "user", "content": user}])
-        text = resp.choices[0].message.content or ""
-        self._track(resp, system, user, text)
+        context = self._take_provider_attempt_contexts(1)[0]
+        started = time.monotonic()
+        try:
+            resp = self._sync.chat.completions.create(
+                model=self.model, max_tokens=self.max_tokens,
+                temperature=self.temperature,
+                messages=[{"role": "system", "content": system},
+                          {"role": "user", "content": user}])
+            text = resp.choices[0].message.content or ""
+            self._track(resp, system, user, text)
+            parse_failed = _is_parse_failure(text)
+        except Exception as error:
+            observe_provider_attempt(
+                context,
+                ProviderAttemptObservation(
+                    attempt_index=1,
+                    max_attempts=1,
+                    provider=self.kind,
+                    model=self.model,
+                    attempted_system=system,
+                    attempted_user=user,
+                    trigger="initial",
+                    outcome="provider_exception",
+                    exception=error,
+                    latency_ms=_latency_ms(started),
+                    will_retry=False,
+                ),
+            )
+            raise
+        usage = getattr(resp, "usage", None)
+        observe_provider_attempt(
+            context,
+            ProviderAttemptObservation(
+                attempt_index=1,
+                max_attempts=1,
+                provider=self.kind,
+                model=self.model,
+                attempted_system=system,
+                attempted_user=user,
+                trigger="initial",
+                outcome=(
+                    "response_parse_failed" if parse_failed else "response_parseable"
+                ),
+                reported_model=getattr(resp, "model", None),
+                response_text=text,
+                latency_ms=_latency_ms(started),
+                prompt_tokens=_optional_int(getattr(usage, "prompt_tokens", None)),
+                completion_tokens=_optional_int(
+                    getattr(usage, "completion_tokens", None)
+                ),
+                will_retry=False,
+            ),
+        )
         return text
 
     async def acomplete(self, system: str, user: str, retries: int = 2) -> str:
+        context = self._take_provider_attempt_contexts(1)[0]
+        return await self._acomplete_with_context(
+            system, user, retries=retries, context=context
+        )
+
+    async def _acomplete_with_context(
+        self,
+        system: str,
+        user: str,
+        *,
+        retries: int,
+        context: ProviderAttemptContext | None,
+    ) -> str:
         last_price = _user_last_price(user)
+        trigger = "initial"
         for attempt in range(retries + 1):
+            attempted_user = user
+            started = time.monotonic()
             try:
                 resp = await self._async.chat.completions.create(
                     model=self.model, max_tokens=self.max_tokens,
@@ -322,23 +524,80 @@ class OpenAILLM:
                               {"role": "user", "content": user}])
                 text = resp.choices[0].message.content or ""
                 self._track(resp, system, user, text)
-                if not _is_parse_failure(text):
-                    return text
-                # retry-on-parse-failure with a stricter nudge
-                user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
-            except Exception:
+                parse_failed = _is_parse_failure(text)
+            except Exception as error:
+                will_retry = attempt < retries
+                observe_provider_attempt(
+                    context,
+                    ProviderAttemptObservation(
+                        attempt_index=attempt + 1,
+                        max_attempts=retries + 1,
+                        provider=self.kind,
+                        model=self.model,
+                        attempted_system=system,
+                        attempted_user=attempted_user,
+                        trigger=trigger,
+                        outcome="provider_exception",
+                        exception=error,
+                        latency_ms=_latency_ms(started),
+                        will_retry=will_retry,
+                    ),
+                )
                 if attempt == retries:
                     return json.dumps({"side": "hold", "quantity": 0,
                                        "limit_price": last_price, "sentiment": 0.0,
                                        "public_take": "", "rationale": "api-error; holding"})
                 await asyncio.sleep(0.5 * (attempt + 1))
+                trigger = "provider_exception"
+                continue
+            will_retry = parse_failed and attempt < retries
+            usage = getattr(resp, "usage", None)
+            observe_provider_attempt(
+                context,
+                ProviderAttemptObservation(
+                    attempt_index=attempt + 1,
+                    max_attempts=retries + 1,
+                    provider=self.kind,
+                    model=self.model,
+                    attempted_system=system,
+                    attempted_user=attempted_user,
+                    trigger=trigger,
+                    outcome=(
+                        "response_parse_failed"
+                        if parse_failed
+                        else "response_parseable"
+                    ),
+                    reported_model=getattr(resp, "model", None),
+                    response_text=text,
+                    latency_ms=_latency_ms(started),
+                    prompt_tokens=_optional_int(
+                        getattr(usage, "prompt_tokens", None)
+                    ),
+                    completion_tokens=_optional_int(
+                        getattr(usage, "completion_tokens", None)
+                    ),
+                    will_retry=will_retry,
+                ),
+            )
+            if not parse_failed:
+                return text
+            # Preserve the existing cumulative retry nudge exactly.
+            user = user + "\n\nREMINDER: reply with ONLY the JSON object, no prose."
+            trigger = "parse_failure"
         return json.dumps({"side": "hold", "quantity": 0, "limit_price": last_price,
                            "sentiment": 0.0, "public_take": "",
                            "rationale": "parse-retries-exhausted; holding"})
 
     def complete_batch(self, prompts):
+        prompt_list = list(prompts)
+        contexts = self._take_provider_attempt_contexts(len(prompt_list))
         async def _gather():
-            return await asyncio.gather(*[self.acomplete(s, u) for s, u in prompts])
+            return await asyncio.gather(
+                *[
+                    self._acomplete_with_context(s, u, retries=2, context=context)
+                    for (s, u), context in zip(prompt_list, contexts)
+                ]
+            )
         return asyncio.run(_gather())
 
 
@@ -364,13 +623,14 @@ class CostTracker:
                 f"est. cost: ${self.cost_usd:.4f}")
 
 
-class CachingLLM:
+class CachingLLM(ProviderAttemptContextCarrier):
     """Wraps any LLM with a response cache keyed on (persona, state_hash).
 
     The cache makes runs reproducible and cheap: identical agent states in
     identical situations reuse the prior completion instead of re-calling.
     """
     def __init__(self, inner, tracker: CostTracker, enabled: bool = True):
+        self._init_provider_attempt_contexts()
         self.inner = inner
         self.tracker = tracker
         self.enabled = enabled
@@ -385,22 +645,28 @@ class CachingLLM:
         return f"{hashlib.sha1(persona.encode()).hexdigest()[:8]}:{state_hash}"
 
     def complete(self, system: str, user: str) -> str:
+        context = self._take_provider_attempt_contexts(1)[0]
         if not self.enabled:
+            forward_provider_attempt_contexts(self.inner, [context])
             return self.inner.complete(system, user)
         k = self._key(system, user)
         if k in self._cache:
             self.tracker.cache_hits += 1
             return self._cache[k]
+        forward_provider_attempt_contexts(self.inner, [context])
         out = self.inner.complete(system, user)
         self._cache[k] = out
         return out
 
     def complete_batch(self, prompts):
+        prompt_list = list(prompts)
+        contexts = self._take_provider_attempt_contexts(len(prompt_list))
         if not self.enabled:
-            return self.inner.complete_batch(prompts)
-        results: list[str | None] = [None] * len(prompts)
-        misses, miss_idx = [], []
-        for i, (s, u) in enumerate(prompts):
+            forward_provider_attempt_contexts(self.inner, contexts)
+            return self.inner.complete_batch(prompt_list)
+        results: list[str | None] = [None] * len(prompt_list)
+        misses, miss_idx, miss_contexts = [], [], []
+        for i, (s, u) in enumerate(prompt_list):
             k = self._key(s, u)
             if k in self._cache:
                 self.tracker.cache_hits += 1
@@ -408,11 +674,13 @@ class CachingLLM:
             else:
                 misses.append((s, u))
                 miss_idx.append(i)
+                miss_contexts.append(contexts[i])
         if misses:
+            forward_provider_attempt_contexts(self.inner, miss_contexts)
             fresh = self.inner.complete_batch(misses)
             for j, out in zip(miss_idx, fresh):
                 results[j] = out
-                self._cache[self._key(*prompts[j])] = out
+                self._cache[self._key(*prompt_list[j])] = out
         return results  # type: ignore[return-value]
 
 

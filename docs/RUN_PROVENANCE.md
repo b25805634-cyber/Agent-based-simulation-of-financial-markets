@@ -118,7 +118,7 @@ python3 -m experiments.model_qualification \
 | inputs | reference、历史 CSV analysis input 或 replay record 的路径、provenance class、存在性、大小和 SHA-256 |
 | environment | Python、平台及 NumPy/Matplotlib/Anthropic/OpenAI/httpx 版本 |
 | lifecycle | managed context 状态、`failure_stage`、`outputs_complete`、simulation/managed completion 标志 |
-| completion | run、round、Agent decision、logical request、response source、Provider call 和 parsing 的带单位计数 |
+| completion | run、round、Agent decision、logical request、response source、逻辑 Provider call、应用层 Provider attempt 和 parsing 的带单位计数 |
 | samples | 历史兼容的 expected/completed/failed/honest-N；不得代替新 completion 或 run-level N |
 | results | run 内所有产物及外部兼容结果的大小和 SHA-256 |
 
@@ -144,6 +144,22 @@ Phase 1.1A.1 另在 manifest 顶层和 `config_contract` 中记录：
 Phase 1.1A.2 将新 recording envelope 正式升为 `1.2`。`RecordingLLM` 在首次 Provider 调用前校验 source/config metadata，并在每条记录落盘前校验完整 1.2 结构；不再生成新的 schema 1.1 记录。该阶段也通过 `nmsim/config_ingestion.py` 和 package bootstrap 把 mapping 配置输入改为 strict-default，但不改变 `nmsim/config.py` 原始字节或任何默认 Config 值。
 
 Phase 1.1B 在 manifest 中增加 `managed_context`、`bootstrap`、`failure_stage`、`outputs_complete`、`simulation_computation_completed`、`managed_run_completed` 和 `completion`。顶层 `honest_n` 保留但明确为 `agent_decisions` 单位的弃用兼容字段；批量实验使用 `planned_runs` / `started_runs` / `completed_runs` / `failed_runs` / `honest_n_runs`，不再把同一 simulation 内的 Decision 行数当成独立样本 N。完整口径见 [COMPLETION_ACCOUNTING.md](COMPLETION_ACCOUNTING.md)。
+
+当前 completion `1.1` 还在不改变 recording `1.2` 每个逻辑请求一行的
+前提下，增加 `LLMProviderAttemptObserved` 事件和
+`application_provider_attempts`。`RecordingLLM` 用原始 prompt hash 与
+logical/batch/Agent/Persona identity 建立不可变 context；`CachingLLM` 只为
+miss 转发，OpenAI/Anthropic adapter 为每次可见 retry 循环尝试立即写事件。
+公共事件只保存 hash、关联 identity、安全 outcome/trigger、计数和有界
+model id；完整尝试 prompt、中间 raw response 与异常细节只进入 `0600`
+私有事件。Cache hit 和 Replay 的 attempt 数为 0。历史 completion `1.0`
+仍有效，但其中没有可供回填的逐尝试证据。
+即使是私有事件，写入前也会递归移除 Config/环境中的已知 credential；
+其他 prompt/raw/error 文本不做截断或改写。
+response attempt 同时保留本地 requested `model` 和 SDK response 的 nullable
+`reported_model`；manifest 在安全上限内汇总去重 reported-model 集合。例如
+requested `MiniMax-M2.7` 而 response 报告 `HiggsAI` 时，运行必须保留该
+别名歧义，不得静默宣称已证明服务端实际权重身份。
 
 Phase 1.2A 的 driver summary 另记录 `executed_runs`、`reused_runs`、
 `reuse_candidates_examined`、`reuse_candidates_rejected` 和按稳定
@@ -290,7 +306,9 @@ PYTHONPYCACHEPREFIX=/tmp/nmsim-pycache \
 
 ## 当前边界与尚存风险
 
-- 记录的是现有 Provider wrapper 最终返回给 simulation 的 response；SDK 内部每次 retry 的中间原始 response/request id 仍不可见。
+- Recording schema `1.2` 仍只保存 Provider wrapper 最终返回给 simulation
+  的 response；OpenAI/Anthropic 应用层中间尝试改由公/私事件记录。SDK
+  内部透明 retry、传输层/代理/服务端重试和 Provider request id 仍不可见。
 - Phase 1 recording schema `1.0`、pre-contract schema `1.1` 和已带 config contract 的 transitional schema `1.1` 都不是当前正式 Strict Replay 格式。它们可用 reparse audit 做离线解析差异检查，但不能被描述为原实验精确复现；新 Record 只产生完整 schema `1.2`。
 - `Config` 分类是显式 allowlist；新增 dataclass 字段必须同步增加 category、rationale 和测试，否则运行在创建 Provider/进入仿真前 fail closed。
 - Scientific fingerprint 使用显式维护的源文件清单。未来新增影响 Prompt、决策、事件顺序或科学计算的模块时，必须同步纳入清单并增加兼容测试，避免错误放行。
@@ -301,4 +319,4 @@ PYTHONPYCACHEPREFIX=/tmp/nmsim-pycache \
 - Phase 1 已为不可破坏的隐私约束收紧 legacy 异常路径：parser 不把只有 `rationale`、没有 `public_take` 的响应提升为 public text。当前 Mock 和标准 real schema 都显式返回 `public_take`，正常轨迹不受影响；Phase 1.1A 未再次改变这一行为，并用回归测试继续锁定它。
 - 事件记录没有修复现有 market 的无限余额、全额 fill、隐式做市商或 volume/fill 口径；它只把真实行为显式记录下来。
 - Phase 1 最初审计时工作区没有 `.git`，因此初始化前的 manifest 会如实记录 commit/dirty/diff 无法取得。Phase 0.5 建立仅本地 Git 基线后，新受管运行可以记录本地 commit、dirty 状态和可行时的 diff hash；这不会追溯改写旧 manifest。
-- `nmsim/config.py` 仍在原始字节科学 allowlist 中，Phase 1.1A.2 保持了它的原始字节和默认值。Strict ingestion 位于 allowlist 外的 `nmsim/config_ingestion.py`，由 `nmsim/__init__.py` 在正常包导入时显式绑定；因此 Prompt、Persona、simulation core source hash 和总 scientific fingerprint 保持基线身份。最终 effective Config 仍受脱敏配置 hash 约束，recording 证据结构则由 schema 1.2 约束。
+- `nmsim/config.py` 仍在原始字节科学 allowlist 中，Phase 1.1A.2 保持了它的原始字节和默认值。Strict ingestion 位于 allowlist 外的 `nmsim/config_ingestion.py`，由 `nmsim/__init__.py` 在正常包导入时显式绑定；该历史阶段因此保持了当时的 Prompt、Persona、simulation core source hash 和总 scientific fingerprint。本次 Provider-attempt instrumentation 不改变 Prompt、Persona、parser、retry 次数/顺序/退避、fallback 或市场语义，但因可执行 Provider wrapper `nmsim/llm.py` 属于科学源清单，它有意产生新的 simulation-core/scientific source identity。旧 recording 只要 source identity 不同就仍按 Strict Replay 规则拒绝；不会为了声称语义不变而弱化 fingerprint 边界。

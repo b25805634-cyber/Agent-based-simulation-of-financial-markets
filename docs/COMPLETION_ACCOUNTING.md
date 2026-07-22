@@ -5,11 +5,14 @@
 
 ## Manifest schema
 
-`completion.schema_version` 当前为 `1.0`。单次 managed simulation 的结构如下；无法安全预知的 `planned` 使用 `null`，不得填入猜测值。
+`completion.schema_version` 当前为 `1.1`。它在 `1.0` 上只新增
+`application_provider_attempts`；历史 `1.0` manifest 仍是有效历史证据，但不含
+逐尝试数据，不得把缺失猜成 0。单次 managed simulation 的结构如下；
+无法安全预知的 `planned` 使用 `null`，不得填入猜测值。
 
 ```json
 {
-  "schema_version": "1.0",
+  "schema_version": "1.1",
   "simulation_runs": {
     "unit": "simulation_runs",
     "planned": 1,
@@ -53,6 +56,19 @@
     "failed": 0,
     "coverage": "provider-interface requests; SDK-internal retry attempts are not observable"
   },
+  "application_provider_attempts": {
+    "unit": "visible_adapter_loop_attempts",
+    "attempted": 0,
+    "responses_received": 0,
+    "parse_failed_responses": 0,
+    "provider_exceptions": 0,
+    "retries_scheduled": 0,
+    "logical_requests_with_retry": 0,
+    "exhausted_logical_requests": 0,
+    "reported_models": [],
+    "reported_models_truncated": false,
+    "coverage": "OpenAI/Anthropic application retry loops only; excludes SDK, transport, proxy, and server-internal retries"
+  },
   "parsing": {
     "unit": "agent_decision_parse_operations",
     "attempted": 0,
@@ -91,6 +107,15 @@
 | `provider_calls` | `attempted` | 穿透 Replay/cache 后抵达 Provider 接口的 prompt-level 请求数 |
 |  | `succeeded` | 通过 Provider 接口取得最终 response 的数量 |
 |  | `failed` | `max(0, attempted - succeeded)` |
+| `application_provider_attempts` | `attempted` | OpenAI/Anthropic adapter 应用层循环实际发起的逐尝试数；不是独立逻辑请求数 |
+|  | `responses_received` | 成功拿到 SDK response 的尝试数，包括后续被判定为 parse failure 的 response |
+|  | `parse_failed_responses` | response 已收到、但按现有 `_is_parse_failure` 判定为无可解析 JSON 的尝试数 |
+|  | `provider_exceptions` | 应用可见的 Provider/SDK 调用异常数；异常正文仅进入私有事件 |
+|  | `retries_scheduled` | 已记录尝试后确定继续下一次应用层尝试的数量 |
+|  | `logical_requests_with_retry` | 至少进入第 2 次应用层尝试的逻辑请求数；每个请求最多计 1 |
+|  | `exhausted_logical_requests` | 在最后可用尝试仍是 parse failure 或 Provider exception 的逻辑请求数 |
+|  | `reported_models` | 成功 response 中 endpoint 报告的有界、公开安全 model id 去重集合；与 requested `model` 不同时必须显式标记别名歧义 |
+|  | `reported_models_truncated` | 安全去重集合超过 16 个值时为 `true`，不再扩大 manifest |
 | `parsing` | `attempted` | 形成 `AgentDecisionParsed` 时执行的 parser operation 数 |
 |  | `succeeded` | `parse_status != error` 的 operation 数 |
 |  | `failed` | `parse_status == error` 的 operation 数 |
@@ -100,12 +125,29 @@
 
 Fallback 检测沿用当前事件语义：`parse_status=error`，或私有 rationale 精确为内部标记 `api-error; holding` / `parse-retries-exhausted; holding`。这些私有文本仅用于内部计数，绝不复制到公共事件、manifest 摘要或实验 summary。
 
+`LLMProviderAttemptObserved` 的公共 payload 使用
+`provider_attempt_schema=provider_attempt_v1`，包含 logical/batch/round/Agent/Persona
+关联、`attempt_index`/`max_attempts`、requested `model`、nullable
+`reported_model`、原始与实际尝试 prompt hash、trigger/outcome 安全代码、
+nullable response hash、延迟、Provider 报告的 token 计数和 `will_retry`。
+完整 system/user prompt、中间 raw response 和 exception type/detail 只进入同
+event id 的 `private_events.jsonl`，文件强制 `0600`。事件写入异常必须
+向上传播，不得被 Provider `except` 路径误转成 `api-error; holding`。
+私有 payload 的所有字符串在写入前仍递归移除 Config/环境中已知 credential；
+非 credential 的 prompt/raw/error 文本不截断、保持原始字节。
+
+当前 async OpenAI/Anthropic 仍是最多 3 次应用层尝试；parse failure
+继续累加既有 `REMINDER`，Provider exception 仍使用 0.5/1.0 秒退避。
+sync `complete()` 保持一次 SDK 调用、不新增 retry。`CostTracker` 仍只统计
+收到的 SDK response：parse-failed response 计入，Provider exception 不计入。
+
 ## 计数来源与收敛
 
 Managed observer 只在底层事件成功写出后更新计数：
 
 - `RoundStarted` / `RoundFinished` 更新轮数；
 - `LLMRequestRecorded` 更新 logical request 和 decision attempted；
+- `LLMProviderAttemptObserved` 在每次应用层尝试后立即更新 attempt 计数；
 - `LLMResponseRecorded` 更新 logical completed 和初步 response source；
 - `AgentDecisionParsed` 更新 decision 与 parsing。
 
@@ -137,13 +179,18 @@ provider_calls.failed = 0
 network_access = false
 ```
 
-Replay hit 永不记作 Provider call，并且 mismatch 不会 fallback 到 Provider。
+Replay hit 永不记作 Provider call，`application_provider_attempts.attempted=0`，
+并且 mismatch 不会 fallback 到 Provider。
 
 ### Cache 模式
 
-每个 cache hit 只增加 `response_sources.cache`；它仍是一次 completed logical request，但不增加 Provider call。Cache miss 正常穿透 Provider。相同 prompt 连续请求、一次 miss 加一次 hit 的典型口径是：logical requests 2、Provider source 1、cache source 1、Provider attempted/succeeded 1。
+每个 cache hit 只增加 `response_sources.cache`；它仍是一次 completed logical request，但不增加 Provider call，也不产生 Provider-attempt 事件。Cache miss 正常穿透 Provider。相同 prompt 连续请求、一次 miss 加一次 hit 的典型口径是：logical requests 2、Provider source 1、cache source 1、Provider attempted/succeeded 1；attempt 数取决于唯一 miss 的应用层 retry 路径。
 
-Provider call 的覆盖范围止于项目可观察的 Provider 接口。Anthropic/OpenAI-compatible SDK 内部透明 retry 或传输层重试不可观察，既不猜测也不计入。`network_access` 是运行路径属性，不是网络抓包结果。
+`provider_calls` 保持历史的“穿透 cache/replay 后的逻辑 Provider
+请求”单位，不因一个请求内有 2–3 次应用层尝试而膨胀。
+`application_provider_attempts` 另行记录项目可见的 OpenAI/Anthropic
+adapter loop。SDK 内部透明 retry、HTTP 传输层、代理或服务端重试仍不可观，
+既不猜测也不计入。`network_access` 是运行路径属性，不是网络抓包结果。
 
 ## 单次运行示例
 
