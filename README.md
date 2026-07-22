@@ -185,6 +185,9 @@ attempts.
   `|returns|`, overreaction/reversal reaction shape, and the Task-2 cascade
   metric; `--reference CSV` reports drop-depth / speed / recovery match vs a real
   episode (`timestamp,price[,news]`). See `examples/reference_episode.csv`.
+  Versioned Meta/SPY multi-event inputs and the explicit opt-in public-news
+  timeline loader are documented in `docs/MULTI_EVENT_PROTOCOL.md`; timeline
+  injection is not enabled by the existing CLI.
 
 ## Env vars
 `LLM_PROVIDER` (`mock`/`anthropic`/`openai`) · `LLM_MODEL` · `LLM_CHEAP_MODEL` ·
