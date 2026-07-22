@@ -12,6 +12,8 @@ network operation and is used by the synthetic numerical tests.
 from __future__ import annotations
 
 from dataclasses import dataclass, replace
+import errno
+import fcntl
 import hashlib
 import json
 import math
@@ -21,6 +23,7 @@ import random
 import re
 import stat
 from statistics import mean, stdev
+import subprocess
 import sys
 from typing import Any, Iterable, Mapping, Optional, Sequence
 
@@ -37,12 +40,19 @@ from nmsim.managed_cli import (
     bootstrap_cli,
     fail_cli,
 )
-from nmsim.decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+from nmsim.decision_contract import (
+    DECISION_VALID,
+    LEGACY_PARSE_INVALID,
+    MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+    PROVIDER_EXCEPTION_EXHAUSTED,
+    PROVIDER_PARSE_EXHAUSTED,
+    STRICT_SCHEMA_INVALID,
+)
 from nmsim.provenance import (
     SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION,
     sha256_file,
 )
-from nmsim.provider_attempts import safe_reported_model
+from nmsim.provider_attempts import PROVIDER_ATTEMPT_SCHEMA, safe_reported_model
 from nmsim.multi_event import (
     ATTEMPT_SERIES_SCHEMA_VERSION,
     FROZEN_PROTOCOL_SHA256,
@@ -59,6 +69,7 @@ from nmsim.multi_event import (
     resample_reference_log_path,
 )
 from nmsim.result_reuse import (
+    REUSE_REASON_CODES,
     ResultReuseError,
     ReusableRunCandidate,
     load_child_run_identity,
@@ -94,6 +105,134 @@ DRIVER_SUMMARY_FILENAME = "driver_summary.json"
 DRIVER_PRIVATE_FAILURES_FILENAME = "driver_failures.private.jsonl"
 ATTEMPT_COORDINATION_LOCK_NAME = ".multi_event_attempts.lock"
 _HASH_HEX = frozenset("0123456789abcdef")
+DRIVER_PUBLIC_REASON_CODES = frozenset(
+    {
+        "identity_and_health_valid",
+        "child_process_launched",
+        "off_policy_slot_attempt_materialized",
+        "attempt_in_flight",
+        "attempt_materialization_indeterminate",
+        "attempt_budget_exhausted",
+        "endpoint_unreachable",
+        "subprocess_interrupted",
+        "subprocess_exception",
+        "child_attempt_not_materialized",
+        "child_identity_rejected",
+        "subprocess_exit",
+        "driver_job_exception",
+        "child_run_not_started",
+        "child_result_missing",
+        "live_source_snapshot_rejected",
+    }
+)
+ANALYZER_PUBLIC_REASON_CODES = (
+    frozenset(
+        {
+            "manifest_unreadable",
+            "declared_manifest_hash_mismatch",
+            "canonical_expected_identity_invalid",
+            "frozen_reference_content_hash_mismatch",
+            "manifest_config_missing",
+            "live_source_snapshot_mismatch",
+            "result_artifact_unreadable",
+            "declared_result_hash_mismatch",
+            "result_cell_contract_mismatch",
+            "health_bad_frac_exceeded",
+        }
+    )
+    | frozenset(
+        "declared_identity_mismatch:" + field
+        for field in {
+            "run_id",
+            "command_identity",
+            "config_hash_schema_version",
+            "scientific_config_hash",
+            "model_request_config_hash",
+            "scientific_input_identity",
+            "scenario_definition_hash",
+            "population_identity",
+            "requested_provider",
+            "requested_model",
+            "resolved_provider",
+            "resolved_model",
+            "endpoint_identity",
+            "invalid_reported_model_alias_count",
+            "scientific_runtime_environment",
+            "scientific_runtime_environment_identity",
+        }
+    )
+    | frozenset(
+        "config_mismatch:" + field
+        for field in {
+            "broadcast_mode",
+            "decision_response_schema",
+            "demote_influencer",
+            "digest_size",
+            "fundamental_value",
+            "initial_price",
+            "kappa",
+            "leverage_enabled",
+            "leverage_fraction",
+            "leverage_ratio",
+            "leverage_spread",
+            "maintenance_margin",
+            "max_llm_agents",
+            "n_llm_agents",
+            "n_neighbors",
+            "n_noise_agents",
+            "n_rounds",
+            "news_round",
+            "news_text",
+            "news_timeline",
+            "population",
+            "recent_window",
+            "reference_path",
+            "seed",
+            "seed_fraction",
+            "social_enabled",
+            "social_mode",
+            "social_weight",
+            "topology",
+            "temperature",
+            "max_tokens",
+            "cache_enabled",
+            "provider_sdk_max_retries",
+            "provider",
+            "model",
+            "cheap_model",
+            "use_cheap_model",
+            "openai_base_url",
+            "openai_model",
+        }
+    )
+)
+ALLOWED_PUBLIC_REASON_CODES = (
+    REUSE_REASON_CODES
+    | DRIVER_PUBLIC_REASON_CODES
+    | ANALYZER_PUBLIC_REASON_CODES
+)
+STRICT_DECISION_ERROR_CODES = frozenset(
+    {
+        "invalid_json_object",
+        "missing_required_field",
+        "invalid_action",
+        "invalid_quantity",
+        "quantity_action_mismatch",
+        "invalid_limit_price",
+        "invalid_sentiment",
+        "blank_reasoning",
+        "blank_public_take",
+    }
+)
+HEALTH_TERMINAL_BUCKETS = frozenset(
+    {
+        "strict_schema_invalid",
+        "legacy_parse_invalid",
+        "provider_exception_exhausted",
+        "provider_parse_exhausted",
+        "valid_decisions",
+    }
+)
 
 
 class MultiEventInputError(ValueError):
@@ -102,6 +241,76 @@ class MultiEventInputError(ValueError):
 
 class ApprovalRequiredError(ValueError):
     """Confirmatory qualitative claims have no preregistered approved thresholds."""
+
+
+class AnalysisAttemptLock:
+    """Hold an exclusive nonblocking study-root lock while reading evidence."""
+
+    def __init__(self, child_root: Path) -> None:
+        lexical_root = Path(
+            os.path.abspath(os.path.expanduser(str(child_root)))
+        )
+        self.path = lexical_root / ATTEMPT_COORDINATION_LOCK_NAME
+        self.fd: Optional[int] = None
+
+    def __enter__(self) -> "AnalysisAttemptLock":
+        try:
+            lexical_info = self.path.lstat()
+        except OSError as error:
+            raise MultiEventInputError(
+                "attempt coordination lock cannot be inspected safely"
+            ) from error
+        if (
+            stat.S_ISLNK(lexical_info.st_mode)
+            or not stat.S_ISREG(lexical_info.st_mode)
+            or stat.S_IMODE(lexical_info.st_mode) != 0o600
+        ):
+            raise MultiEventInputError(
+                "attempt coordination lock must be regular mode 0600"
+            )
+        flags = os.O_RDWR
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path, flags)
+        except OSError as error:
+            raise MultiEventInputError(
+                "attempt coordination lock cannot be opened safely"
+            ) from error
+        try:
+            info = os.fstat(fd)
+            if (
+                not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+                or (info.st_dev, info.st_ino)
+                != (lexical_info.st_dev, lexical_info.st_ino)
+            ):
+                raise MultiEventInputError(
+                    "attempt coordination lock must be regular mode 0600"
+                )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                raise MultiEventInputError(
+                    "attempt coordination lock is held by a parent or child"
+                ) from error
+            self.fd = fd
+            return self
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def close(self) -> None:
+        if self.fd is None:
+            return
+        fd, self.fd = self.fd, None
+        os.close(fd)
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
 
 
 @dataclass(frozen=True)
@@ -214,6 +423,15 @@ def _sha256(value: Any, field: str) -> str:
     if len(digest) != 64 or any(char not in _HASH_HEX for char in digest):
         raise MultiEventInputError(f"{field} must be a lowercase SHA-256")
     return digest
+
+
+def _validated_public_reason_code(value: Any, field: str) -> str:
+    reason = _text(value, field)
+    if reason not in ALLOWED_PUBLIC_REASON_CODES:
+        raise MultiEventInputError(
+            f"{field} is not a registered public-safe reason code"
+        )
+    return reason
 
 
 def _stable_json_sha256(value: Any) -> str:
@@ -541,9 +759,14 @@ def _validate_selection_partition(
                 "missing_or_rejected_slots[].status must be missing or rejected"
             )
         reasons = _list(item.get("reason_codes"), "missing_or_rejected_slots[].reason_codes")
-        if not reasons or any(not isinstance(reason, str) or not reason for reason in reasons):
+        if not reasons:
             raise MultiEventInputError(
                 "missing/rejected planned slots require non-empty public reason_codes"
+            )
+        for index, reason in enumerate(reasons):
+            _validated_public_reason_code(
+                reason,
+                f"missing_or_rejected_slots[].reason_codes[{index}]",
             )
         attempts = item.get("attempt_run_ids", [])
         if (
@@ -1286,6 +1509,38 @@ def _validated_source_snapshot(
         )
     if len(head) != 40 or any(char not in _HASH_HEX for char in head):
         raise MultiEventInputError("live source_snapshot commit is not a Git SHA")
+    git_values: list[str] = []
+    for arguments in (
+        ("rev-parse", "HEAD"),
+        (
+            "log",
+            "-1",
+            "--format=%H",
+            "--",
+            "experiments/multi_event_protocol.json",
+        ),
+        ("status", "--porcelain=v1", "--untracked-files=all"),
+    ):
+        process = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), *arguments],
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        if process.returncode != 0:
+            raise MultiEventInputError(
+                "analyzer cannot independently establish current Git identity"
+            )
+        git_values.append(process.stdout.strip())
+    current_head, current_protocol_commit, current_status = git_values
+    if (
+        current_head != head
+        or current_protocol_commit != head
+        or current_status
+    ):
+        raise MultiEventInputError(
+            "current analyzer checkout is not the clean protocol-owning snapshot"
+        )
     if expected_identities is not None and any(
         identity.git_commit != head
         or identity.scientific_component_fingerprint != fingerprint
@@ -1678,7 +1933,7 @@ def _validate_driver_attempt_ledger(
             )
         source = _text(record.get("source"), "attempt ledger source")
         status = _text(record.get("status"), "attempt ledger status")
-        reason = _text(
+        reason = _validated_public_reason_code(
             record.get("reason_code"), "attempt ledger reason_code"
         )
         if source not in {"executed", "resumed_attempt", "driver"}:
@@ -1898,6 +2153,7 @@ def _validate_live_foreign_attempt_cap(
     *,
     child_root: Path,
     jobs: Mapping[tuple[str, str, int, int], Mapping[str, Any]],
+    selection: Mapping[str, Any],
     execution_mode: str,
 ) -> None:
     """Audit same-slot materializations without using them as input selectors."""
@@ -1919,7 +2175,18 @@ def _validate_live_foreign_attempt_cap(
         raise MultiEventInputError(
             "canonical live runs root cannot be audited"
         ) from error
-    for job in jobs.values():
+    selected_by_cell: dict[
+        tuple[str, str, int, int], Mapping[str, Any]
+    ] = {}
+    for field in ("children", "missing_or_rejected_slots"):
+        for raw in _list(selection.get(field), field):
+            item = _mapping(raw, f"{field}[]")
+            selected_by_cell[_selection_slot(item, f"{field}[]")] = item
+    if set(selected_by_cell) != set(jobs):
+        raise MultiEventInputError(
+            "live attempt-cap audit selection differs from the plan"
+        )
+    for cell, job in jobs.items():
         slot_id = job["slot"]["slot_id"]
         prefix = f"me-{slot_id}-"
         pattern = re.compile(
@@ -1935,6 +2202,43 @@ def _validate_live_foreign_attempt_cap(
             raise MultiEventInputError(
                 "canonical live root contains a foreign-series same-slot attempt"
             )
+        materialized = {
+            name for name in materialized_names if pattern.fullmatch(name)
+        }
+        declared = set(selected_by_cell[cell].get("attempt_run_ids", []))
+        if materialized != declared:
+            raise MultiEventInputError(
+                "live same-slot materializations differ from the declared attempt prefix"
+            )
+        for run_id in materialized:
+            attempt_dir = runs_root / run_id
+            manifest_path = attempt_dir / DRIVER_MANIFEST_FILENAME
+            if (
+                attempt_dir.is_symlink()
+                or not attempt_dir.is_dir()
+                or manifest_path.is_symlink()
+                or not manifest_path.is_file()
+            ):
+                raise MultiEventInputError(
+                    "live attempt-prefix materialization is not a regular managed run"
+                )
+            attempt_manifest = _read_json(
+                manifest_path, "live attempt-prefix manifest"
+            )
+            attempt_managed = _mapping(
+                attempt_manifest.get("managed_context"),
+                "live attempt-prefix managed_context",
+            )
+            if (
+                attempt_manifest.get("status"),
+                attempt_managed.get("state"),
+            ) not in {
+                ("finished", "FINISHED"),
+                ("failed", "FAILED"),
+            }:
+                raise MultiEventInputError(
+                    "live attempt-prefix contains an ACTIVE or indeterminate attempt"
+                )
 
 
 def prepare_driver_selection(
@@ -2249,6 +2553,7 @@ def prepare_driver_selection(
     _validate_live_foreign_attempt_cap(
         child_root=child_root,
         jobs=jobs,
+        selection=selection,
         execution_mode=execution_plan["execution_mode"],
     )
     first_expected = expected_identities[next(iter(jobs))]
@@ -2683,19 +2988,25 @@ def recompute_drop_depth_from_path(
 
 
 def _rejection(selection: ChildSelection, reasons: Iterable[str]) -> Mapping[str, Any]:
+    public_reasons = [
+        _validated_public_reason_code(reason, "analysis rejection reason_code")
+        for reason in dict.fromkeys(reasons)
+    ]
     return {
         "event_id": selection.event_id,
         "arm": selection.arm,
         "seed": selection.seed,
         "repeat_idx": selection.repeat_idx,
         "run_id": selection.expected_identity.get("run_id"),
-        "reason_codes": list(dict.fromkeys(str(reason) for reason in reasons)),
+        "reason_codes": public_reasons,
     }
 
 
 def _validated_application_attempt_evidence(
     manifest: Mapping[str, Any], events_path: Path, *, execution_mode: str
 ) -> Mapping[str, Any]:
+    """Recompute public decision health and visible adapter-attempt evidence."""
+
     completion = _mapping(manifest.get("completion"), "completion")
     attempts = _mapping(
         completion.get("application_provider_attempts"),
@@ -2754,18 +3065,248 @@ def _validated_application_attempt_evidence(
 
     observed = {field: 0 for field in count_fields}
     observed_aliases: set[str] = set()
+    terminal_counts = {field: 0 for field in HEALTH_TERMINAL_BUCKETS}
+    provider_exhaustion_counts = {
+        PROVIDER_EXCEPTION_EXHAUSTED: 0,
+        PROVIDER_PARSE_EXHAUSTED: 0,
+    }
+    expected_run_id = _text(manifest.get("run_id"), "child manifest run_id")
+    expected_direction = "side" if execution_mode == "mock" else "action"
+    decision_data_keys = {
+        "persona_id",
+        "action",
+        "quantity",
+        "limit_price",
+        "sentiment",
+        "public_take",
+        "parse_status",
+        "decision_response_schema",
+        "decision_response_direction_field",
+        "strict_schema_valid",
+        "strict_schema_error_code",
+        "terminal_status",
+        "raw_response_sha256",
+    }
+    provider_data_keys = {
+        "provider_attempt_schema",
+        "logical_sequence",
+        "batch_sequence",
+        "batch_index",
+        "batch_size",
+        "round",
+        "agent",
+        "persona",
+        "attempt_index",
+        "max_attempts",
+        "provider",
+        "model",
+        "reported_model",
+        "reported_model_alias_invalid",
+        "original_prompt_hash",
+        "attempted_prompt_hash",
+        "trigger",
+        "outcome",
+        "response_hash",
+        "latency_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "will_retry",
+    }
+    provider_sequences: dict[int, list[Mapping[str, Any]]] = {}
+    decision_cells: set[tuple[int, str]] = set()
     for record in _read_jsonl_objects(events_path, "child public events"):
-        if record.get("type") != "LLMProviderAttemptObserved":
+        event_type = record.get("type")
+        if event_type not in {
+            "AgentDecisionParsed",
+            "LLMProviderAttemptObserved",
+        }:
             continue
+        if (
+            record.get("schema_version") != "1.0"
+            or record.get("run_id") != expected_run_id
+        ):
+            raise MultiEventInputError(
+                "public machine-evidence event has an invalid run envelope"
+            )
+        event_round = _integer(record.get("round"), "public event round")
+        event_agent = _text(record.get("agent_id"), "public event agent_id")
+        if event_round < 1:
+            raise MultiEventInputError("public event round must be positive")
         data = _mapping(record.get("data"), "provider-attempt event data")
+
+        if event_type == "AgentDecisionParsed":
+            decision_cell = (event_round, event_agent)
+            if decision_cell in decision_cells:
+                raise MultiEventInputError(
+                    "AgentDecisionParsed repeats one round/agent decision cell"
+                )
+            decision_cells.add(decision_cell)
+            if set(data) != decision_data_keys:
+                raise MultiEventInputError(
+                    "AgentDecisionParsed does not have the exact public schema"
+                )
+            terminal_status = data.get("terminal_status")
+            strict_valid = data.get("strict_schema_valid")
+            strict_error = data.get("strict_schema_error_code")
+            parse_status = data.get("parse_status")
+            if (
+                data.get("decision_response_schema")
+                != MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+                or data.get("decision_response_direction_field")
+                != expected_direction
+                or _text(data.get("persona_id"), "decision persona_id") == ""
+                or _sha256(
+                    data.get("raw_response_sha256"),
+                    "decision raw_response_sha256",
+                )
+                == ""
+                or terminal_status == LEGACY_PARSE_INVALID
+                or terminal_status
+                not in {
+                    DECISION_VALID,
+                    STRICT_SCHEMA_INVALID,
+                    PROVIDER_EXCEPTION_EXHAUSTED,
+                    PROVIDER_PARSE_EXHAUSTED,
+                }
+            ):
+                raise MultiEventInputError(
+                    "AgentDecisionParsed strict-schema identity is inconsistent"
+                )
+            if terminal_status == DECISION_VALID:
+                machine_relation_valid = (
+                    strict_valid is True
+                    and strict_error is None
+                    and parse_status == "parsed"
+                )
+            else:
+                machine_relation_valid = (
+                    strict_valid is False
+                    and strict_error in STRICT_DECISION_ERROR_CODES
+                    and parse_status == "error"
+                )
+                if terminal_status in {
+                    PROVIDER_EXCEPTION_EXHAUSTED,
+                    PROVIDER_PARSE_EXHAUSTED,
+                }:
+                    machine_relation_valid = (
+                        machine_relation_valid
+                        and strict_error == "missing_required_field"
+                    )
+            if not machine_relation_valid:
+                raise MultiEventInputError(
+                    "AgentDecisionParsed terminal, strict-valid, and parse fields disagree"
+                )
+            bucket = (
+                "valid_decisions"
+                if terminal_status == DECISION_VALID
+                else terminal_status
+            )
+            terminal_counts[bucket] += 1
+            continue
+
+        if execution_mode != "openai_live":
+            raise MultiEventInputError(
+                "mock child has a public Provider-attempt event"
+            )
+        if (
+            set(data) != provider_data_keys
+            or data.get("provider_attempt_schema") != PROVIDER_ATTEMPT_SCHEMA
+        ):
+            raise MultiEventInputError(
+                "provider-attempt event schema is unsupported"
+            )
+        logical_sequence = _integer(
+            data.get("logical_sequence"),
+            "provider-attempt event logical_sequence",
+        )
+        batch_sequence = _integer(
+            data.get("batch_sequence"),
+            "provider-attempt event batch_sequence",
+        )
+        batch_index = _integer(
+            data.get("batch_index"), "provider-attempt event batch_index"
+        )
+        batch_size = _integer(
+            data.get("batch_size"), "provider-attempt event batch_size"
+        )
+        attempt_index = _integer(
+            data.get("attempt_index"), "provider-attempt event attempt_index"
+        )
+        max_attempts = _integer(
+            data.get("max_attempts"), "provider-attempt event max_attempts"
+        )
+        if (
+            logical_sequence < 1
+            or batch_sequence < 1
+            or batch_size < 1
+            or not 0 <= batch_index < batch_size
+            or not 1 <= attempt_index <= max_attempts
+            or max_attempts != 3
+            or data.get("round") != event_round
+            or data.get("agent") != event_agent
+            or not isinstance(data.get("persona"), str)
+            or not data.get("persona")
+            or data.get("provider") != "openai"
+            or not isinstance(data.get("model"), str)
+            or not data.get("model")
+        ):
+            raise MultiEventInputError(
+                "provider-attempt event context is inconsistent"
+            )
+        _sha256(
+            data.get("original_prompt_hash"),
+            "provider-attempt original_prompt_hash",
+        )
+        _sha256(
+            data.get("attempted_prompt_hash"),
+            "provider-attempt attempted_prompt_hash",
+        )
+        latency_ms = _finite(
+            data.get("latency_ms"), "provider-attempt latency_ms"
+        )
+        if latency_ms < 0:
+            raise MultiEventInputError(
+                "provider-attempt latency_ms must be nonnegative"
+            )
+        for token_field in ("prompt_tokens", "completion_tokens"):
+            token_count = data.get(token_field)
+            if token_count is not None and (
+                isinstance(token_count, bool)
+                or not isinstance(token_count, int)
+                or token_count < 0
+            ):
+                raise MultiEventInputError(
+                    f"provider-attempt {token_field} must be null or nonnegative integer"
+                )
+        trigger = data.get("trigger")
+        if trigger not in {"initial", "parse_failure", "provider_exception"}:
+            raise MultiEventInputError(
+                "provider-attempt event trigger is unsupported"
+            )
         observed["attempted"] += 1
         outcome = data.get("outcome")
         if outcome in {"response_parseable", "response_parse_failed"}:
             observed["responses_received"] += 1
+            _sha256(
+                data.get("response_hash"),
+                "provider-attempt response_hash",
+            )
         if outcome == "response_parse_failed":
             observed["parse_failed_responses"] += 1
         elif outcome == "provider_exception":
             observed["provider_exceptions"] += 1
+            if any(
+                data.get(field) is not None
+                for field in (
+                    "response_hash",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "reported_model",
+                )
+            ):
+                raise MultiEventInputError(
+                    "provider-exception event exposes impossible response evidence"
+                )
         elif outcome != "response_parseable":
             raise MultiEventInputError(
                 "provider-attempt event has an unsupported outcome"
@@ -2777,16 +3318,6 @@ def _validated_application_attempt_evidence(
             )
         if will_retry:
             observed["retries_scheduled"] += 1
-        attempt_index = _integer(
-            data.get("attempt_index"), "provider-attempt event attempt_index"
-        )
-        if attempt_index == 2:
-            observed["logical_requests_with_retry"] += 1
-        if not will_retry and outcome in {
-            "response_parse_failed",
-            "provider_exception",
-        }:
-            observed["exhausted_logical_requests"] += 1
         alias = data.get("reported_model")
         invalid_alias = data.get("reported_model_alias_invalid")
         if not isinstance(invalid_alias, bool):
@@ -2803,17 +3334,114 @@ def _validated_application_attempt_evidence(
                     )
             else:
                 observed_aliases.add(alias)
+        if invalid_alias and alias is not None:
+            raise MultiEventInputError(
+                "invalid provider alias must be redacted from public evidence"
+            )
+        provider_sequences.setdefault(logical_sequence, []).append(data)
+
+    if execution_mode == "openai_live" and set(provider_sequences) != set(
+        range(1, len(provider_sequences) + 1)
+    ):
+        raise MultiEventInputError(
+            "provider-attempt logical sequences are not a contiguous run prefix"
+        )
+    stable_context_fields = (
+        "batch_sequence",
+        "batch_index",
+        "batch_size",
+        "round",
+        "agent",
+        "persona",
+        "original_prompt_hash",
+        "provider",
+        "model",
+        "max_attempts",
+    )
+    provider_cells: set[tuple[int, str]] = set()
+    for logical_sequence, sequence in provider_sequences.items():
+        attempt_indices = [item.get("attempt_index") for item in sequence]
+        if attempt_indices != list(range(1, len(sequence) + 1)):
+            raise MultiEventInputError(
+                "provider-attempt indices are not contiguous within a logical request"
+            )
+        first = sequence[0]
+        provider_cells.add((int(first["round"]), str(first["agent"])))
+        if any(
+            any(item.get(field) != first.get(field) for field in stable_context_fields)
+            for item in sequence[1:]
+        ):
+            raise MultiEventInputError(
+                "provider-attempt context changes within a logical request"
+            )
+        if sequence[0].get("trigger") != "initial":
+            raise MultiEventInputError(
+                "provider-attempt sequence must begin with the initial trigger"
+            )
+        for previous, current in zip(sequence, sequence[1:]):
+            expected_trigger = {
+                "response_parse_failed": "parse_failure",
+                "provider_exception": "provider_exception",
+            }.get(previous.get("outcome"))
+            if (
+                previous.get("will_retry") is not True
+                or expected_trigger is None
+                or current.get("trigger") != expected_trigger
+            ):
+                raise MultiEventInputError(
+                    "provider-attempt retry transition is inconsistent"
+                )
+        final = sequence[-1]
+        if final.get("will_retry") is not False:
+            raise MultiEventInputError(
+                "provider-attempt sequence lacks one non-retrying terminal event"
+            )
+        if any(item.get("outcome") == "response_parseable" for item in sequence[:-1]):
+            raise MultiEventInputError(
+                "provider-attempt sequence continues after a parseable response"
+            )
+        observed["logical_requests_with_retry"] += int(len(sequence) >= 2)
+        final_outcome = final.get("outcome")
+        if final_outcome in {"response_parse_failed", "provider_exception"}:
+            if len(sequence) != 3:
+                raise MultiEventInputError(
+                    "provider-attempt failure exhausted before max_attempts"
+                )
+            observed["exhausted_logical_requests"] += 1
+            bucket = (
+                PROVIDER_PARSE_EXHAUSTED
+                if final_outcome == "response_parse_failed"
+                else PROVIDER_EXCEPTION_EXHAUSTED
+            )
+            provider_exhaustion_counts[bucket] += 1
+
     if any(attempts[field] != observed[field] for field in count_fields) or aliases != sorted(
         observed_aliases
     ):
         raise MultiEventInputError(
             "application provider-attempt completion disagrees with public events"
         )
-    return dict(attempts)
+    decision_count = sum(terminal_counts.values())
+    if execution_mode == "openai_live" and (
+        len(provider_sequences) != decision_count
+        or provider_cells != decision_cells
+    ):
+        raise MultiEventInputError(
+            "visible Provider logical requests do not close against public decision cells"
+        )
+    return {
+        "application_provider_attempts": dict(attempts),
+        "terminal_status_counts": terminal_counts,
+        "provider_exhaustion_counts": provider_exhaustion_counts,
+    }
 
 
 def _validated_multi_event_health(
-    result: Mapping[str, Any], manifest: Mapping[str, Any]
+    result: Mapping[str, Any],
+    manifest: Mapping[str, Any],
+    *,
+    terminal_status_counts: Mapping[str, Any],
+    provider_exhaustion_counts: Mapping[str, Any],
 ) -> float:
     health = _mapping(result.get("health"), "health")
     if set(health) != {
@@ -2831,13 +3459,7 @@ def _validated_multi_event_health(
         health.get("total_llm_orders"), "health.total_llm_orders"
     )
     union = _mapping(health.get("failure_union_counts"), "health.failure_union_counts")
-    count_keys = {
-        "strict_schema_invalid",
-        "legacy_parse_invalid",
-        "provider_exception_exhausted",
-        "provider_parse_exhausted",
-        "valid_decisions",
-    }
+    count_keys = HEALTH_TERMINAL_BUCKETS
     if (
         health.get("schema_version") != "multi_event_health_v1"
         or health.get("decision_response_schema")
@@ -2857,6 +3479,7 @@ def _validated_multi_event_health(
         or sum(union.values()) != total_orders
         or sum(union[key] for key in count_keys - {"valid_decisions"})
         != bad_orders
+        or dict(union) != dict(terminal_status_counts)
     ):
         raise MultiEventInputError("health terminal-status union is inconsistent")
     completion = _mapping(manifest.get("completion"), "completion")
@@ -2874,6 +3497,10 @@ def _validated_multi_event_health(
         or union["provider_exception_exhausted"]
         + union["provider_parse_exhausted"]
         != attempts.get("exhausted_logical_requests")
+        or union["provider_exception_exhausted"]
+        != provider_exhaustion_counts.get(PROVIDER_EXCEPTION_EXHAUSTED)
+        or union["provider_parse_exhausted"]
+        != provider_exhaustion_counts.get(PROVIDER_PARSE_EXHAUSTED)
     ):
         raise MultiEventInputError(
             "health terminal counts do not close against completion"
@@ -3005,7 +3632,7 @@ def validate_selected_children(
             reported_aliases = _list(
                 result.get("reported_model_aliases"), "reported_model_aliases"
             )
-            _validated_application_attempt_evidence(
+            public_machine_evidence = _validated_application_attempt_evidence(
                 raw_manifest,
                 selected.manifest_path.parent / "events.jsonl",
                 execution_mode=prepared.execution_plan["execution_mode"],
@@ -3031,7 +3658,14 @@ def validate_selected_children(
                 metrics.get("drop_depth"), "metrics.drop_depth"
             )
             raw_bad_frac = _validated_multi_event_health(
-                result, raw_manifest
+                result,
+                raw_manifest,
+                terminal_status_counts=public_machine_evidence[
+                    "terminal_status_counts"
+                ],
+                provider_exhaustion_counts=public_machine_evidence[
+                    "provider_exhaustion_counts"
+                ],
             )
             raw_path = _list(result.get("norm_log_path"), "norm_log_path")
             norm_log_path = tuple(
@@ -3885,43 +4519,12 @@ def build_argparser() -> RaisingArgumentParser:
     return parser
 
 
-def main(argv: Optional[Sequence[str]] = None) -> None:
-    argv = list(sys.argv[1:] if argv is None else argv)
-    try:
-        bootstrap = bootstrap_cli(
-            argv,
-            default_out="results_multi_event_analysis",
-            command_identity="python -m experiments.aggregate_multi_event",
-        )
-    except BootstrapCLIError as error:
-        print(
-            "provenance_not_created_reason={}".format(type(error).__name__),
-            file=sys.stderr,
-        )
-        raise SystemExit(2)
-    try:
-        args = build_argparser().parse_args(argv)
-        protocol_path = Path(args.protocol).resolve(strict=True)
-        protocol = load_protocol(protocol_path)
-        thresholds = protocol["qualitative_thresholds"]
-        if args.require_confirmatory and (
-            protocol.get("confirmatory") is not True
-            or not thresholds["thresholds_approved"]
-            or not thresholds.get("approval_record")
-        ):
-            raise ApprovalRequiredError(
-                "the preregistered variance-components pilot is not confirmatory"
-            )
-        prepared = prepare_driver_selection(
-            Path(args.driver_manifest),
-            protocol=protocol,
-            protocol_path=protocol_path,
-            child_root=Path(args.child_root),
-            reference_root=Path(args.reference_root),
-        )
-    except (ManagedCLIError, MultiEventInputError, MultiEventProtocolError,
-            ApprovalRequiredError, OSError, ValueError) as error:
-        fail_cli(bootstrap, error, failure_stage="config_validation")
+def _execute_managed_analysis(
+    args: Any,
+    prepared: PreparedSelection,
+    protocol: Mapping[str, Any],
+) -> tuple[Mapping[str, Any], Path]:
+    """Create, populate, and finish one provenance-complete analysis run."""
 
     managed = ManagedRunContext.create_driver(
         out_root=Path(args.out),
@@ -4001,12 +4604,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
             )
             summary = dict(summary)
             summary["protocol_sha256"] = prepared.protocol_sha256
-            summary["selection_manifest_sha256"] = sha256_file(prepared.selection_path)
+            summary["selection_manifest_sha256"] = sha256_file(
+                prepared.selection_path
+            )
             summary["driver_parent_run_id"] = prepared.driver_run_id
             summary["driver_parent_manifest_sha256"] = sha256_file(
                 prepared.driver_manifest_path
             )
-            summary["study_model_identity"] = dict(prepared.study_model_identity)
+            summary["study_model_identity"] = dict(
+                prepared.study_model_identity
+            )
             summary["output_root_policy"] = (
                 None
                 if prepared.output_root_policy is None
@@ -4029,10 +4636,67 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         managed.manifest["analysis_honest_n"] = summary["honest_n"]
         managed.manifest.write_atomic()
         managed.finish(legacy_filenames=(SUMMARY_FILENAME, PLOT_FILENAME))
+    return summary, managed.run_dir
+
+
+def main(argv: Optional[Sequence[str]] = None) -> None:
+    argv = list(sys.argv[1:] if argv is None else argv)
+    analysis_lock: Optional[AnalysisAttemptLock] = None
+    try:
+        bootstrap = bootstrap_cli(
+            argv,
+            default_out="results_multi_event_analysis",
+            command_identity="python -m experiments.aggregate_multi_event",
+        )
+    except BootstrapCLIError as error:
+        print(
+            "provenance_not_created_reason={}".format(type(error).__name__),
+            file=sys.stderr,
+        )
+        raise SystemExit(2)
+    try:
+        args = build_argparser().parse_args(argv)
+        protocol_path = Path(args.protocol).resolve(strict=True)
+        protocol = load_protocol(protocol_path)
+        thresholds = protocol["qualitative_thresholds"]
+        if args.require_confirmatory and (
+            protocol.get("confirmatory") is not True
+            or not thresholds["thresholds_approved"]
+            or not thresholds.get("approval_record")
+        ):
+            raise ApprovalRequiredError(
+                "the preregistered variance-components pilot is not confirmatory"
+            )
+        analysis_lock = AnalysisAttemptLock(Path(args.child_root))
+        analysis_lock.__enter__()
+        prepared = prepare_driver_selection(
+            Path(args.driver_manifest),
+            protocol=protocol,
+            protocol_path=protocol_path,
+            child_root=Path(args.child_root),
+            reference_root=Path(args.reference_root),
+        )
+    except (ManagedCLIError, MultiEventInputError, MultiEventProtocolError,
+            ApprovalRequiredError, OSError, ValueError) as error:
+        if analysis_lock is not None:
+            analysis_lock.close()
+        fail_cli(bootstrap, error, failure_stage="config_validation")
+    except BaseException:
+        if analysis_lock is not None:
+            analysis_lock.close()
+        raise
+
+    try:
+        summary, analysis_run_dir = _execute_managed_analysis(
+            args, prepared, protocol
+        )
+    finally:
+        if analysis_lock is not None:
+            analysis_lock.close()
     print(
         "multi-event analysis complete: cross_event_complete_seed_clusters={} -> {}".format(
             summary["honest_n"]["cross_event_complete_seed_clusters"],
-            managed.run_dir,
+            analysis_run_dir,
         )
     )
 

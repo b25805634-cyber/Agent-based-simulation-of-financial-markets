@@ -1,6 +1,7 @@
 """Synthetic numerical and managed-boundary tests for multi-event analysis."""
 from __future__ import annotations
 
+from collections import Counter
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
 import hashlib
@@ -16,6 +17,7 @@ import unittest
 from unittest import mock
 
 from experiments import aggregate_multi_event as A
+from nmsim.provenance import scientific_runtime_environment_identity
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -116,6 +118,7 @@ def _execution_plan(protocol, mode="openai_live"):
             "repeat_indices": list(protocol["design"]["repeat_indices"][:2]),
             "planned_runs": 24,
             "override_reason": "bounded N=2 K=2 engineering acceptance fixture",
+            "launch_order_policy": dict(A.launch_order_policy()),
         }
     return {
         "protocol_adherence": True,
@@ -124,6 +127,7 @@ def _execution_plan(protocol, mode="openai_live"):
         "repeat_indices": list(protocol["design"]["repeat_indices"]),
         "planned_runs": protocol["design"]["planned_runs"],
         "override_reason": None,
+        "launch_order_policy": dict(A.launch_order_policy()),
     }
 
 
@@ -168,6 +172,568 @@ class AggregateMultiEventTests(unittest.TestCase):
             "no outcome-dependent",
             self.protocol["reference_phase_transform"]["no_curve_fit"],
         )
+
+    def test_counterbalanced_launch_order_has_exact_frozen_balance(self):
+        plan = _execution_plan(self.protocol)
+        cells = A._counterbalanced_cells(self.protocol, plan)
+        self.assertEqual(len(cells), 144)
+        event_positions = Counter()
+        arm_first = Counter()
+        for block_start in range(0, len(cells), 6):
+            block = cells[block_start : block_start + 6]
+            for temporal_position, pair_start in enumerate(range(0, 6, 2)):
+                first, second = block[pair_start : pair_start + 2]
+                self.assertEqual(
+                    (first[0], first[2], first[3]),
+                    (second[0], second[2], second[3]),
+                )
+                self.assertEqual({first[1], second[1]}, set(A.ARMS))
+                event_positions[(first[0], temporal_position)] += 1
+                arm_first[(first[0], first[1])] += 1
+        for event in self.protocol["design"]["events"]:
+            event_id = event["event_id"]
+            self.assertEqual(
+                [event_positions[(event_id, position)] for position in range(3)],
+                [8, 8, 8],
+            )
+            self.assertEqual(arm_first[(event_id, "social_on")], 12)
+            self.assertEqual(arm_first[(event_id, "social_off")], 12)
+
+    def test_alias_runtime_health_and_foreign_cap_helpers_fail_closed(self):
+        for alias in (
+            " ",
+            " MiniMax",
+            "MiniMax ",
+            "Mini\nMax",
+            "Mini\x01Max",
+            "x" * 257,
+        ):
+            with self.subTest(alias=repr(alias)), self.assertRaises(
+                A.MultiEventInputError
+            ):
+                A._validated_reported_aliases([alias], "aliases")
+
+        manifest = {
+            "completion": {
+                "agent_decisions": {"completed": 10},
+                "parsing": {"failed": 1},
+                "application_provider_attempts": {
+                    "exhausted_logical_requests": 0
+                },
+            }
+        }
+        result = {
+            "health": {
+                "bad_orders": 1,
+                "total_llm_orders": 10,
+                "bad_frac": 0.1,
+                "schema_version": "multi_event_health_v1",
+                "decision_response_schema": "multi_event_decision_response_v1",
+                "failure_union": "exact_terminal_decision_status",
+                "failure_union_counts": {
+                    "strict_schema_invalid": 1,
+                    "legacy_parse_invalid": 0,
+                    "provider_exception_exhausted": 0,
+                    "provider_parse_exhausted": 0,
+                    "valid_decisions": 9,
+                },
+            }
+        }
+        public_counts = dict(result["health"]["failure_union_counts"])
+        provider_counts = {
+            "provider_exception_exhausted": 0,
+            "provider_parse_exhausted": 0,
+        }
+        self.assertEqual(
+            A._validated_multi_event_health(
+                result,
+                manifest,
+                terminal_status_counts=public_counts,
+                provider_exhaustion_counts=provider_counts,
+            ),
+            0.1,
+        )
+        broken = json.loads(json.dumps(result))
+        broken["health"]["failure_union_counts"]["legacy_parse_invalid"] = 1
+        broken["health"]["failure_union_counts"]["valid_decisions"] = 8
+        with self.assertRaisesRegex(A.MultiEventInputError, "terminal-status union"):
+            A._validated_multi_event_health(
+                broken,
+                manifest,
+                terminal_status_counts=public_counts,
+                provider_exhaustion_counts=provider_counts,
+            )
+        broken = json.loads(json.dumps(result))
+        broken["health"]["extra"] = 0
+        with self.assertRaisesRegex(A.MultiEventInputError, "exact multi-event"):
+            A._validated_multi_event_health(
+                broken,
+                manifest,
+                terminal_status_counts=public_counts,
+                provider_exhaustion_counts=provider_counts,
+            )
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            (root / "runs").mkdir()
+            slot_id = "a" * 64
+            allowed = f"me-{slot_id}-{'b' * 64}-ta1"
+            foreign = f"me-{slot_id}-{'f' * 64}-ta1"
+            (root / "runs" / allowed).mkdir()
+            (root / "runs" / foreign).mkdir()
+            jobs = {
+                ("event", "social_off", 11, 1): {
+                    "slot": {"slot_id": slot_id},
+                    "allowed_attempt_run_ids": [allowed],
+                }
+            }
+            selection = {
+                "children": [
+                    {
+                        "event_id": "event",
+                        "arm": "social_off",
+                        "seed": 11,
+                        "repeat_idx": 1,
+                        "attempt_run_ids": [allowed],
+                    }
+                ],
+                "missing_or_rejected_slots": [],
+            }
+            with self.assertRaisesRegex(
+                A.MultiEventInputError, "foreign-series"
+            ):
+                A._validate_live_foreign_attempt_cap(
+                    child_root=root,
+                    jobs=jobs,
+                    selection=selection,
+                    execution_mode="openai_live",
+                )
+            (root / "runs" / foreign).rmdir()
+            attempt_manifest = root / "runs" / allowed / "run_manifest.json"
+            attempt_manifest.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "managed_context": {"state": "ACTIVE"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(A.MultiEventInputError, "ACTIVE"):
+                A._validate_live_foreign_attempt_cap(
+                    child_root=root,
+                    jobs=jobs,
+                    selection=selection,
+                    execution_mode="openai_live",
+                )
+            attempt_manifest.write_text(
+                json.dumps(
+                    {
+                        "status": "finished",
+                        "managed_context": {"state": "FAILED"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(A.MultiEventInputError, "indeterminate"):
+                A._validate_live_foreign_attempt_cap(
+                    child_root=root,
+                    jobs=jobs,
+                    selection=selection,
+                    execution_mode="openai_live",
+                )
+            attempt_manifest.write_text(
+                json.dumps(
+                    {
+                        "status": "finished",
+                        "managed_context": {"state": "FINISHED"},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            A._validate_live_foreign_attempt_cap(
+                child_root=root,
+                jobs=jobs,
+                selection=selection,
+                execution_mode="openai_live",
+            )
+
+    def test_analysis_lock_fails_closed_on_parent_or_orphan_ownership(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            lock_path = root / A.ATTEMPT_COORDINATION_LOCK_NAME
+            lock_path.write_text("{}\n", encoding="utf-8")
+            lock_path.chmod(0o600)
+            with A.AnalysisAttemptLock(root):
+                with self.assertRaisesRegex(
+                    A.MultiEventInputError, "held by a parent or child"
+                ):
+                    with A.AnalysisAttemptLock(root):
+                        self.fail("a second reader must not enter the study root")
+
+    def test_main_releases_analysis_lock_when_managed_setup_raises(self):
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            root = Path(temporary)
+            lock_path = root / A.ATTEMPT_COORDINATION_LOCK_NAME
+            lock_path.write_text("{}\n", encoding="utf-8")
+            lock_path.chmod(0o600)
+            argv = [
+                "--driver-manifest",
+                str(root / "run_manifest.json"),
+                "--child-root",
+                str(root),
+                "--reference-root",
+                str(ROOT),
+                "--out",
+                str(root / "analysis"),
+            ]
+            with mock.patch.object(A, "bootstrap_cli", return_value=mock.Mock()), mock.patch.object(
+                A, "prepare_driver_selection", return_value=mock.Mock()
+            ), mock.patch.object(
+                A,
+                "_execute_managed_analysis",
+                side_effect=RuntimeError("managed setup failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "managed setup failed"):
+                    A.main(argv)
+            with A.AnalysisAttemptLock(root):
+                pass
+            with mock.patch.object(A, "bootstrap_cli", return_value=mock.Mock()), mock.patch.object(
+                A, "prepare_driver_selection", side_effect=KeyboardInterrupt()
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    A.main(argv)
+            with A.AnalysisAttemptLock(root):
+                pass
+
+    def test_runtime_rejection_reasons_are_public_safe_codes_only(self):
+        selection = A.ChildSelection(
+            "meta_2022_02_crash_v1",
+            "social_off",
+            11,
+            1,
+            Path("run_manifest.json"),
+            "a" * 64,
+            "b" * 64,
+            {"run_id": "managed-child"},
+        )
+        self.assertEqual(
+            A._rejection(selection, ["result_artifact_unreadable"])[
+                "reason_codes"
+            ],
+            ["result_artifact_unreadable"],
+        )
+        with self.assertRaisesRegex(A.MultiEventInputError, "public-safe"):
+            A._rejection(selection, ["private exception response text"])
+
+    def test_public_machine_events_recompute_health_and_retry_sequences(self):
+        run_id = "public-machine-evidence"
+
+        def decision(agent, status):
+            valid = status == "valid_decision"
+            return {
+                "schema_version": "1.0",
+                "run_id": run_id,
+                "round": 1,
+                "agent_id": agent,
+                "type": "AgentDecisionParsed",
+                "data": {
+                    "persona_id": agent,
+                    "action": "hold",
+                    "quantity": 0,
+                    "limit_price": 100.0,
+                    "sentiment": 0.0,
+                    "public_take": "Waiting." if valid else "",
+                    "parse_status": "parsed" if valid else "error",
+                    "decision_response_schema": (
+                        "multi_event_decision_response_v1"
+                    ),
+                    "decision_response_direction_field": "action",
+                    "strict_schema_valid": valid,
+                    "strict_schema_error_code": (
+                        None if valid else "missing_required_field"
+                    ),
+                    "terminal_status": status,
+                    "raw_response_sha256": "a" * 64,
+                },
+            }
+
+        def provider_attempt(
+            sequence,
+            agent,
+            attempt_index,
+            *,
+            outcome,
+            trigger,
+            will_retry,
+            reported_model=None,
+        ):
+            response = outcome != "provider_exception"
+            return {
+                "schema_version": "1.0",
+                "run_id": run_id,
+                "round": 1,
+                "agent_id": agent,
+                "type": "LLMProviderAttemptObserved",
+                "data": {
+                    "provider_attempt_schema": "provider_attempt_v1",
+                    "logical_sequence": sequence,
+                    "batch_sequence": 1,
+                    "batch_index": sequence - 1,
+                    "batch_size": 2,
+                    "round": 1,
+                    "agent": agent,
+                    "persona": agent,
+                    "attempt_index": attempt_index,
+                    "max_attempts": 3,
+                    "provider": "openai",
+                    "model": "MiniMax-M2.7",
+                    "reported_model": reported_model,
+                    "reported_model_alias_invalid": False,
+                    "original_prompt_hash": "b" * 64,
+                    "attempted_prompt_hash": "c" * 64,
+                    "trigger": trigger,
+                    "outcome": outcome,
+                    "response_hash": "d" * 64 if response else None,
+                    "latency_ms": 1.0,
+                    "prompt_tokens": 10 if response else None,
+                    "completion_tokens": 5 if response else None,
+                    "will_retry": will_retry,
+                },
+            }
+
+        events = [
+            provider_attempt(
+                1,
+                "agent-valid",
+                1,
+                outcome="response_parseable",
+                trigger="initial",
+                will_retry=False,
+                reported_model="HiggsAI",
+            ),
+            provider_attempt(
+                2,
+                "agent-exhausted",
+                1,
+                outcome="provider_exception",
+                trigger="initial",
+                will_retry=True,
+            ),
+            provider_attempt(
+                2,
+                "agent-exhausted",
+                2,
+                outcome="provider_exception",
+                trigger="provider_exception",
+                will_retry=True,
+            ),
+            provider_attempt(
+                2,
+                "agent-exhausted",
+                3,
+                outcome="provider_exception",
+                trigger="provider_exception",
+                will_retry=False,
+            ),
+            decision("agent-valid", "valid_decision"),
+            decision("agent-exhausted", "provider_exception_exhausted"),
+        ]
+        attempts = {
+            "unit": "visible_adapter_loop_attempts",
+            "attempted": 4,
+            "responses_received": 1,
+            "parse_failed_responses": 0,
+            "provider_exceptions": 3,
+            "retries_scheduled": 2,
+            "logical_requests_with_retry": 1,
+            "exhausted_logical_requests": 1,
+            "reported_models": ["HiggsAI"],
+            "reported_models_truncated": False,
+            "invalid_reported_model_alias_count": 0,
+            "coverage": (
+                "OpenAI/Anthropic application retry loops only; excludes SDK, "
+                "transport, proxy, and server-internal retries"
+            ),
+        }
+        manifest = {
+            "run_id": run_id,
+            "completion": {
+                "agent_decisions": {"completed": 2},
+                "parsing": {"failed": 1},
+                "application_provider_attempts": attempts,
+            },
+        }
+        result = {
+            "health": {
+                "bad_orders": 1,
+                "total_llm_orders": 2,
+                "bad_frac": 0.5,
+                "schema_version": "multi_event_health_v1",
+                "decision_response_schema": (
+                    "multi_event_decision_response_v1"
+                ),
+                "failure_union": "exact_terminal_decision_status",
+                "failure_union_counts": {
+                    "strict_schema_invalid": 0,
+                    "legacy_parse_invalid": 0,
+                    "provider_exception_exhausted": 1,
+                    "provider_parse_exhausted": 0,
+                    "valid_decisions": 1,
+                },
+            }
+        }
+
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            events_path = Path(temporary) / "events.jsonl"
+
+            def write(records):
+                events_path.write_text(
+                    "".join(json.dumps(record) + "\n" for record in records),
+                    encoding="utf-8",
+                )
+
+            write(events)
+            evidence = A._validated_application_attempt_evidence(
+                manifest, events_path, execution_mode="openai_live"
+            )
+            self.assertEqual(
+                evidence["terminal_status_counts"],
+                result["health"]["failure_union_counts"],
+            )
+            self.assertEqual(
+                A._validated_multi_event_health(
+                    result,
+                    manifest,
+                    terminal_status_counts=evidence[
+                        "terminal_status_counts"
+                    ],
+                    provider_exhaustion_counts=evidence[
+                        "provider_exhaustion_counts"
+                    ],
+                ),
+                0.5,
+            )
+
+            broken = json.loads(json.dumps(events))
+            broken[-1]["data"]["strict_schema_valid"] = True
+            write(broken)
+            with self.assertRaisesRegex(
+                A.MultiEventInputError, "terminal, strict-valid"
+            ):
+                A._validated_application_attempt_evidence(
+                    manifest, events_path, execution_mode="openai_live"
+                )
+
+            broken = json.loads(json.dumps(events))
+            broken[2]["data"]["attempt_index"] = 3
+            write(broken)
+            with self.assertRaisesRegex(A.MultiEventInputError, "indices"):
+                A._validated_application_attempt_evidence(
+                    manifest, events_path, execution_mode="openai_live"
+                )
+
+            broken = json.loads(json.dumps(events))
+            broken[0]["data"]["provider_attempt_schema"] = "untrusted"
+            write(broken)
+            with self.assertRaisesRegex(A.MultiEventInputError, "schema"):
+                A._validated_application_attempt_evidence(
+                    manifest, events_path, execution_mode="openai_live"
+                )
+
+            broken = json.loads(json.dumps(events))
+            broken[0]["data"]["unexpected"] = "field"
+            write(broken)
+            with self.assertRaisesRegex(A.MultiEventInputError, "schema"):
+                A._validated_application_attempt_evidence(
+                    manifest, events_path, execution_mode="openai_live"
+                )
+
+            broken = json.loads(json.dumps(events))
+            broken.append(json.loads(json.dumps(events[-1])))
+            write(broken)
+            with self.assertRaisesRegex(A.MultiEventInputError, "repeats"):
+                A._validated_application_attempt_evidence(
+                    manifest, events_path, execution_mode="openai_live"
+                )
+
+            broken = json.loads(json.dumps(events))
+            for item in broken[1:4]:
+                item["agent_id"] = "orphan-provider-cell"
+                item["data"]["agent"] = "orphan-provider-cell"
+            write(broken)
+            with self.assertRaisesRegex(A.MultiEventInputError, "decision cells"):
+                A._validated_application_attempt_evidence(
+                    manifest, events_path, execution_mode="openai_live"
+                )
+
+    def test_live_source_snapshot_is_checked_against_current_git(self):
+        head = "a" * 40
+        fingerprint = "b" * 64
+        snapshot = {
+            "schema_version": "multi_event_source_snapshot_v1",
+            "execution_mode": "openai_live",
+            "live_snapshot_enforced": True,
+            "live_eligibility_claim": True,
+            "policy": "clean_head_equals_canonical_protocol_last_change_commit",
+            "repository_clean": True,
+            "head_commit": head,
+            "protocol_last_change_commit": head,
+            "protocol_repo_relative_path": "experiments/multi_event_protocol.json",
+            "scientific_component_fingerprint": fingerprint,
+        }
+        identity = mock.Mock(
+            git_commit=head,
+            scientific_component_fingerprint=fingerprint,
+        )
+
+        def completed(stdout):
+            return subprocess.CompletedProcess([], 0, stdout=stdout, stderr="")
+
+        with mock.patch.object(
+            A.subprocess,
+            "run",
+            side_effect=[completed(head + "\n"), completed(head + "\n"), completed("")],
+        ):
+            self.assertEqual(
+                A._validated_source_snapshot(
+                    snapshot,
+                    mode="openai_live",
+                    protocol_path=A.PROTOCOL_PATH,
+                    expected_identities=[identity],
+                ),
+                snapshot,
+            )
+        with mock.patch.object(
+            A.subprocess,
+            "run",
+            side_effect=[
+                completed(head + "\n"),
+                completed("c" * 40 + "\n"),
+                completed(""),
+            ],
+        ), self.assertRaisesRegex(A.MultiEventInputError, "current analyzer checkout"):
+            A._validated_source_snapshot(
+                snapshot,
+                mode="openai_live",
+                protocol_path=A.PROTOCOL_PATH,
+                expected_identities=[identity],
+            )
+        with mock.patch.object(
+            A.subprocess,
+            "run",
+            side_effect=[
+                completed(head + "\n"),
+                completed(head + "\n"),
+                completed("?? untracked-scientific-input\n"),
+            ],
+        ), self.assertRaisesRegex(A.MultiEventInputError, "current analyzer checkout"):
+            A._validated_source_snapshot(
+                snapshot,
+                mode="openai_live",
+                protocol_path=A.PROTOCOL_PATH,
+                expected_identities=[identity],
+            )
 
     def test_reference_transform_is_fixed_linear_full_horizon(self):
         prices = [100.0, 100.0 * math.exp(0.24), 100.0 * math.exp(0.48)]
@@ -292,6 +858,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "application_provider_attempts": {
                     "reported_models": ["HiggsAI", "HiggsAI"],
                     "reported_models_truncated": False,
+                    "invalid_reported_model_alias_count": 0,
                 }
             }
         }
@@ -300,6 +867,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 live_manifest,
                 selected_aliases=["HiggsAI"],
                 result_aliases=["HiggsAI"],
+                result_invalid_alias_count=0,
                 execution_mode="openai_live",
             ),
             ["HiggsAI"],
@@ -309,6 +877,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 live_manifest,
                 selected_aliases=["MiniMax-M2.7"],
                 result_aliases=["MiniMax-M2.7"],
+                result_invalid_alias_count=0,
                 execution_mode="openai_live",
             )
         truncated = json.loads(json.dumps(live_manifest))
@@ -320,6 +889,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 truncated,
                 selected_aliases=["HiggsAI"],
                 result_aliases=["HiggsAI"],
+                result_invalid_alias_count=0,
                 execution_mode="openai_live",
             )
         mock_manifest = {
@@ -327,6 +897,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "application_provider_attempts": {
                     "reported_models": [],
                     "reported_models_truncated": False,
+                    "invalid_reported_model_alias_count": 0,
                 }
             }
         }
@@ -335,6 +906,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 mock_manifest,
                 selected_aliases=[],
                 result_aliases=[],
+                result_invalid_alias_count=0,
                 execution_mode="mock",
             ),
             [],
@@ -395,6 +967,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "temperature": 0.3,
                 "max_tokens": 1024,
                 "cache_enabled": False,
+                "provider_sdk_max_retries": 0,
             }
         )
         selection = A.ChildSelection(
@@ -475,7 +1048,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "seed": seed,
                 "repeat_idx": repeat_idx,
                 "status": "missing",
-                "reason_codes": ["not_executed_fixture"],
+                "reason_codes": ["child_result_missing"],
             }
             for event in self.protocol["design"]["events"]
             for arm in A.ARMS
@@ -515,7 +1088,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "seed": seed,
                 "repeat_idx": repeat_idx,
                 "status": "missing",
-                "reason_codes": ["bounded_mock_fixture"],
+                "reason_codes": ["child_result_missing"],
             }
             for event in self.protocol["design"]["events"]
             for arm in A.ARMS
@@ -535,6 +1108,20 @@ class AggregateMultiEventTests(unittest.TestCase):
         )
         self.assertEqual(len(mock_built["missing_or_rejected_slots"]), 24)
         self.assertFalse(mock_built["execution_plan"]["protocol_adherence"])
+        unsafe_slots = json.loads(json.dumps(mock_slots))
+        unsafe_slots[0]["reason_codes"] = ["private exception: credential detail"]
+        with self.assertRaisesRegex(A.MultiEventInputError, "public-safe"):
+            A.build_selection_document(
+                protocol=self.protocol,
+                protocol_sha256="a" * 64,
+                execution_plan=mock_plan,
+                events=[],
+                catalog_inputs=[],
+                study_model_identity={},
+                planned_slots=unsafe_slots,
+                accepted_children=[],
+                rejected_slots=unsafe_slots,
+            )
 
         accepted = {
             key: mock_slots[0][key]
@@ -619,7 +1206,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                     "seed": cell[2],
                     "repeat_idx": cell[3],
                     "status": "missing",
-                    "reason_codes": ["hand_edited_omission"],
+                    "reason_codes": ["child_result_missing"],
                     "attempt_run_ids": [],
                 }
             ],
@@ -657,6 +1244,12 @@ class AggregateMultiEventTests(unittest.TestCase):
         ):
             A._validate_driver_attempt_ledger(
                 ledger, jobs=jobs, selection=selection
+            )
+        unsafe_ledger = json.loads(json.dumps(ledger))
+        unsafe_ledger[0]["reason_code"] = "private subprocess output"
+        with self.assertRaisesRegex(A.MultiEventInputError, "public-safe"):
+            A._validate_driver_attempt_ledger(
+                unsafe_ledger, jobs=jobs, selection=selection
             )
 
     def test_explicit_selection_paths_hashes_and_transform_are_validated(self):
@@ -699,13 +1292,14 @@ class AggregateMultiEventTests(unittest.TestCase):
                     "seed": seed,
                     "repeat_idx": repeat_idx,
                     "status": "missing",
-                    "reason_codes": ["not_executed_fixture"],
+                    "reason_codes": ["child_result_missing"],
                 }
                 for event in self.protocol["design"]["events"]
                 for arm in A.ARMS
                 for seed in plan["seeds"]
                 for repeat_idx in plan["repeat_indices"]
             ]
+            runtime = scientific_runtime_environment_identity()
             model = {
                 "execution_mode": "mock",
                 "model_request_config_hash": "a" * 64,
@@ -715,6 +1309,9 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "resolved_model": "mock-v1",
                 "endpoint_identity": "b" * 64,
                 "reported_model_aliases": [],
+                "invalid_reported_model_alias_count": 0,
+                "scientific_runtime_environment": runtime["environment"],
+                "scientific_runtime_environment_identity": runtime["sha256"],
             }
             document = A.build_selection_document(
                 protocol=self.protocol,
@@ -896,6 +1493,9 @@ class AggregateMultiEventTests(unittest.TestCase):
             out = root / "out"
             selection_path = root / "selection.json"
             selection_path.write_text("{}\n", encoding="utf-8")
+            lock_path = root / A.ATTEMPT_COORDINATION_LOCK_NAME
+            lock_path.write_text("{}\n", encoding="utf-8")
+            lock_path.chmod(0o600)
             prepared = A.PreparedSelection(
                 A.protocol_sha256(),
                 selection_path,
@@ -1005,6 +1605,7 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
             raise AssertionError(completed.stderr or completed.stdout)
         cls.parent_dir = cls.root / "runs" / "analysis-parent-fixture"
         cls.parent_manifest = cls.parent_dir / "run_manifest.json"
+        cls.lock_path = cls.root / A.ATTEMPT_COORDINATION_LOCK_NAME
         cls.plan_path = cls.parent_dir / A.DRIVER_PLAN_FILENAME
         cls.selection_path = cls.parent_dir / A.DRIVER_SELECTION_FILENAME
         cls.private_parent_paths = (
@@ -1016,6 +1617,11 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
             cls.root / item["manifest_path"]
             for item in selection["children"]
         ]
+        cls.child_private_paths = tuple(
+            path.parent / name
+            for path in cls.child_manifest_paths
+            for name in ("llm_records.jsonl", "private_events.jsonl")
+        )
         cls.original_bytes = {
             path: path.read_bytes()
             for path in (
@@ -1042,6 +1648,10 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
             path.write_bytes(content)
         for path in self.private_parent_paths:
             path.chmod(0o600)
+        self.lock_path.chmod(0o600)
+        for path in self.child_private_paths:
+            if not path.is_symlink():
+                path.chmod(0o600)
 
     @staticmethod
     def _write_json(path, value):
@@ -1109,6 +1719,132 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
         ):
             self._prepare()
 
+    def test_parent_network_source_root_and_lock_contracts_fail_closed(self):
+        mutations = (
+            (
+                "network",
+                lambda value: value["multi_event_driver"].__setitem__(
+                    "network_access", True
+                ),
+                "network/attempt coordination",
+            ),
+            (
+                "root",
+                lambda value: value["multi_event_driver"][
+                    "output_root_policy"
+                ].__setitem__("effective_root", "/tmp/alternate"),
+                "output_root_policy",
+            ),
+            (
+                "source",
+                lambda value: value["multi_event_driver"][
+                    "source_snapshot"
+                ].__setitem__("head_commit", "a" * 40),
+                "source_snapshot",
+            ),
+            (
+                "lock-declaration",
+                lambda value: value["multi_event_driver"][
+                    "attempt_coordination"
+                ].__setitem__("child_descriptor_inheritance", False),
+                "network/attempt coordination",
+            ),
+        )
+        for label, mutate, message in mutations:
+            with self.subTest(label=label):
+                manifest = json.loads(
+                    self.original_bytes[self.parent_manifest].decode("utf-8")
+                )
+                mutate(manifest)
+                self._write_json(self.parent_manifest, manifest)
+                with self.assertRaisesRegex(A.MultiEventInputError, message):
+                    self._prepare()
+                self.parent_manifest.write_bytes(
+                    self.original_bytes[self.parent_manifest]
+                )
+
+        self.lock_path.chmod(0o644)
+        with self.assertRaisesRegex(A.MultiEventInputError, "mode 0600"):
+            self._prepare()
+
+    def test_counterbalanced_order_and_runtime_drift_are_reconstructed(self):
+        plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
+        plan["jobs"][0], plan["jobs"][1] = plan["jobs"][1], plan["jobs"][0]
+        plan["jobs"][0]["launch_ordinal"] = 1
+        plan["jobs"][1]["launch_ordinal"] = 2
+        self._write_json(self.plan_path, plan)
+        self._refresh_parent_descriptor(self.plan_path)
+        with self.assertRaisesRegex(A.MultiEventInputError, "counterbalanced grid"):
+            self._prepare()
+
+        self.plan_path.write_bytes(self.original_bytes[self.plan_path])
+        self.parent_manifest.write_bytes(self.original_bytes[self.parent_manifest])
+        plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
+        environment = plan["jobs"][0]["scientific_runtime_environment"]
+        environment["dependencies"]["httpx"] = "999.0"
+        plan["jobs"][0]["scientific_runtime_environment_identity"] = (
+            A._stable_json_sha256(environment)
+        )
+        self._write_json(self.plan_path, plan)
+        self._refresh_parent_descriptor(self.plan_path)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError,
+            "scientific_runtime_environment_identity|runtime environment",
+        ):
+            self._prepare()
+
+    def test_private_ledger_counts_and_projection_are_closed(self):
+        manifest = json.loads(self.parent_manifest.read_text(encoding="utf-8"))
+        manifest["technical_attempt_ledger"]["private_records"] += 1
+        self._write_json(self.parent_manifest, manifest)
+        with self.assertRaisesRegex(A.MultiEventInputError, "declared counts"):
+            self._prepare()
+
+        self.parent_manifest.write_bytes(self.original_bytes[self.parent_manifest])
+        private_path = self.private_parent_paths[0]
+        records = [
+            json.loads(line)
+            for line in private_path.read_text(encoding="utf-8").splitlines()
+        ]
+        records[0]["reason_code"] = "self_consistent_private_only_tamper"
+        private_path.write_text(
+            "".join(json.dumps(record, sort_keys=True) + "\n" for record in records),
+            encoding="utf-8",
+        )
+        private_path.chmod(0o600)
+        self._refresh_parent_descriptor(private_path)
+        with self.assertRaisesRegex(A.MultiEventInputError, "ordered subset"):
+            self._prepare()
+
+    def test_child_private_mode_and_symlink_are_rejected(self):
+        private_path = self.child_private_paths[0]
+        private_path.chmod(0o644)
+        prepared = self._prepare()
+        observations, rejections = A.validate_selected_children(
+            prepared, self.protocol
+        )
+        self.assertEqual(len(observations), 5)
+        self.assertIn("artifact_invalid", rejections[0]["reason_codes"])
+
+        private_path.chmod(0o600)
+        original = private_path.read_bytes()
+        decoy = private_path.parent / "private-artifact-decoy.jsonl"
+        decoy.write_bytes(original)
+        private_path.unlink()
+        private_path.symlink_to(decoy.name)
+        try:
+            prepared = self._prepare()
+            observations, rejections = A.validate_selected_children(
+                prepared, self.protocol
+            )
+            self.assertEqual(len(observations), 5)
+            self.assertIn("artifact_invalid", rejections[0]["reason_codes"])
+        finally:
+            private_path.unlink()
+            private_path.write_bytes(original)
+            private_path.chmod(0o600)
+            decoy.unlink()
+
     def test_self_consistent_plan_command_substitution_is_rejected(self):
         plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
         plan["jobs"][0]["child_command"] = list(
@@ -1134,7 +1870,7 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
                 "seed": accepted["seed"],
                 "repeat_idx": accepted["repeat_idx"],
                 "status": "missing",
-                "reason_codes": ["hand_edited_outcome_omission"],
+                "reason_codes": ["child_result_missing"],
                 "attempt_run_ids": [],
             }
         )
@@ -1145,6 +1881,35 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
             "durable attempt ledger",
         ):
             self._prepare()
+
+    def test_invalid_alias_count_and_visible_attempt_counts_are_rejected(self):
+        selection = json.loads(self.selection_path.read_text(encoding="utf-8"))
+        selection["study_model_identity"][
+            "invalid_reported_model_alias_count"
+        ] = 1
+        self._write_json(self.selection_path, selection)
+        self._refresh_parent_descriptor(self.selection_path)
+        with self.assertRaisesRegex(A.MultiEventInputError, "exact integer zero"):
+            self._prepare()
+
+        self.selection_path.write_bytes(self.original_bytes[self.selection_path])
+        self.parent_manifest.write_bytes(self.original_bytes[self.parent_manifest])
+        child_manifest = self.child_manifest_paths[0]
+        manifest = json.loads(child_manifest.read_text(encoding="utf-8"))
+        manifest["completion"]["application_provider_attempts"]["attempted"] = 1
+        self._write_json(child_manifest, manifest)
+        selection = json.loads(self.selection_path.read_text(encoding="utf-8"))
+        selection["children"][0]["manifest_sha256"] = A.sha256_file(
+            child_manifest
+        )
+        self._write_json(self.selection_path, selection)
+        self._refresh_parent_descriptor(self.selection_path)
+        prepared = self._prepare()
+        observations, rejections = A.validate_selected_children(
+            prepared, self.protocol
+        )
+        self.assertEqual(len(observations), 5)
+        self.assertTrue(rejections[0]["reason_codes"])
 
     def test_old_scientific_fingerprint_tamper_fails_canonical_expected(self):
         child_manifest = self.child_manifest_paths[0]
@@ -1243,7 +2008,7 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
         self.assertEqual(len(observations), 5)
         self.assertEqual(
             rejections[0]["reason_codes"],
-            ["result_cell_contract_mismatch"],
+            ["health_gate_rejected"],
         )
 
 

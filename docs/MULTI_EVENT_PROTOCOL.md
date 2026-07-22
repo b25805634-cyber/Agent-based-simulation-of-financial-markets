@@ -310,11 +310,23 @@ The only scientific factors are seed, event-bound public news/reference
 inputs, and `social_enabled`. A child must bind the exact reference CSV and
 non-leaky `delivery_t` news timeline by content hash. The analyzer neither
 injects news nor interprets `price_anchor_t`; it verifies the identity emitted
-by the future managed driver. The model request is OpenAI-compatible
+by the managed driver. The model request is OpenAI-compatible
 `MiniMax-M2.7`, `temperature=0.3`, `max_tokens=1024`, and cache off. Requested,
 resolved, and endpoint identities are preserved separately, so an endpoint
 that reports an alias such as `HiggsAI` cannot be silently described as a
-model-specific MiniMax result.
+model-specific MiniMax result. `provider_sdk_max_retries=0` disables hidden
+OpenAI SDK transport retries; the audit counts cover only visible adapter-loop
+attempts and do not claim visibility into proxy or server internals.
+Multi-event children opt into `multi_event_decision_response_v1`: an unknown or
+partial JSON object is a machine-recorded invalid terminal decision, not a
+healthy neutral hold. Legacy entrypoints retain their established parser path.
+
+Each planned attempt also binds `scientific_runtime_environment_v1`: Python
+implementation/version, platform/architecture, and exact versions (including
+explicit nulls) of NumPy, Matplotlib, Anthropic, OpenAI, and HTTPX. Its
+canonical JSON SHA-256 participates in the attempt-series, plan, child, study,
+and analysis-summary identity. Runtime drift therefore cannot silently reset a
+slot's bounded attempt series or enter a pooled study.
 
 Driver worker count is execution-only under the existing configuration
 contract, but it is held at one for this pilot and recorded in the execution
@@ -328,11 +340,41 @@ The official analyzer accepts one explicit finished
 arbitrary standalone selection and never scans a result directory. From that
 trust anchor it derives the sibling selection named by the parent, rehashes
 every registered in-run artifact, and requires the registered
-`multi_event_plan.json`, public attempt ledger, `multi_event_selection.json`,
-and `driver_summary.json`. Plan slots, attempt outcomes, selection cells, and
-driver completed/failed/honest-N counts must agree exactly. This prevents a
-hand-edited selection from relabeling an existing valid but unfavorable child
-as `missing` to create an outcome-aware complete case.
+`multi_event_plan.json`, public and mode-`0600` private attempt ledgers,
+`multi_event_selection.json`, `driver_summary.json`, and mode-`0600` private
+failure log. Declared ledger line counts, each private record's exact public
+projection, plan slots, attempt outcomes, selection cells, and driver
+completed/failed/honest-N counts must agree. This prevents a hand-edited
+selection from relabeling an existing valid but unfavorable child as `missing`
+to create an outcome-aware complete case. Public selection `reason_codes`,
+attempt-ledger `reason_code` values, and analyzer runtime rejection reasons
+must come from the central reuse registry or a fixed driver/analyzer code set;
+arbitrary exception or response prose remains in mode-`0600` private artifacts
+and cannot enter the public analysis summary.
+
+A live parent is eligible only at the repository's lexical, non-symlink
+`results_multi_event` root. It records a clean source snapshot whose `HEAD` is
+the last commit that changed the canonical protocol; parent, plan, every
+accepted child, and the analyzer's independently reconstructed identities must
+agree on that commit and scientific fingerprint. The parent truthfully records
+network access for connectivity probes only. Provider calls belong to managed
+children; mock parents are offline. The output-root advisory lock covers the
+entire parent lifecycle and is inherited by children, so an orphaned active
+attempt keeps the series locked until it exits. The analyzer independently
+runs current `git rev-parse HEAD`, the protocol's last-change query, and an
+all-files clean-worktree query. It then opens the regular mode-`0600` lock with
+`O_NOFOLLOW`, verifies the `lstat`/`fstat` inode identity, and obtains an
+exclusive nonblocking lock before selection preparation. That lock remains held
+through child validation, summary/plot creation, artifact hashing, and managed
+finish; any parent, child, or orphan ownership fails analysis closed.
+
+Acquisition order is deterministic but counterbalanced: repeat position, then
+seed position; event order rotates by their summed positions; both arms for an
+event/seed/repeat launch adjacently; parity alternates which arm is first. In
+the full grid, every event occupies each temporal position eight times and is
+first-on/first-off 12 times each. Resume filters ineligible slots without
+reordering the remainder. Every job records and the analyzer independently
+reconstructs its one-based `launch_ordinal`.
 
 Within the derived selection, each event entry supplies the authoritative `event_id`,
 reference CSV, timeline, and their expected SHA-256 values. Each child entry
@@ -363,7 +405,15 @@ bounded by the frozen five-attempt cap, plus `accepted_run_id` exactly equal to
 `identity.run_id` and present in that list. Rejected slots list their bounded
 attempts; missing slots list none. One managed attempt ID cannot be assigned to
 multiple cells. This preserves the retry ledger without promoting a failed
-attempt into honest N.
+attempt into honest N. For live work the five-attempt cap is per canonical slot
+across all preserved `me-{slot_id}-*-ta*` materializations, not merely the
+current runtime/environment series. A foreign series or `ta6+` cannot reset the
+budget: the driver stops before advancing it, and the analyzer performs a
+same-slot integrity scan without using discovered paths to select observations.
+For each slot, exact-pattern materialized directory names must equal the
+selection/ledger-declared contiguous prefix, and every manifest must have a
+matching `finished`/`FINISHED` or `failed`/`FAILED` terminal pair. Deleting
+preserved canonical attempts is outside the protocol.
 
 Path semantics are fixed: `children[].manifest_path` is relative to CLI
 `--child-root`; event CSV/timeline and the required catalog path are relative to
@@ -374,7 +424,12 @@ from an event ID or filename. Each event entry also carries the exact 25-point
 
 The central managed-child reuse validator then rechecks terminal lifecycle,
 completion accounting, recording and scientific schema identity, and every
-registered artifact hash. The result itself must contain a first-class
+registered artifact hash. Accepted children must retain registered
+`experiment_result.json`, their canonical compatibility JSON,
+`llm_records.jsonl`, `events.jsonl`, and `private_events.jsonl`; the two private
+files must be regular non-symlinks with exact mode `0600`. The analyzer routes
+through this same formal reuse gate rather than a weaker file-existence path.
+The result itself must contain a first-class
 `multi_event_identity` object with protocol hash, event, arm, seed,
 `repeat_idx`, both event-input hashes, and the transformed-reference identity.
 `rep` filenames or labels are never used to infer identity. A flat JSON without
@@ -392,6 +447,37 @@ prohibits even alias-homogeneous pooling. A single alias permits only
 endpoint-condition analysis stratified by that self-reported alias; it does
 not verify underlying model weights, and model-specific inference remains
 disallowed. Mock runs fabricate no alias.
+
+Aliases are accepted byte-exact only when they are 1--256 printable characters
+with no edge whitespace or control characters. Attempt completion, child
+manifest/result, selection child, study identity, and driver summary all bind
+`invalid_reported_model_alias_count`; every accepted value is the non-boolean
+integer zero. Thus one valid alias cannot hide a second invalid raw alias that
+was silently dropped.
+
+`multi_event_health_v1` never scans model-authored reasoning. Each final
+decision enters exactly one machine terminal bucket:
+`strict_schema_invalid`, reserved-zero `legacy_parse_invalid`,
+`provider_exception_exhausted`, `provider_parse_exhausted`, or
+`valid_decisions`. The analyzer recomputes bad and total counts from these
+mutually exclusive buckets by reading only registered public
+`AgentDecisionParsed` data. Each `(round, agent_id)` is unique; strict schema,
+direction field, terminal status, `strict_schema_valid`, error code, and
+`parse_status` must satisfy their exact machine relation, and the five counts
+must match the result one by one. The analyzer checks the unrounded bad fraction
+against 0.15 and closes the counts against completed Agent decisions, parsing
+failures, and typed exhausted visible adapter requests. It never reads private
+rationale for this gate.
+
+Registered public `LLMProviderAttemptObserved` data must have the exact
+`provider_attempt_v1` key set. Live requests have `max_attempts=3`; logical
+sequences and attempt indices are contiguous, stable request context cannot
+change within a sequence, triggers must match the previous failure, all
+nonterminal events retry, and the final event has `will_retry=false`. The
+logical request `(round, agent)` cells equal the public decision cells exactly.
+Mock children have no such events. Counts and safe aliases are recomputed from
+these events. This is application-level audit evidence, not a claim that
+transport, proxy, or server-internal retries are observable.
 
 Every raw post-`t0` reference episode is transformed to exactly 25 points
 (`t=0..24`) by linear interpolation in normalized log price over the entire
