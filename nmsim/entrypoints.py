@@ -82,8 +82,9 @@ def _spec(
 
 
 ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
-    # Simulation leaves.  These are the only official entrypoints that may
-    # construct a simulation Provider directly.
+    # Direct managed leaves.  Only the simulation leaves construct a Provider
+    # for a market run; qualification and stochasticity use direct Providers
+    # inside their own explicitly non-market managed protocols.
     _spec(
         "nmsim.run.cli", "nmsim/run.py", "python3 -m nmsim.run",
         OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
@@ -137,6 +138,31 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         ),
         PROVIDER_DIRECT, True,
         "Not a market simulation. Mock/Fake are offline paths; experimental CodexExec requires explicit model/use/case guards, and dry-run constructs no Provider.",
+    ),
+    _spec(
+        "experiments.endpoint_stochasticity",
+        "experiments/endpoint_stochasticity.py",
+        "python3 -m experiments.endpoint_stochasticity",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT,
+        DIRECT_MANAGED,
+        (
+            "bootstrap",
+            "frozen 48-to-6 qualification-case validation",
+            "provider and explicit live-use guard",
+            "ManagedRunContext",
+            "dry-run or endpoint sample grid and same-seed probe",
+            "public/private export",
+        ),
+        (
+            "managed endpoint-stochasticity run directory",
+            "dry_run_summary.json",
+            "endpoint_stochasticity_summary.json",
+            "endpoint_samples.jsonl",
+            "private_endpoint_records.jsonl",
+        ),
+        PROVIDER_DIRECT,
+        True,
+        "Non-market Wave 0 diagnostic: six cases x two temperatures x K=30 x three concurrency levels = 1080 planned grid samples, plus a separate two-call same-seed probe. Dry-run constructs no Provider; real OpenAI-compatible access requires --live; private endpoint records are mode 0600.",
     ),
 
     # Experiment-level drivers.  Their run-count lifecycle is managed at the

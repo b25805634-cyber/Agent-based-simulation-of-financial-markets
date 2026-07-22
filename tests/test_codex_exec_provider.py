@@ -784,9 +784,18 @@ class CodexExecProviderTests(unittest.TestCase):
 
     def test_codex_identity_enters_model_request_hash_without_changing_defaults(self) -> None:
         default_contract = build_effective_config_contract(Config())
+        # The full identity intentionally includes the resolved relative
+        # ``out_dir`` path, so its exact digest changes across valid checkout
+        # locations.  Pin the path-independent scientific/model categories
+        # below and retain structural coverage for the full/execution identity.
+        self.assertEqual(default_contract["config_hash_schema_version"], "1.0")
+        self.assertRegex(default_contract["full_effective_config_hash"], r"^[0-9a-f]{64}$")
+        self.assertRegex(default_contract["execution_config_hash"], r"^[0-9a-f]{64}$")
         self.assertEqual(
-            default_contract["full_effective_config_hash"],
-            "1a36131b7dec0a90af315c03b1bdb748d7b90c5d6defa3cbd2b31db437af69dd",
+            default_contract["execution_config_summary"]["config_fields"]["out_dir"][
+                "kind"
+            ],
+            "path_identity",
         )
         self.assertEqual(
             default_contract["scientific_config_hash"],
