@@ -3,15 +3,56 @@ from __future__ import annotations
 
 from contextlib import redirect_stderr, redirect_stdout
 from dataclasses import replace
+import hashlib
 import io
 import json
 import math
+import os
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest import mock
 
 from experiments import aggregate_multi_event as A
+
+
+ROOT = Path(__file__).resolve().parents[1]
+CATALOG = ROOT / "nmsim" / "reference_data" / "v1" / "catalog.json"
+
+
+def _material(protocol, event_id):
+    row = next(
+        item for item in protocol["design"]["events"]
+        if item["event_id"] == event_id
+    )
+    return A.load_multi_event_material(
+        event_id=event_id,
+        reference_csv=ROOT / row["reference_csv"],
+        news_timeline_jsonl=ROOT / row["news_timeline"],
+        protocol_path=A.PROTOCOL_PATH,
+        catalog_path=CATALOG,
+    )
+
+
+def _event_input(protocol, event_id):
+    material = _material(protocol, event_id)
+    prices, shock_idx = A.V.load_reference(str(material.reference_csv))
+    return A.EventInput(
+        material=material,
+        event_id=event_id,
+        reference_csv=material.reference_csv,
+        reference_csv_sha256=material.reference_hash,
+        news_timeline=material.news_timeline_jsonl,
+        news_timeline_sha256=material.timeline_hash,
+        reference_prices=tuple(prices),
+        reference_shock_idx=shock_idx,
+        transformed_reference_log_path=tuple(
+            material.transformed.norm_log_path
+        ),
+        reference_transform_sha256=material.reference_transform_sha256,
+    )
 
 
 def _path(event_id: str) -> tuple[float, ...]:
@@ -197,6 +238,12 @@ class AggregateMultiEventTests(unittest.TestCase):
             honest["cross_event_complete_seed_ids"], [17, 19, 23, 29, 31, 37]
         )
         self.assertEqual(honest["complete_event_seed_pairs"], 22)
+        claims = summary["qualitative_claims"]
+        self.assertFalse(claims["preregistered_realism_claim_eligible"])
+        self.assertEqual(
+            claims["realism_assessment_status"],
+            "protocol_adherent_live_pilot_incomplete_descriptive_not_claim_eligible",
+        )
         meta_off = summary["events"]["meta_2022_02_crash_v1"][
             "cell_distributions"
         ]["social_off"]
@@ -319,15 +366,24 @@ class AggregateMultiEventTests(unittest.TestCase):
 
     def test_population_order_and_frozen_identity_are_independently_checked(self):
         scientific = self.protocol["effective_config_freeze"]["scientific"]
+        event = _event_input(self.protocol, "meta_2022_02_crash_v1")
+        expected_timeline = [
+            {
+                "event_id": item.event_id,
+                "round": item.round,
+                "public_text": item.public_text,
+            }
+            for item in event.material.transformed.news_timeline
+        ]
         config = {
             field: (
                 11
                 if field == "seed"
                 else False
                 if field == "social_enabled"
-                else []
+                else expected_timeline
                 if field == "news_timeline"
-                else "same-content-reference.csv"
+                else str(event.reference_csv)
                 if field == "reference_path"
                 else value
             )
@@ -356,18 +412,20 @@ class AggregateMultiEventTests(unittest.TestCase):
                 {"config": config},
                 self.protocol,
                 selection,
+                event,
                 execution_mode="mock",
             ),
             [],
         )
         reordered = dict(config)
         reordered["population"] = dict(reversed(list(config["population"].items())))
-        self.assertIn(
+        self.assertNotIn(
             "config_mismatch:population",
             A._config_mismatches(
                 {"config": reordered},
                 self.protocol,
                 selection,
+                event,
                 execution_mode="mock",
             ),
         )
@@ -542,6 +600,7 @@ class AggregateMultiEventTests(unittest.TestCase):
                 "arm": cell[1],
                 "seed": cell[2],
                 "repeat_idx": cell[3],
+                "slot": {"slot_id": "slot-1"},
                 "allowed_attempt_run_ids": [
                     "attempt-1",
                     "attempt-2",
@@ -567,22 +626,30 @@ class AggregateMultiEventTests(unittest.TestCase):
         }
         ledger = [
             {
+                "schema_version": "1.0",
                 "event_id": cell[0],
                 "arm": cell[1],
                 "seed": cell[2],
                 "repeat_idx": cell[3],
+                "slot_id": "slot-1",
                 "run_id": "attempt-1",
                 "status": "launched",
                 "source": "executed",
+                "technical_retry_idx": 1,
+                "reason_code": "child_process_launched",
             },
             {
+                "schema_version": "1.0",
                 "event_id": cell[0],
                 "arm": cell[1],
                 "seed": cell[2],
                 "repeat_idx": cell[3],
+                "slot_id": "slot-1",
                 "run_id": "attempt-1",
                 "status": "accepted",
                 "source": "executed",
+                "technical_retry_idx": 1,
+                "reason_code": "identity_and_health_valid",
             },
         ]
         with self.assertRaisesRegex(
@@ -595,70 +662,35 @@ class AggregateMultiEventTests(unittest.TestCase):
     def test_explicit_selection_paths_hashes_and_transform_are_validated(self):
         with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
             root = Path(temporary)
-            reference_root = root / "references"
             child_root = root / "children"
-            reference_root.mkdir()
             child_root.mkdir()
-            events = []
-            for event in self.protocol["design"]["events"]:
-                csv_path = reference_root / event["reference_csv"]
-                csv_path.parent.mkdir(parents=True, exist_ok=True)
-                csv_path.write_text(
-                    "timestamp,price,news\n"
-                    "2020-01-01,100,public event\n"
-                    "2020-01-02,90,\n"
-                    "2020-01-03,95,\n",
-                    encoding="utf-8",
-                )
-                timeline_path = reference_root / event["news_timeline"]
-                timeline_path.write_text(
-                    '{"schema_version":"1.0","delivery_t":1,"public_text":"x"}\n',
-                    encoding="utf-8",
-                )
-                reference_hash = A.sha256_file(csv_path)
-                transformed = A.resample_reference_log_path([100.0, 90.0, 95.0], 0)
-                events.append(
-                    {
-                        "event_id": event["event_id"],
-                        "reference_csv": {
-                            "path": event["reference_csv"],
-                            "sha256": reference_hash,
-                        },
-                        "news_timeline": {
-                            "path": event["news_timeline"],
-                            "sha256": A.sha256_file(timeline_path),
-                        },
-                        "transformed_reference": {
-                            "schema_version": "1.0",
-                            "norm_log_path": list(transformed),
-                            "sha256": A.reference_transform_identity(
-                                event["event_id"], reference_hash, transformed
-                            ),
-                        },
-                    }
-                )
-            catalog_path = (
-                reference_root / self.protocol["reference_data_catalog"]["path"]
-            )
-            catalog_path.write_text(
-                json.dumps(
-                    {
-                        "schema_version": "reference_data_catalog_v1",
-                        "data_version": "v1",
-                        "datasets": [
-                            {
-                                "dataset_id": event["event_id"],
-                                "reference_csv": Path(event["reference_csv"]).name,
-                                "news_timeline_jsonl": Path(
-                                    event["news_timeline"]
-                                ).name,
-                            }
-                            for event in self.protocol["design"]["events"]
-                        ],
-                    }
-                ),
-                encoding="utf-8",
-            )
+            materials = [
+                _material(self.protocol, event["event_id"])
+                for event in self.protocol["design"]["events"]
+            ]
+            events = [
+                {
+                    "event_id": material.event_id,
+                    "reference_csv": {
+                        "path": str(material.reference_csv.relative_to(ROOT)),
+                        "sha256": material.reference_hash,
+                    },
+                    "news_timeline": {
+                        "path": str(
+                            material.news_timeline_jsonl.relative_to(ROOT)
+                        ),
+                        "sha256": material.timeline_hash,
+                    },
+                    "transformed_reference": {
+                        "schema_version": "1.0",
+                        "norm_log_path": list(
+                            material.transformed.norm_log_path
+                        ),
+                        "sha256": material.reference_transform_sha256,
+                    },
+                }
+                for material in materials
+            ]
             plan = _execution_plan(self.protocol, mode="mock")
             slots = [
                 {
@@ -691,8 +723,10 @@ class AggregateMultiEventTests(unittest.TestCase):
                 events=events,
                 catalog_inputs=[
                     {
-                        "path": self.protocol["reference_data_catalog"]["path"],
-                        "sha256": A.sha256_file(catalog_path),
+                        "path": self.protocol[
+                            "reference_data_catalog"
+                        ]["path"],
+                        "sha256": A.sha256_file(CATALOG),
                     }
                 ],
                 study_model_identity=model,
@@ -707,17 +741,30 @@ class AggregateMultiEventTests(unittest.TestCase):
                 protocol=self.protocol,
                 protocol_path=A.PROTOCOL_PATH,
                 child_root=child_root,
-                reference_root=reference_root,
+                reference_root=ROOT,
             )
-            self.assertEqual(set(prepared.events), {row["event_id"] for row in events})
+            self.assertEqual(
+                tuple(prepared.events),
+                tuple(row["event_id"] for row in events),
+            )
+            self.assertTrue(
+                all(
+                    prepared.events[event_id].material.event_id == event_id
+                    for event_id in prepared.events
+                )
+            )
             self.assertEqual(len(prepared.children), 0)
-            self.assertEqual(len(prepared.declared_missing_or_rejected), 24)
+            self.assertEqual(
+                len(prepared.declared_missing_or_rejected), 24
+            )
 
             wrong_source = json.loads(json.dumps(document))
             wrong_source["events"][0]["reference_csv"]["path"] = (
                 wrong_source["events"][1]["reference_csv"]["path"]
             )
-            selection_path.write_text(json.dumps(wrong_source), encoding="utf-8")
+            selection_path.write_text(
+                json.dumps(wrong_source), encoding="utf-8"
+            )
             with self.assertRaisesRegex(
                 A.MultiEventInputError, "preregistered event source"
             ):
@@ -726,29 +773,43 @@ class AggregateMultiEventTests(unittest.TestCase):
                     protocol=self.protocol,
                     protocol_path=A.PROTOCOL_PATH,
                     child_root=child_root,
-                    reference_root=reference_root,
+                    reference_root=ROOT,
                 )
 
-            catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
-            catalog["datasets"][0]["reference_csv"] = catalog["datasets"][1][
-                "reference_csv"
-            ]
-            catalog_path.write_text(json.dumps(catalog), encoding="utf-8")
-            wrong_catalog = json.loads(json.dumps(document))
-            wrong_catalog["catalog_inputs"][0]["sha256"] = A.sha256_file(
-                catalog_path
+            wrong_transform = json.loads(json.dumps(document))
+            wrong_transform["events"][0]["transformed_reference"][
+                "norm_log_path"
+            ][1] += 0.001
+            selection_path.write_text(
+                json.dumps(wrong_transform), encoding="utf-8"
             )
-            selection_path.write_text(json.dumps(wrong_catalog), encoding="utf-8")
             with self.assertRaisesRegex(
-                A.MultiEventInputError, "catalog dataset paths"
+                A.MultiEventInputError, "shared frozen transform"
             ):
                 A.prepare_selection(
                     selection_path,
                     protocol=self.protocol,
                     protocol_path=A.PROTOCOL_PATH,
                     child_root=child_root,
-                    reference_root=reference_root,
+                    reference_root=ROOT,
                 )
+
+            wrong_catalog = json.loads(json.dumps(document))
+            wrong_catalog["catalog_inputs"][0]["sha256"] = "f" * 64
+            selection_path.write_text(
+                json.dumps(wrong_catalog), encoding="utf-8"
+            )
+            with self.assertRaisesRegex(
+                A.MultiEventInputError, "frozen protocol source bytes"
+            ):
+                A.prepare_selection(
+                    selection_path,
+                    protocol=self.protocol,
+                    protocol_path=A.PROTOCOL_PATH,
+                    child_root=child_root,
+                    reference_root=ROOT,
+                )
+
 
     def test_three_panel_figure(self):
         summary = A.analyze_observations(
@@ -783,6 +844,11 @@ class AggregateMultiEventTests(unittest.TestCase):
         self.assertTrue(
             summary["qualitative_claims"]["primary_realism_assessment_social_on"][
                 "passes_all_preregistered_criteria"
+            ]
+        )
+        self.assertTrue(
+            summary["qualitative_claims"][
+                "preregistered_realism_claim_eligible"
             ]
         )
         meta_realism = summary["events"]["meta_2022_02_crash_v1"][
@@ -888,6 +954,297 @@ class AggregateMultiEventTests(unittest.TestCase):
             self.assertTrue((run_dir / A.PLOT_FILENAME).is_file())
             self.assertTrue((out / A.SUMMARY_FILENAME).is_symlink())
             self.assertTrue((out / A.PLOT_FILENAME).is_symlink())
+
+
+class ManagedParentAndChildIntegrationTests(unittest.TestCase):
+    """Exercise the real mock driver/child artifacts through the analyzer."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.protocol = A.load_protocol()
+        cls.temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        cls.root = Path(cls.temporary.name)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "LLM_PROVIDER",
+                "LLM_MODEL",
+                "OPENAI_BASE_URL",
+                "OPENAI_API_KEY",
+            }
+        }
+        command = [
+            sys.executable,
+            "-m",
+            "experiments.multi_event",
+            "--provider",
+            "mock",
+            "--n",
+            "1",
+            "--k",
+            "1",
+            "--workers",
+            "1",
+            "--out",
+            str(cls.root),
+            "--run-id",
+            "analysis-parent-fixture",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if completed.returncode:
+            raise AssertionError(completed.stderr or completed.stdout)
+        cls.parent_dir = cls.root / "runs" / "analysis-parent-fixture"
+        cls.parent_manifest = cls.parent_dir / "run_manifest.json"
+        cls.plan_path = cls.parent_dir / A.DRIVER_PLAN_FILENAME
+        cls.selection_path = cls.parent_dir / A.DRIVER_SELECTION_FILENAME
+        cls.private_parent_paths = (
+            cls.parent_dir / A.DRIVER_PRIVATE_ATTEMPT_LEDGER_FILENAME,
+            cls.parent_dir / A.DRIVER_PRIVATE_FAILURES_FILENAME,
+        )
+        selection = json.loads(cls.selection_path.read_text(encoding="utf-8"))
+        cls.child_manifest_paths = [
+            cls.root / item["manifest_path"]
+            for item in selection["children"]
+        ]
+        cls.original_bytes = {
+            path: path.read_bytes()
+            for path in (
+                cls.parent_manifest,
+                cls.plan_path,
+                cls.selection_path,
+                *cls.private_parent_paths,
+                *cls.child_manifest_paths,
+                *(
+                    path.parent / A.RESULT_ARTIFACT
+                    for path in cls.child_manifest_paths
+                ),
+            )
+        }
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def setUp(self):
+        for path, content in self.original_bytes.items():
+            if path.is_symlink():
+                path.unlink()
+            path.write_bytes(content)
+        for path in self.private_parent_paths:
+            path.chmod(0o600)
+
+    @staticmethod
+    def _write_json(path, value):
+        path.write_text(
+            json.dumps(value, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _refresh_parent_descriptor(self, artifact_path):
+        manifest = json.loads(
+            self.parent_manifest.read_text(encoding="utf-8")
+        )
+        descriptor = next(
+            item
+            for item in manifest["results"]
+            if item["path"] == artifact_path.name
+        )
+        content = artifact_path.read_bytes()
+        descriptor["size_bytes"] = len(content)
+        descriptor["sha256"] = hashlib.sha256(content).hexdigest()
+        self._write_json(self.parent_manifest, manifest)
+
+    def _prepare(self):
+        return A.prepare_driver_selection(
+            self.parent_manifest,
+            protocol=self.protocol,
+            protocol_path=A.PROTOCOL_PATH,
+            child_root=self.root,
+            reference_root=ROOT,
+        )
+
+    def test_finished_parent_and_real_mock_children_pass_full_gate(self):
+        prepared = self._prepare()
+        observations, rejections = A.validate_selected_children(
+            prepared, self.protocol
+        )
+        self.assertEqual(len(prepared.children), 6)
+        self.assertEqual(len(observations), 6)
+        self.assertEqual(rejections, [])
+
+    def test_registered_parent_artifact_byte_tamper_is_rejected(self):
+        self.plan_path.write_bytes(self.plan_path.read_bytes() + b"\n")
+        with self.assertRaisesRegex(
+            A.MultiEventInputError,
+            "registered driver artifact integrity mismatch",
+        ):
+            self._prepare()
+
+    def test_private_parent_artifacts_reject_mode_and_symlink_tamper(self):
+        private_path = self.private_parent_paths[0]
+        private_path.chmod(0o644)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "mode 0600"
+        ):
+            self._prepare()
+
+        private_path.chmod(0o600)
+        content = private_path.read_bytes()
+        decoy = self.parent_dir / "private-ledger-decoy.jsonl"
+        decoy.write_bytes(content)
+        private_path.unlink()
+        private_path.symlink_to(decoy.name)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "cannot be a symlink"
+        ):
+            self._prepare()
+
+    def test_self_consistent_plan_command_substitution_is_rejected(self):
+        plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
+        plan["jobs"][0]["child_command"] = list(
+            plan["jobs"][1]["child_command"]
+        )
+        self._write_json(self.plan_path, plan)
+        self._refresh_parent_descriptor(self.plan_path)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError,
+            "canonical command/attempt identity",
+        ):
+            self._prepare()
+
+    def test_parent_cannot_omit_a_durably_accepted_child(self):
+        selection = json.loads(
+            self.selection_path.read_text(encoding="utf-8")
+        )
+        accepted = selection["children"].pop(0)
+        selection["missing_or_rejected_slots"].append(
+            {
+                "event_id": accepted["event_id"],
+                "arm": accepted["arm"],
+                "seed": accepted["seed"],
+                "repeat_idx": accepted["repeat_idx"],
+                "status": "missing",
+                "reason_codes": ["hand_edited_outcome_omission"],
+                "attempt_run_ids": [],
+            }
+        )
+        self._write_json(self.selection_path, selection)
+        self._refresh_parent_descriptor(self.selection_path)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError,
+            "durable attempt ledger",
+        ):
+            self._prepare()
+
+    def test_old_scientific_fingerprint_tamper_fails_canonical_expected(self):
+        child_manifest = self.child_manifest_paths[0]
+        manifest = json.loads(child_manifest.read_text(encoding="utf-8"))
+        manifest["scientific_component_fingerprint"] = "0" * 64
+        manifest["simulation_core_source_hash"] = "1" * 64
+        if isinstance(manifest.get("scientific_compatibility"), dict):
+            manifest["scientific_compatibility"][
+                "scientific_component_fingerprint"
+            ] = "0" * 64
+            manifest["scientific_compatibility"][
+                "simulation_core_source_hash"
+            ] = "1" * 64
+        self._write_json(child_manifest, manifest)
+
+        selection = json.loads(
+            self.selection_path.read_text(encoding="utf-8")
+        )
+        selection["children"][0]["manifest_sha256"] = A.sha256_file(
+            child_manifest
+        )
+        self._write_json(self.selection_path, selection)
+        self._refresh_parent_descriptor(self.selection_path)
+        prepared = self._prepare()
+        observations, rejections = A.validate_selected_children(
+            prepared, self.protocol
+        )
+        self.assertEqual(len(observations), 5)
+        reasons = rejections[0]["reason_codes"]
+        self.assertIn("scientific_fingerprint_mismatch", reasons)
+        self.assertIn("simulation_core_mismatch", reasons)
+
+    def test_selected_child_substitution_fails_reconstructed_cell_identity(self):
+        prepared = self._prepare()
+        first, second, *remaining = prepared.children
+        substituted = replace(
+            first,
+            manifest_path=second.manifest_path,
+            manifest_sha256=second.manifest_sha256,
+            result_sha256=second.result_sha256,
+            expected_identity=second.expected_identity,
+        )
+        mutated = replace(
+            prepared,
+            children=(substituted, second, *remaining),
+        )
+        observations, rejections = A.validate_selected_children(
+            mutated, self.protocol
+        )
+        self.assertEqual(len(observations), 5)
+        self.assertTrue(
+            {
+                "scientific_config_mismatch",
+                "experiment_slot_mismatch",
+                "result_identity_mismatch",
+            }
+            & set(rejections[0]["reason_codes"])
+        )
+
+    def test_health_fraction_must_equal_exact_counts(self):
+        child_manifest = self.child_manifest_paths[0]
+        result_path = child_manifest.parent / A.RESULT_ARTIFACT
+        result = json.loads(result_path.read_text(encoding="utf-8"))
+        result["health"] = {
+            "bad_orders": 1,
+            "total_llm_orders": 10,
+            "bad_frac": 0.0,
+        }
+        self._write_json(result_path, result)
+        manifest = json.loads(child_manifest.read_text(encoding="utf-8"))
+        descriptor = next(
+            item
+            for item in manifest["results"]
+            if item["path"] == A.RESULT_ARTIFACT
+        )
+        result_bytes = result_path.read_bytes()
+        descriptor["size_bytes"] = len(result_bytes)
+        descriptor["sha256"] = hashlib.sha256(result_bytes).hexdigest()
+        self._write_json(child_manifest, manifest)
+
+        selection = json.loads(
+            self.selection_path.read_text(encoding="utf-8")
+        )
+        selection["children"][0]["manifest_sha256"] = A.sha256_file(
+            child_manifest
+        )
+        selection["children"][0]["result_artifact"][
+            "sha256"
+        ] = A.sha256_file(result_path)
+        self._write_json(self.selection_path, selection)
+        self._refresh_parent_descriptor(self.selection_path)
+        prepared = self._prepare()
+        observations, rejections = A.validate_selected_children(
+            prepared, self.protocol
+        )
+        self.assertEqual(len(observations), 5)
+        self.assertEqual(
+            rejections[0]["reason_codes"],
+            ["result_cell_contract_mismatch"],
+        )
 
 
 if __name__ == "__main__":
