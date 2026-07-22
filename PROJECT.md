@@ -157,6 +157,8 @@ nmsim/meta_feb2022_reference.csv  真实 Meta 崩盘参考序列
 
 新增 `experiments/repro_check.py`(跨进程可复现性回归,PASS)。**注**:`results_2x2/` 旧数据里 recovery/placebo-cascade 是修复前的值;`results_2x2_v2/` 是用修复后代码重跑的全干净复现(**暂停于 12/60**,被人群构成扫描取代,可随时续)。
 
+> **2026-07-22 Wave 0 账务决议:**上句“暂停于 12/60,可随时续”只保留为当时的历史状态,现已被本决议取代。当前工作区只读盘点在仓库外同级历史目录 `../results_2x2_v2/` 实见 16 个不平衡 legacy flat JSON(15 个 `real_on_s1..s15`,1 个 `real_off_s1`),目录内没有可验证的 managed child manifest 或 health/identity 证据;这个文件盘点与旧文“12/60”的口径不一致,不能据文件数反推当时 honest-N。现存文件与旧记录全部原样封存,不移动、不删除、不补跑、不把未完成格重标为完成;其单事件设计已由 Wave 1 多事件路线取代。若未来引用这些文件,只能把它们作为明确哈希并标注来源与局限的历史分析输入,不能把文件存在本身当成可复用的正式实验 child 或新增 honest-N。
+
 ## 八、下一个主实验:人群构成扫描(2026-06-10 启动)
 
 问题:燃料占比 m =(retail+fomo)/其余,从 0.3→0.7,社交通道的"减震"何时翻成"放大"?
@@ -247,9 +249,27 @@ nmsim/meta_feb2022_reference.csv  真实 Meta 崩盘参考序列
 
 **方法学结论 + 下一步(Phase 2b)**:干净的因果 Δ 需要 **temp=0 确定性配对**(让 lev_on/off 只差强平卖压)。这是把"放大器到底加深多少崩盘"钉死的关键,建议作为 Phase 2b 小规模跑(再决定是否进 Phase 3 长跑)。
 
+> **2026-07-22 复核注:**上述 `temp=0` 确定性配对建议已经作废,原段仅作为历史决策记录保留。真实端点在 `temp=0` 下仍会分叉;Phase 2b 不得按该建议续跑,后续只能按第十一节复核结论和 K-repeat 分布式设计重新预注册。
+
 数据/图:`results_sweep/m0.7_real_{on,off}_lev_s*.json`、`results_sweep/leverage_2x2_m0.7.png`;`nmsim/leverage.py` + `experiments/{lev2x2,lev_analyze,leverage_demo,bench_concurrency}.py`。
 
 ## 十一、通宵实验原始结果(2026-06-16,**未经复核的初步结果**,自动跑)
+
+### 2026-07-22 Wave 0 复核标注
+
+以下原始文字和数值全部保留,用于审计当时实际跑了什么、观察到什么;“作废”表示不得再作为科学结论、因果估计或后续功效依据,不表示删除或改写历史 artifact。
+
+**作废:**
+- 四格均值跌幅对比(`soc_off/on × lev_off/on`)及从这些均值推出的条件差异解释:各格的首次真实 LLM 抽样没有被 seed 或 `temp=0` 配对控制。
+- 朴素配对杠杆 Δ 及其“≈0”解释:lev-ON/OFF 差分混入未控端点抽样差异,不能识别净杠杆效应。
+- “`temp=0` 下社交减震弱/消失”的顺带观察:同样依赖已经失效的确定性配对前提。
+
+**保留:**
+- 端点在 `temp=0` 下仍不确定这一反例本身:零强平、机制未介入时的同 seed 路径仍从新闻前分叉,足以否定本节的确定性前提;它不构成对任何未来服务版本的完全随机性模型。
+- 校准记录:实测 lev-OFF 跌幅范围、中位数以及据此选择的 `L`、`maint`、`fraction` 可作为当次运行的历史配置与探索性校准证据,但不能单独支持因果结论或正式 N/K。
+- 强平触发账务:已记录的触发次数、股数、触发价格和新闻前零清算可作为该批 run 的实现/记账检查;它们不挽救上述受污染的跨臂价格比较。
+
+**复核边界:**本标注不追溯修改任何原始 run、数值、图或下文文字。后续若重做 Phase 2b,必须使用显式 K-repeat、honest-N、失败保留、与实际运行并发一致的方差/功效设计;Record/Replay 只用于审计已观察响应,不得重新包装成真实 Provider 的统计确定性。
 
 > ⚠️ 这一节是夜间自动任务的原始记录,**未经人工复核**,结论暂定。自检关卡判定为「异常」,**任务 2(临界点扫描)未运行**,等复核。
 
@@ -275,3 +295,26 @@ nmsim/meta_feb2022_reference.csv  真实 Meta 崩盘参考序列
 ### 顺带(determinism 重核社交效应,同受污染):temp=0 下社交减震弱/消失——soc_on −0.239 vs soc_off −0.266(lev-off Δ +0.026 [−0.213,+0.266];lev-on +0.058 [−0.081,+0.198],CI 均跨 0),不同于 temp=0.3 的清晰 −0.195 vs −0.308。但此结论同样受 temp=0 非确定性污染,暂不可信。
 
 数据/图:`results_phase2b/`、`leverage_2x2_m0.7.png`;工具 `experiments/{phase2b,critsweep,critsweep_analyze}.py`(critsweep 已写好+mock 验证,但未对真实端点运行)。
+
+## 十二、遗留线程台账(2026-07-22)
+
+本表记录暂停、封存或等待重设计的工作,避免把“已有代码/文件”误报成“已完成实验”。状态变更必须由新的 managed run、honest-N 和不可变 artifact 支持。
+
+| 线程 | 当前状态 | 决议 / 重启条件 |
+|---|---|---|
+| `results_2x2_v2/` | **封存历史,不再续跑**;旧文称 12/60,当前 `../results_2x2_v2/` 实见 16 个不平衡 legacy flat JSON(15 real_on / 1 real_off),且没有可验证 managed child manifest 或 health/identity 证据 | 文件数不是 honest-N 或可复用完成证据;不移动、不删目录、不补齐旧网格、不重标完成,仅可作为明确哈希和标注局限的历史分析输入;Wave 1 改走多事件设计 |
+| `critsweep` 临界点扫描 | `experiments/critsweep.py` 与 analyzer 已写并做过 Mock 验证,真实端点从未运行 | 保持停止;Wave 2 先重设计为“阻尼盘占比 × hub 中心性”的相变扫描,加入 K-repeat、null/control、预注册判据后才可新开 immutable run |
+| Phase 2b 杠杆净效应 | 通宵 32 run 存在,但确定性配对前提失效,净效应结论作废 | Wave 2 用 K-repeat 分布设计重跑;先估计市场 outcome 的 within-seed / between-seed 方差,再冻结 N/K,不得复用本节跨臂差分充当新样本 |
+| HiggsAI 跨模型复测 | 现有 N=8 仅为方向性证据,CI 跨 0,量级未坐实 | 在冻结模型/配置/并发和新 N/K 协议后补到 N≥16;MiniMax 与 HiggsAI 分开报告,不得合并成同一模型样本 |
+| 阻尼盘剂量–反应 | 独立因果扫描尚未完成;现有人群构成结果不能隔离阻尼占比与其他构成变化 | 并入 Wave 2 临界线设计;阻尼比例必须有可追踪参数路径、null/control 和数值/记账测试,不得把 real `social_weight` 当连续剂量 |
+| 拓扑消融 | influencer 同时是 hub 与自动新闻 seed,拓扑、中心性和点火身份仍有混杂 | 分开操纵 topology、hub centrality 与 seed 身份,保留基线/消融臂;在此之前不作拓扑独立因果结论 |
+| K-repeat 误差棒 | Wave0-T1 已测 response-level 噪底,但 drawdown、recovery、cascade 等市场 outcome 的方差尚未由新设计估计 | Wave 1 先做 outcome-level pilot,把 `repeat_idx` 作为一等身份并分别报告 N seeds、K repeats、失败与 honest-N;不得用相同 `N×K` 代替独立 N 的论证 |
+| cascade 指标通道混淆 | 已知保留的研究效度限制:价格可见性也能推动同向情绪,当前 cascade 不是纯社交传播量 | 后续用 no-social / no-news 或 counterfactual control 分离价格与社交通道;修复前只作带限制的描述性指标 |
+| forced seed 超 `seed_fraction` | 当前为已知 compatibility 行为,不是本轮要静默修正的 bug | 维持历史默认;若研究问题需要精确剂量,另开 versioned 机制与对照实验,不得原地改默认 |
+
+### AGENTS.md 不变量与科学语义声明
+
+- 本次只增加历史状态、证据边界和后续依赖标注;没有修改 Agent observation、Prompt、Persona、public/private 信息传播、Provider、parser、市场、风险、RNG、Config、CLI、schema 或统计实现。
+- 只对历史目录做了文件名/数量与 managed manifest 存在性的只读盘点;没有移动、删除、覆盖或重标任何历史结果,暂停/失败/未完成样本也没有被算作完成或 honest-N。
+- 没有把 private rationale 公开,没有新增机制或可配置参数,也没有把 Record/Replay 或 `temperature=0` 描述为真实 Provider 的完全确定性保证。
+- 因此本次**没有科学语义变更**;变化仅是把已经失效的解释显式降级,并为未来新机制保留 null/control、traceable effect path、测试和独立 immutable run 的门槛。
