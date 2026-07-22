@@ -34,6 +34,13 @@ from nmsim.managed_cli import (
 )
 from nmsim.run_context import ManagedRunContext
 from nmsim.result_reuse import inspect_legacy_analysis_inputs
+from nmsim.multi_event import (
+    MultiEventMaterial,
+    build_experiment_slot,
+    canonical_multi_event_basename,
+    load_multi_event_material,
+    multi_event_result_identity,
+)
 from nmsim import validation as V
 
 META = "nmsim/meta_feb2022_reference.csv"
@@ -69,12 +76,29 @@ def _norm_price_path(history, shock):
     return [round(history[i] / base, 6) for i in range(shock, len(history))]
 
 
-def _assemble(label, seed, cfg, history, peak_cascade, bad, total):
+def _assemble(
+    label,
+    seed,
+    cfg,
+    history,
+    peak_cascade,
+    bad,
+    total,
+    multi_event_material: MultiEventMaterial | None = None,
+):
     # M2: t=0 is the LAST PRE-news price (history[news_round-1]), so the sim's first
     # reaction step is INCLUDED in the compared path and aligns with the reference,
     # whose t=0 is the pre-crash close (Meta 323) and t0->t1 IS the crash.
     shock = max(0, cfg.news_round - 1)
-    cmp = V.compare_to_reference(history, shock, META)
+    if multi_event_material is None:
+        cmp = V.compare_to_reference(history, shock, cfg.reference_path or META)
+    else:
+        cmp = V.compare_to_reference_prices(
+            history,
+            shock,
+            list(multi_event_material.transformed.normalized_price_path),
+            0,
+        )
     tj = cmp["trajectory"]
     sr = cmp["reaction_supplementary"]["sim_reaction"]
     return {
@@ -83,7 +107,11 @@ def _assemble(label, seed, cfg, history, peak_cascade, bad, total):
                       "social_weight": cfg.social_weight,
                       "temperature": cfg.temperature,
                       "cache_enabled": cfg.cache_enabled,
-                      "news": "placebo" if cfg.news_text == PLACEBO_NEWS else "real"},
+                      "news": (
+                          "timeline"
+                          if cfg.news_timeline
+                          else ("placebo" if cfg.news_text == PLACEBO_NEWS else "real")
+                      )},
         "n_rounds": cfg.n_rounds, "news_round": cfg.news_round, "shock_idx": shock,
         "metrics": {
             "rmse_logprice": tj["rmse_logprice"],
@@ -123,7 +151,19 @@ def _replay_records_path(source):
     return str(path / "llm_records.jsonl" if path.is_dir() else path)
 
 
-def _live(args, cfg, manager):
+def _reported_model_aliases(manager) -> list[str]:
+    attempts = manager.manifest["completion"]["application_provider_attempts"]
+    if attempts.get("reported_models_truncated"):
+        raise ValueError("reported model aliases are truncated")
+    raw = attempts.get("reported_models", [])
+    if not isinstance(raw, list) or any(
+        not isinstance(value, str) or not value for value in raw
+    ):
+        raise ValueError("reported model aliases are malformed")
+    return sorted(set(raw))
+
+
+def _live(args, cfg, manager, multi_event_material=None):
     from nmsim.sim import run_sim
     llm, tracker = manager.prepare_llm(args.replay_from)
     res = manager.execute_simulation(
@@ -144,8 +184,16 @@ def _live(args, cfg, manager):
             total += 1
             if any(k in why for k in _BAD_MARKERS):
                 bad += 1
-    out = _assemble(args.label, args.seed, cfg, res.history,
-                    res.metrics.peak_cascade(), bad, total)
+    out = _assemble(
+        args.label,
+        args.seed,
+        cfg,
+        res.history,
+        res.metrics.peak_cascade(),
+        bad,
+        total,
+        multi_event_material,
+    )
     # Provenance: record the SERVED model id so same-seed pairs can be checked to
     # come from the same model (the endpoint can silently swap MiniMax/HiggsAI).
     out["model"] = getattr(llm, "model", None) or cfg.provider
@@ -215,10 +263,20 @@ def build_argparser():
     p.add_argument("--maint", type=float, default=None, help="maintenance margin (default 0.25)")
     p.add_argument("--lev-fraction", type=float, default=None,
                    help="fraction of LLM agents leveraged, fuel-first (default 0.5)")
+    p.add_argument("--repeat-idx", type=int, default=None,
+                   help="preferred repeat index: same seed, fresh provider sample")
     p.add_argument("--rep", type=int, default=None,
-                   help="repeat index: same seed re-sampled (temp>0); suffixes filename")
+                   help="compatibility alias for --repeat-idx")
+    p.add_argument("--technical-retry-idx", type=int, default=None,
+                   help="driver child-attempt index; never part of scientific identity")
     p.add_argument("--rounds", type=int, default=None)
     p.add_argument("--news-round", type=int, default=None)
+    # ---- explicit multi-event mode (all five fields are required together) ----
+    p.add_argument("--reference-csv", default=None)
+    p.add_argument("--news-timeline-jsonl", default=None)
+    p.add_argument("--event-id", default=None)
+    p.add_argument("--protocol", default=None)
+    p.add_argument("--catalog", default=None)
     # ---- reuse-from-csv mode ----
     p.add_argument("--price-csv", default=None)
     p.add_argument("--traces-csv", default=None)
@@ -231,8 +289,140 @@ def build_argparser():
     return p
 
 
-def config_from_args(args):
+_MULTI_EVENT_ARGUMENTS = (
+    "reference_csv",
+    "news_timeline_jsonl",
+    "event_id",
+    "protocol",
+    "catalog",
+)
+
+
+def _resolve_repeat_idx(args) -> int | None:
+    preferred = getattr(args, "repeat_idx", None)
+    alias = getattr(args, "rep", None)
+    if preferred is not None and alias is not None and preferred != alias:
+        raise ValueError("--repeat-idx conflicts with --rep")
+    value = preferred if preferred is not None else alias
+    if value is not None and value < 0:
+        raise ValueError("--repeat-idx must be >= 0")
+    args.repeat_idx = value
+    # Keep the historical alias available to old result consumers.
+    args.rep = value
+    retry_idx = getattr(args, "technical_retry_idx", None)
+    if retry_idx is not None and retry_idx < 1:
+        raise ValueError("--technical-retry-idx must be >= 1")
+    return value
+
+
+def _multi_event_requested(args) -> bool:
+    return any(getattr(args, name, None) is not None for name in _MULTI_EVENT_ARGUMENTS)
+
+
+def _prepare_multi_event(
+    args, *, environment=None
+) -> MultiEventMaterial | None:
+    if not _multi_event_requested(args):
+        args.multi_event_material = None
+        args.experiment_slot = None
+        return None
+    missing = [name for name in _MULTI_EVENT_ARGUMENTS if not getattr(args, name, None)]
+    if missing:
+        raise ValueError(
+            "multi-event mode requires complete --reference-csv, "
+            "--news-timeline-jsonl, --event-id, --protocol and --catalog"
+        )
+    if args.repeat_idx is None:
+        raise ValueError("multi-event mode requires --repeat-idx")
+    if args.label is not None:
+        raise ValueError("multi-event mode uses a canonical basename; omit --label")
+    if args.news != "real":
+        raise ValueError("multi-event mode does not use the legacy --news control")
+    if args.arm is not None or args.leverage or args.rounds is not None or args.news_round is not None:
+        raise ValueError("multi-event mode rejects legacy mechanism/schedule overrides")
+    if args.gain != 1.0:
+        raise ValueError("multi-event mode requires the frozen --gain 1.0")
+    if args.total != 30:
+        raise ValueError("multi-event mode requires the frozen --total 30")
+    if any(
+        value is not None
+        for value in (
+            args.leverage_ratio,
+            args.leverage_spread,
+            args.maint,
+            args.lev_fraction,
+        )
+    ):
+        raise ValueError(
+            "multi-event mode rejects inactive leverage parameter overrides"
+        )
+    if args.temp is not None or args.m is not None or args.reasoning_effort is not None:
+        raise ValueError("multi-event mode rejects legacy config overrides")
+    if args.price_csv or args.traces_csv or args.propagation_csv:
+        raise ValueError("multi-event simulation cannot use legacy CSV reuse mode")
+    if args.replay_from:
+        raise ValueError("multi-event driver children do not accept --replay-from")
+    if args.provider not in {"mock", "openai"}:
+        raise ValueError("multi-event provider must be mock or openai")
+
+    material = load_multi_event_material(
+        event_id=args.event_id,
+        reference_csv=args.reference_csv,
+        news_timeline_jsonl=args.news_timeline_jsonl,
+        protocol_path=args.protocol,
+        catalog_path=args.catalog,
+    )
+    allowed_repeats = tuple(material.protocol["design"]["repeat_indices"])
+    if args.repeat_idx not in allowed_repeats:
+        raise ValueError("--repeat-idx is not frozen by the multi-event protocol")
+    if args.seed not in material.protocol["design"]["seeds"]:
+        raise ValueError("--seed is not frozen by the multi-event protocol")
+    frozen_model_request = material.protocol["effective_config_freeze"][
+        "model_request"
+    ]
+    frozen_model = str(frozen_model_request["model"])
+    if args.model is not None and args.model != frozen_model:
+        raise ValueError("--model differs from the frozen multi-event protocol")
+    effective_environment = os.environ if environment is None else environment
+    ambient_provider = effective_environment.get("LLM_PROVIDER")
+    if ambient_provider and ambient_provider.strip().lower() != args.provider:
+        raise ValueError("LLM_PROVIDER conflicts with --provider in multi-event mode")
+    ambient_model = effective_environment.get("LLM_MODEL")
+    if args.provider == "mock":
+        if args.model is not None or ambient_model:
+            raise ValueError("mock multi-event mode rejects model overrides")
+    else:
+        if ambient_model and ambient_model != frozen_model:
+            raise ValueError("LLM_MODEL differs from the frozen multi-event model")
+        expected_endpoint = str(
+            frozen_model_request["openai_base_url"]
+        )
+        ambient_endpoint = effective_environment.get("OPENAI_BASE_URL")
+        if ambient_endpoint and ambient_endpoint != expected_endpoint:
+            raise ValueError(
+                "OPENAI_BASE_URL differs from the frozen multi-event endpoint"
+            )
+    social_arm = "social_on" if args.social == "on" else "social_off"
+    slot = build_experiment_slot(
+        protocol_hash=material.protocol_hash,
+        event_id=args.event_id,
+        social_arm=social_arm,
+        seed=args.seed,
+        repeat_idx=args.repeat_idx,
+    )
+    args.multi_event_material = material
+    args.experiment_slot = slot
+    args.label = "me_{}_{}".format(args.event_id, social_arm)
+    return material
+
+
+def config_from_args(args, *, environment=None):
     """Build the same effective Config as the historical CLI."""
+
+    _resolve_repeat_idx(args)
+    multi_event_material = _prepare_multi_event(
+        args, environment=environment
+    )
 
     if args.label is None:
         lev_sfx = "_lev" if args.leverage else ""
@@ -243,7 +433,15 @@ def config_from_args(args):
         else:
             args.label = f"{args.news}_{args.social}{lev_sfx}"
 
-    cfg = Config(provider=args.provider, seed=args.seed, reference_path=META)
+    cfg = Config(
+        provider=args.provider,
+        seed=args.seed,
+        reference_path=(
+            str(multi_event_material.reference_csv)
+            if multi_event_material is not None
+            else META
+        ),
+    )
     cfg.out_dir = args.out
     if args.model:
         cfg.model = args.model
@@ -289,6 +487,34 @@ def config_from_args(args):
         cfg.n_rounds = args.rounds
     if args.news_round is not None:
         cfg.news_round = args.news_round
+    if multi_event_material is not None:
+        freeze = multi_event_material.protocol["effective_config_freeze"]
+        frozen = freeze["scientific"]
+        frozen_model_request = freeze["model_request"]
+        frozen_model = str(frozen_model_request["model"])
+        cfg.n_rounds = 24
+        cfg.news_round = 1
+        cfg.news_text = ""
+        cfg.news_timeline = multi_event_material.transformed.news_timeline
+        cfg.social_enabled = args.social == "on"
+        cfg.social_weight = float(frozen["social_weight"])
+        cfg.temperature = float(frozen_model_request["temperature"])
+        cfg.cache_enabled = bool(frozen_model_request["cache_enabled"])
+        cfg.max_tokens = int(frozen_model_request["max_tokens"])
+        cfg.population = dict(frozen["population"])
+        cfg.seed_fraction = float(frozen["seed_fraction"])
+        cfg.n_noise_agents = int(frozen["n_noise_agents"])
+        cfg.leverage_enabled = bool(frozen["leverage_enabled"])
+        if args.provider == "openai":
+            cfg.model = frozen_model
+            cfg.openai_base_url = str(frozen_model_request["openai_base_url"])
+        # Validate after historical field-by-field mutation, preserving the
+        # Config constructor behavior for every legacy invocation.
+        from nmsim.config import normalize_news_timeline
+
+        cfg.news_timeline = normalize_news_timeline(
+            cfg.news_timeline, n_rounds=cfg.n_rounds
+        )
     return cfg
 
 
@@ -316,9 +542,14 @@ def main(argv=None):
     except (ManagedCLIError, OSError, ValueError) as error:
         fail_cli(bootstrap, error, failure_stage="config_validation")
 
-    rep_sfx = f"_r{args.rep}" if args.rep is not None else ""
-    path = os.path.join(args.out, f"{args.label}_s{args.seed}{rep_sfx}.json")
-    legacy_basename = os.path.basename(path)
+    multi_event_material = args.multi_event_material
+    if multi_event_material is not None:
+        legacy_basename = canonical_multi_event_basename(args.experiment_slot)
+        path = os.path.join(args.out, legacy_basename)
+    else:
+        rep_sfx = f"_r{args.repeat_idx}" if args.repeat_idx is not None else ""
+        path = os.path.join(args.out, f"{args.label}_s{args.seed}{rep_sfx}.json")
+        legacy_basename = os.path.basename(path)
     input_paths = {}
     if args.price_csv:
         input_paths["price_csv"] = args.price_csv
@@ -328,6 +559,16 @@ def main(argv=None):
         input_paths["propagation_csv"] = args.propagation_csv
     if args.replay_from:
         input_paths["llm_replay_records"] = _replay_records_path(args.replay_from)
+    if multi_event_material is not None:
+        input_paths.update(
+            {
+                "news_timeline_jsonl": str(
+                    multi_event_material.news_timeline_jsonl
+                ),
+                "multi_event_protocol": str(multi_event_material.protocol_path),
+                "reference_catalog": str(multi_event_material.catalog_path),
+            }
+        )
     try:
         worker_count = int(os.environ.get("NMSIM_DRIVER_WORKERS", "1"))
     except ValueError:
@@ -349,6 +590,33 @@ def main(argv=None):
         run_kind="analysis" if args.price_csv else "simulation",
         planned_simulation_runs=0 if args.price_csv else 1,
     )
+    if multi_event_material is not None:
+        manager.manifest["experiment_slot"] = dict(args.experiment_slot)
+        manager.manifest["multi_event"] = {
+            "schema_version": "1.0",
+            "event_id": multi_event_material.event_id,
+            "protocol_sha256": multi_event_material.protocol_hash,
+            "catalog_sha256": multi_event_material.catalog_hash,
+            "reference_csv_sha256": multi_event_material.reference_hash,
+            "news_timeline_sha256": multi_event_material.timeline_hash,
+            "event_definition_sha256": (
+                multi_event_material.event_definition_hash
+            ),
+            "reference_transform_id": (
+                multi_event_material.transformed.transform_id
+            ),
+            "reference_transform_sha256": (
+                multi_event_material.reference_transform_sha256
+            ),
+            "timeline_transform_sha256": (
+                multi_event_material.transformed.transformed_timeline_hash
+            ),
+            "combined_transform_sha256": (
+                multi_event_material.transformed.transform_hash
+            ),
+            "technical_retry_idx": args.technical_retry_idx,
+        }
+        manager.manifest.write_atomic()
     if args.price_csv:
         manager.manifest["analysis_input_provenance"] = (
             inspect_legacy_analysis_inputs(
@@ -367,9 +635,20 @@ def main(argv=None):
             )
             result = _from_csv(args, cfg)
         else:
-            result, res, llm = _live(args, cfg, manager)
+            result, res, llm = _live(
+                args, cfg, manager, multi_event_material
+            )
+        if multi_event_material is not None:
+            reported_model_aliases = _reported_model_aliases(manager)
+            result["reported_model_aliases"] = reported_model_aliases
+            manager.manifest["multi_event"]["reported_model_aliases"] = (
+                reported_model_aliases
+            )
+            manager.manifest.write_atomic()
 
-        result["rep"] = args.rep
+        result["rep"] = args.repeat_idx
+        result["repeat_idx"] = args.repeat_idx
+        result["technical_retry_idx"] = args.technical_retry_idx
         if args.m is not None:
             rest = sum(cfg.population.values()) - 1
             fuel = sum(cfg.population.get(persona, 0) for persona in FUEL)
@@ -382,6 +661,25 @@ def main(argv=None):
         result["honest_n"] = manager.manifest["honest_n"]
         result["honest_n_unit"] = "agent_decisions"
         result["honest_n_deprecated"] = True
+        if multi_event_material is not None:
+            slot = args.experiment_slot
+            result["experiment_slot"] = dict(slot)
+            result["multi_event_identity"] = multi_event_result_identity(
+                multi_event_material, slot
+            )
+            result["event_definition_sha256"] = (
+                multi_event_material.event_definition_hash
+            )
+            result["catalog_sha256"] = multi_event_material.catalog_hash
+            result["reference_transform_id"] = (
+                multi_event_material.transformed.transform_id
+            )
+            result["timeline_transform_sha256"] = (
+                multi_event_material.transformed.transformed_timeline_hash
+            )
+            result["combined_transform_sha256"] = (
+                multi_event_material.transformed.transform_hash
+            )
 
         manager.set_stage("result_export")
         canonical_path = manager.run_dir / "experiment_result.json"

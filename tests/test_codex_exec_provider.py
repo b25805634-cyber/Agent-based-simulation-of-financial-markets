@@ -799,7 +799,7 @@ class CodexExecProviderTests(unittest.TestCase):
         )
         self.assertEqual(
             default_contract["scientific_config_hash"],
-            "891609d7ff29b8579fc51dd011c1ebcda9f2f8d8ef71c304a83211089fcc1b12",
+            "601eaa9a1c19a553eec2b56b3d9039996489b637987f74370d40ac316a8edece",
         )
         self.assertEqual(
             default_contract["model_request_config_hash"],

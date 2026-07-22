@@ -28,15 +28,21 @@ RECORDING_SCHEMA_VERSION = CURRENT_RECORDING_SCHEMA_VERSION
 # Conservative source boundary derived from the actual Config -> Agent prompt
 # -> LLM parse -> simulation -> market/social/risk -> validation call graph.
 # Instrumentation-only modules (recording, provenance, reparse audit), tests,
-# experiment drivers, and documentation are intentionally absent.
+# ordinary experiment drivers, and documentation are intentionally absent.
+# ``experiments/run_seed.py`` is the conservative exception: it assembles the
+# canonical scientific child result and transformed-reference metrics, so a
+# cross-commit reuse decision must bind its bytes too.
 SCIENTIFIC_COMPONENT_FILES = (
+    "experiments/run_seed.py",
     "nmsim/agents.py",
     "nmsim/config.py",
     "nmsim/contagion.py",
     "nmsim/leverage.py",
     "nmsim/llm.py",
     "nmsim/market.py",
+    "nmsim/multi_event.py",
     "nmsim/prompts.py",
+    "nmsim/reference_data/__init__.py",
     "nmsim/sim.py",
     "nmsim/types.py",
     "nmsim/validation.py",

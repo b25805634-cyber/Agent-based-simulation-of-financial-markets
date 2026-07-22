@@ -181,6 +181,27 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
             "drive", "grid2x2", "sweep", "ablate", "lev2x2", "phase2b", "critsweep"
         )
     ),
+    _spec(
+        "experiments.multi_event", "experiments/multi_event.py",
+        "python3 -m experiments.multi_event",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DELEGATED_MANAGED_DRIVER,
+        (
+            "driver bootstrap",
+            "frozen protocol and source-byte validation",
+            "managed immutable execution plan",
+            "identity-gated experiments.run_seed attempts",
+            "immutable selection and retry ledger",
+        ),
+        (
+            "multi_event_plan.json",
+            "multi_event_selection.json",
+            "public/private technical-attempt ledgers",
+            "driver_summary.json",
+            "managed child runs",
+        ),
+        PROVIDER_INDIRECT, True,
+        "Dry-run constructs no Provider; real OpenAI-compatible children require --live and the exact frozen 144-slot protocol.",
+    ),
 
     # Derived research artifacts.  These do not run a market or call a Provider,
     # but their inputs and outputs still need immutable provenance.

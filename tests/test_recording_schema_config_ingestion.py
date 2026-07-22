@@ -534,11 +534,11 @@ class StrictConfigIngestionTests(unittest.TestCase):
         )
         self.assertEqual(
             metadata["simulation_core_source_hash"],
-            "efe0417170052e6c80270c612b32c513d7c1ddd7fb1f1f4469e8cd5b0fd28cdb",
+            "dea1d39d287a10e53674c30ae3410729407b13366f2f2c79739bde3924e0d286",
         )
         self.assertEqual(
             metadata["scientific_component_fingerprint"],
-            "fe604b01f952cc261d38e989c468ed9c0115c512d7f522caad610744d38f6d44",
+            "f1015b7587e3add3cf887a15091483773f6ef74769da9950be964305ad3e4379",
         )
         defaults = Config()
         self.assertEqual(defaults.n_rounds, 24)
@@ -552,7 +552,7 @@ class StrictConfigIngestionTests(unittest.TestCase):
         ).encode("utf-8")
         self.assertEqual(
             hashlib.sha256(default_payload).hexdigest(),
-            "f0508c233c669749eedc1eabc93d2bea97d2438d8a1fd8b51923ff9195697c07",
+            "62b06df18c81278073117039897a4f27ede46ad417c03d942881d09caf68c364",
         )
 
 

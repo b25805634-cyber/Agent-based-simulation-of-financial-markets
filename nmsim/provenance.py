@@ -440,6 +440,7 @@ class RunManager:
             "n_rounds": getattr(cfg, "n_rounds", None),
             "news_round": getattr(cfg, "news_round", None),
             "news_text": getattr(cfg, "news_text", None),
+            "news_timeline": getattr(cfg, "news_timeline", ()),
             "population": getattr(cfg, "population", None),
             "seed_fraction": getattr(cfg, "seed_fraction", None),
         })

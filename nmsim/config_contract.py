@@ -47,6 +47,7 @@ CONFIG_FIELD_RULES: dict[str, ConfigFieldRule] = {
     "n_rounds": ConfigFieldRule(SCIENTIFIC, "sets the simulation horizon and terminal liquidation opportunity"),
     "news_round": ConfigFieldRule(SCIENTIFIC, "sets news delivery, margin gating, and metric alignment"),
     "news_text": ConfigFieldRule(SCIENTIFIC, "defines the scenario event delivered to informed agents"),
+    "news_timeline": ConfigFieldRule(SCIENTIFIC, "defines the ordered cumulative public-event delivery mechanism"),
     "initial_price": ConfigFieldRule(SCIENTIFIC, "initialises price, portfolios, and leverage reference positions"),
     "fundamental_value": ConfigFieldRule(SCIENTIFIC, "enters the Mock observation and decision path"),
     "recent_window": ConfigFieldRule(SCIENTIFIC, "controls the price history visible to agents"),

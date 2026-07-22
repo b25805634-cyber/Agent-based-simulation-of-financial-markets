@@ -328,6 +328,7 @@ def runtime_model_config(
     cfg: Any,
     llm: Any = None,
     recorded: Optional[Mapping[str, Any]] = None,
+    environment: Optional[Mapping[str, str]] = None,
 ) -> dict[str, Any]:
     """Build the strict, secret-free model identity for record or replay.
 
@@ -337,8 +338,10 @@ def runtime_model_config(
     unchanged, so explicit provider/model/sampling changes are rejected.
     """
 
+    effective_environment = os.environ if environment is None else environment
     requested = str(
-        os.environ.get("LLM_PROVIDER") or getattr(cfg, "provider", "auto")
+        effective_environment.get("LLM_PROVIDER")
+        or getattr(cfg, "provider", "auto")
     ).lower()
     source = canonical_model_config(recorded)
     source_requested = str(source.get("requested_provider", ""))
@@ -348,14 +351,22 @@ def runtime_model_config(
     elif source and requested == source_requested:
         resolved = str(source.get("resolved_provider", source.get("provider", "mock")))
     elif requested == "auto":
-        resolved = "anthropic" if os.environ.get("ANTHROPIC_API_KEY") else "mock"
+        resolved = (
+            "anthropic"
+            if effective_environment.get("ANTHROPIC_API_KEY")
+            else "mock"
+        )
     elif requested in ("anthropic", "openai", "mock", "codex_exec"):
         resolved = requested
     else:
         # Preserve build_llm's existing unknown-provider compatibility behavior.
         resolved = "mock"
 
-    explicit_model = os.environ.get("LLM_MODEL") or getattr(cfg, "model", "") or None
+    explicit_model = (
+        effective_environment.get("LLM_MODEL")
+        or getattr(cfg, "model", "")
+        or None
+    )
     if llm is not None:
         model = getattr(llm, "model", None) or (
             "mock" if resolved == "mock" else explicit_model
@@ -374,7 +385,7 @@ def runtime_model_config(
     endpoint = None
     if resolved == "openai" or requested == "openai":
         endpoint = (
-            os.environ.get("OPENAI_BASE_URL")
+            effective_environment.get("OPENAI_BASE_URL")
             or getattr(cfg, "openai_base_url", None)
         )
 
