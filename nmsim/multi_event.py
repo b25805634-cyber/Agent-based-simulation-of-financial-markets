@@ -16,6 +16,7 @@ import re
 from typing import Any, Mapping
 
 from .config import Config, NewsTimelineEntry, normalize_news_timeline
+from .decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
 from .config_contract import (
     CONFIG_FIELD_RULES,
     CONFIG_HASH_SCHEMA_VERSION,
@@ -33,7 +34,7 @@ TRANSFORM_ID = "event_phase_normalized_log_linear_25_v1"
 TRANSFORM_N_ROUNDS = 24
 TRANSFORM_POINT_COUNT = 25
 FROZEN_PROTOCOL_SHA256 = (
-    "a21bc3d3fb9b1b66a590ae02e9fcd1298194d6fb0302a29820c9edabffef8b08"
+    "1cff28c0af7ef4c0874b86d0b7d660e0d15f4f208d8f00ac7e93e71a50a39e72"
 )
 
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -457,6 +458,7 @@ def load_protocol(path: str | Path) -> tuple[dict[str, Any], str]:
         "seed_fraction": 2.0 / 30.0,
         "news_round": 1,
         "news_text": "",
+        "decision_response_schema": MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
     }
     for field in sorted(classified - factor_fields):
         expected = overrides.get(field, getattr(defaults, field))
@@ -502,11 +504,19 @@ def load_protocol(path: str | Path) -> tuple[dict[str, Any], str]:
         "temperature": 0.3,
         "max_tokens": 1024,
         "cache_enabled": False,
+        "provider_sdk_max_retries": 0,
     }.items():
         if model_request.get(field) != expected:
             raise MultiEventProtocolError(
                 f"frozen model request changed: {field}"
             )
+    frozen_execution = _required_mapping(
+        freeze.get("execution"), "execution freeze"
+    )
+    if frozen_execution.get("out_dir") != (
+        "canonical_repository_root/results_multi_event_no_symlink_or_override_for_live"
+    ):
+        raise MultiEventProtocolError("canonical live output root policy changed")
     return value, protocol_hash
 
 
@@ -713,6 +723,15 @@ def build_attempt_series_id(
         raise MultiEventProtocolError(
             "expected identity lacks multi-event material identity"
         )
+    runtime_identity = getattr(
+        expected, "scientific_runtime_environment_identity", None
+    )
+    if not isinstance(runtime_identity, str) or not _HEX_SHA256.fullmatch(
+        runtime_identity
+    ):
+        raise MultiEventProtocolError(
+            "expected identity lacks scientific runtime environment identity"
+        )
     payload = {
         "schema_version": ATTEMPT_SERIES_SCHEMA_VERSION,
         "experiment_slot": normalized_slot,
@@ -744,6 +763,9 @@ def build_attempt_series_id(
         "temperature": expected.temperature,
         "max_tokens": expected.max_tokens,
         "cache_enabled": expected.cache_enabled,
+        "scientific_runtime_environment_identity": (
+            runtime_identity
+        ),
         "multi_event_material_identity": dict(material),
     }
     return stable_hash(payload)

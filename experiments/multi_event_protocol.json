@@ -65,7 +65,16 @@
     "cache_enabled": false,
     "temperature": 0.3,
     "provider_determinism_claim": "not_claimed",
-    "record_replay_role": "audit_of_observed_runs_only"
+    "record_replay_role": "audit_of_observed_runs_only",
+    "attempt_series_coordination": "the driver holds one nonblocking advisory lock at the canonical study output root for its entire preflight, execution, selection, and summary lifecycle; every launched child inherits the lock descriptor so an orphaned in-flight child retains ownership until it terminates",
+    "attempt_inflight_policy": "an occupied ACTIVE or running attempt is never classified as rejected and never advances the series; lock contention or an independently observed active attempt causes a safe parent stop, after which a later parent must reacquire the lock and reassess the exact attempt",
+    "attempt_budget_scope": "one bounded five-attempt series per preregistered slot in the single canonical repository results_multi_event root; selectable alternate live output roots are prohibited and cannot reset the local cap",
+    "live_source_snapshot_policy": "live execution requires a completely clean repository and HEAD exactly equal to the last commit that changed the canonical protocol artifact; every accepted live child must bind that same commit and scientific component fingerprint",
+    "launch_order_policy": "multi_event_launch_order_v1: iterate repeat position then seed position; rotate canonical event order by (repeat_position+seed_position)%3; launch both arms adjacently; social_on is first exactly when (repeat_position+seed_position+canonical_event_position)%2==1; each event occupies each temporal position eight times and has 12 on-first plus 12 off-first blocks",
+    "scientific_runtime_environment_policy": "every multi-event attempt series, child, plan, selection, and pooled study binds scientific_runtime_environment_v1: Python implementation/version, platform/architecture, and exact numpy/matplotlib/anthropic/openai/httpx versions including null; live accepted children must be uniform",
+    "raw_audit_artifact_policy": "every accepted child must register and preserve experiment_result.json, its canonical compatibility JSON, llm_records.jsonl, events.jsonl, and private_events.jsonl; private_events.jsonl and llm_records.jsonl must be non-symlink regular files with exact mode 0600",
+    "parent_network_policy": "the live parent truthfully records network_access=true for connectivity probes only; LLM provider calls belong to managed children; mock and dry parents record network_access=false",
+    "health_contract": "multi_event_health_v1 requires total_llm_orders>0 and nonnegative integer counts; bad_orders is the union of strict-schema, legacy-parse, and provider-fallback final-decision failures represented by disjoint exhaustive failure_union_counts; bad_frac must equal round(bad_orders/total_llm_orders,4), while the acceptance threshold is applied to the unrounded ratio"
   },
   "bootstrap": {
     "method": "cluster_resample_complete_seed_ids_with_replacement",
@@ -172,6 +181,7 @@
         "factor": "design.seeds",
         "values": [11, 13, 17, 19, 23, 29, 31, 37]
       },
+      "decision_response_schema": "multi_event_decision_response_v1",
       "n_rounds": 24,
       "news_round": 1,
       "news_text": "",
@@ -229,19 +239,20 @@
       "temperature": 0.3,
       "max_tokens": 1024,
       "cache_enabled": false,
+      "provider_sdk_max_retries": 0,
       "resolved_provider_and_model_policy": "every accepted child records requested and resolved identities; an alias or endpoint change is reported and cannot be silently pooled"
     },
     "execution": {
       "openai_api_key": "environment_only_never_persisted",
-      "out_dir": "driver_selected_and_manifest_recorded",
+      "out_dir": "canonical_repository_root/results_multi_event_no_symlink_or_override_for_live",
       "workers": 1,
       "workers_role": "execution_only"
     }
   },
   "analysis_input_contract": {
     "schema_version": "1.0",
-    "selection": "one finished experiments.multi_event parent run_manifest.json; the analyzer derives and rehashes its registered sibling multi_event_selection.json, multi_event_plan.json, public attempt ledger, and driver_summary.json; arbitrary standalone selection JSON is ineligible and no directory discovery or globbing is allowed",
-    "driver_parent_policy": "the parent must be terminal and output-complete with command_identity experiments.multi_event and the frozen protocol/input identities; plan slots, public attempt outcomes, accepted/missing selection cells, and driver completed/failed/honest-N counts must agree exactly",
+    "selection": "one finished experiments.multi_event parent run_manifest.json; the analyzer derives and rehashes its registered sibling multi_event_selection.json, multi_event_plan.json, multi_event_attempts.jsonl, mode-0600 multi_event_attempts.private.jsonl, driver_summary.json, and mode-0600 driver_failures.private.jsonl; arbitrary standalone selection JSON is ineligible and no directory discovery or globbing is allowed",
+    "driver_parent_policy": "the parent must be terminal and output-complete with command_identity experiments.multi_event and the frozen protocol/input identities; an openai_live parent must bind the canonical repository results_multi_event root and clean protocol-owning source snapshot; plan slots, public attempt outcomes, accepted/missing selection cells, and driver completed/failed/honest-N counts must agree exactly",
     "required_top_level": [
       "schema_version",
       "protocol_sha256",
@@ -252,8 +263,8 @@
       "children",
       "missing_or_rejected_slots"
     ],
-    "execution_plan_policy": "openai_live must exactly use the frozen 144-slot plan; mock may declare a non-adherent subset for engineering acceptance, with an override reason and no preregistered realism claim",
-    "attempt_ledger_policy": "every accepted child has non-empty unique attempt_run_ids bounded by max_child_attempts and accepted_run_id equal to identity.run_id; rejected slots list their unique bounded attempts, missing slots list none, and one managed run_id cannot be assigned to multiple slots",
+    "execution_plan_policy": "openai_live must exactly use the frozen 144-slot counterbalanced launch plan, the one canonical repository results_multi_event root, and the clean protocol-owning source snapshot; mock may declare a non-adherent subset and driver-selected temporary root for engineering acceptance, with an override reason and no preregistered realism claim; dry-run is explicitly non-live and makes no source-snapshot or output-root eligibility claim",
+    "attempt_ledger_policy": "every accepted child has non-empty unique attempt_run_ids bounded by max_child_attempts and accepted_run_id equal to identity.run_id; rejected slots list their unique bounded attempts, missing slots list none, and one managed run_id cannot be assigned to multiple slots; the canonical-root inherited advisory lock prevents concurrent parents or orphaned active children from advancing one series, and ACTIVE attempts are never counted as rejected technical attempts",
     "required_study_model_identity": [
       "execution_mode",
       "model_request_config_hash",
@@ -262,9 +273,10 @@
       "resolved_provider",
       "resolved_model",
       "endpoint_identity",
-      "reported_model_aliases"
+      "reported_model_aliases",
+      "scientific_runtime_environment_identity"
     ],
-    "reported_model_alias_policy": "each live child binds exactly one endpoint-reported alias across application attempt evidence, selection identity, and experiment_result; a single study alias permits pooling only under one homogeneous self-reported endpoint condition, underlying_model_identity_verified is always false, mixed live aliases prohibit alias-homogeneous pooling, and mock records an empty list",
+    "reported_model_alias_policy": "each live child binds exactly one endpoint-reported alias across application attempt evidence, selection identity, and experiment_result; an alias is accepted byte-exact only when it is 1..256 printable characters, equals its own strip result, has no leading/trailing whitespace or control characters, and may contain safe printable interior spaces; invalid aliases are rejected and never trimmed; a single study alias permits pooling only under one homogeneous self-reported endpoint condition, underlying_model_identity_verified is always false, mixed live aliases prohibit alias-homogeneous pooling, and mock records an empty list",
     "required_child_identity": [
       "run_id",
       "command_identity",
@@ -279,7 +291,9 @@
       "resolved_provider",
       "resolved_model",
       "endpoint_identity",
-      "reported_model_aliases"
+      "reported_model_aliases",
+      "scientific_runtime_environment",
+      "scientific_runtime_environment_identity"
     ],
     "required_result_cell_identity": [
       "schema_version",
@@ -292,17 +306,17 @@
       "news_timeline_sha256",
       "reference_transform_sha256"
     ],
-    "required_hashes": "the protocol freezes the authoritative catalog/reference/timeline SHA-256 values; the finished parent registers and hashes the selection, plan, attempt ledger, and driver summary; the selection repeats frozen input hashes and supplies SHA-256 for each child manifest and experiment_result.json"
+    "required_hashes": "the protocol freezes the authoritative catalog/reference/timeline SHA-256 values; the finished parent registers and hashes the selection, plan, public and private attempt ledgers, driver summary, and private driver-failures artifact; the selection repeats frozen input hashes, scientific runtime environment identity, and supplies SHA-256 for each child manifest and experiment_result.json"
   },
   "scientific_semantics_change": {
     "changes_simulator": true,
-    "simulator_change": "adds opt-in Config.news_timeline delivery and public prompt observation; the empty tuple preserves the legacy one-shot news path",
+    "simulator_change": "adds opt-in Config.news_timeline delivery and public prompt observation plus opt-in multi_event_decision_response_v1 strict response validation; the empty timeline and null decision schema preserve the legacy one-shot news and coercive parser paths",
     "changes_prompt_observation": "true only when news_timeline is non-empty",
     "changes_persona": false,
     "changes_market_logic": false,
     "changes_private_to_public_information_boundary": false,
     "changes_market_or_social_logic": false,
-    "analysis_change": "adds a preregistered complete-case, K-repeat distributional estimator and managed derived-artifact boundary",
+    "analysis_change": "adds a preregistered complete-case, K-repeat distributional estimator, deterministic counterbalanced launch order, strict failure-union health gate, runtime-environment identity, and managed derived-artifact boundary",
     "compatibility": "legacy flat results are not eligible inputs; existing analyzers and result schemas are unchanged"
   }
 }

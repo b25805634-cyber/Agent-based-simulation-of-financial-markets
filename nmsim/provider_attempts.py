@@ -13,13 +13,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 import hashlib
-import re
 import threading
 from typing import Any, Optional, Protocol, Sequence, runtime_checkable
 
 
 PROVIDER_ATTEMPT_SCHEMA = "provider_attempt_v1"
-_SAFE_REPORTED_MODEL = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+@-]{0,199}$")
+REPORTED_MODEL_ALIAS_MAX_CHARS = 256
 
 
 def sha256_text(value: str) -> str:
@@ -36,12 +35,17 @@ def prompt_hash(system: str, user: str) -> str:
 
 
 def safe_reported_model(value: Any) -> Optional[str]:
-    """Return a bounded public endpoint model id, or ``None`` if unsafe."""
+    """Return one exact bounded printable alias, or ``None`` without trimming."""
 
     if not isinstance(value, str):
         return None
-    candidate = value.strip()
-    return candidate if _SAFE_REPORTED_MODEL.fullmatch(candidate) else None
+    if (
+        not 1 <= len(value) <= REPORTED_MODEL_ALIAS_MAX_CHARS
+        or value != value.strip()
+        or not value.isprintable()
+    ):
+        return None
+    return value
 
 
 @runtime_checkable
@@ -211,6 +215,7 @@ def observe_provider_attempt(
 
 __all__ = [
     "PROVIDER_ATTEMPT_SCHEMA",
+    "REPORTED_MODEL_ALIAS_MAX_CHARS",
     "ProviderAttemptContext",
     "ProviderAttemptContextCarrier",
     "ProviderAttemptObservation",

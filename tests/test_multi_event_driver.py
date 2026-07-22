@@ -110,6 +110,12 @@ class MultiEventDriverTests(unittest.TestCase):
                 "resolved_model": expected.resolved_model,
                 "endpoint_identity": expected.endpoint_identity,
                 "reported_model_aliases": [],
+                "scientific_runtime_environment": (
+                    expected.scientific_runtime_environment
+                ),
+                "scientific_runtime_environment_identity": (
+                    expected.scientific_runtime_environment_identity
+                ),
             },
         }
 
@@ -138,7 +144,8 @@ class MultiEventDriverTests(unittest.TestCase):
             manifest = json.loads((run_dir / "run_manifest.json").read_text(encoding="utf-8"))
         self.assertEqual(len(plan["jobs"]), 144)
         all_ids = []
-        for job in plan["jobs"]:
+        for ordinal, job in enumerate(plan["jobs"], start=1):
+            self.assertEqual(job["launch_ordinal"], ordinal)
             self.assertEqual(len(job["attempt_series_id"]), 64)
             self.assertEqual(len(job["allowed_attempt_run_ids"]), 5)
             for index, run_id in enumerate(job["allowed_attempt_run_ids"], start=1):
@@ -148,6 +155,28 @@ class MultiEventDriverTests(unittest.TestCase):
                 self.assertEqual(len(parts[2]), 64)
             all_ids.extend(job["allowed_attempt_run_ids"])
         self.assertEqual(len(all_ids), len(set(all_ids)))
+        on_first = {event["event_id"]: 0 for event in plan["inputs"]}
+        temporal_positions = {
+            event["event_id"]: [0, 0, 0] for event in plan["inputs"]
+        }
+        for block_start in range(0, len(plan["jobs"]), 6):
+            block = plan["jobs"][block_start:block_start + 6]
+            for event_position in range(3):
+                pair = block[event_position * 2:event_position * 2 + 2]
+                self.assertEqual(len(pair), 2)
+                identity = {
+                    (item["event_id"], item["seed"], item["repeat_idx"])
+                    for item in pair
+                }
+                self.assertEqual(len(identity), 1)
+                self.assertEqual({item["arm"] for item in pair}, {"social_on", "social_off"})
+                event_id = pair[0]["event_id"]
+                temporal_positions[event_id][event_position] += 1
+                on_first[event_id] += pair[0]["arm"] == "social_on"
+        self.assertEqual(set(on_first.values()), {12})
+        self.assertTrue(
+            all(counts == [8, 8, 8] for counts in temporal_positions.values())
+        )
         self.assertEqual(manifest["status"], "finished")
         self.assertFalse(manifest["multi_event_driver"]["network_access"])
         endpoint_wait.assert_not_called()
@@ -160,6 +189,27 @@ class MultiEventDriverTests(unittest.TestCase):
         with mock.patch.dict(os.environ, _clean_environment(), clear=True), self.assertRaises(ValueError):
             M._validate_cli(args, protocol)
 
+    def test_parent_live_alias_gate_rejects_noncanonical_strings(self) -> None:
+        for alias in (
+            " ",
+            " MiniMax",
+            "MiniMax ",
+            "Mini\nMax",
+            "Mini\x01Max",
+            "x" * 257,
+        ):
+            manifest = {
+                "completion": {
+                    "application_provider_attempts": {
+                        "reported_models_truncated": False,
+                        "reported_models": [alias],
+                    }
+                }
+            }
+            result = {"reported_model_aliases": [alias]}
+            with self.subTest(alias=repr(alias)), self.assertRaises(ValueError):
+                M._model_aliases(manifest, result, mode="openai_live")
+
     def test_fail_then_success_preserves_both_attempts_and_registered_parent_artifacts(self) -> None:
         secret = "TOP_SECRET_RETRY_OUTPUT"
         with tempfile.TemporaryDirectory() as raw:
@@ -171,16 +221,37 @@ class MultiEventDriverTests(unittest.TestCase):
                 if isinstance(command, (list, tuple)) and "experiments.run_seed" in command:
                     run_id = command[command.index("--run-id") + 1]
                     calls.append(run_id)
-                    (root / "runs" / run_id).mkdir(parents=True)
+                    attempt_dir = root / "runs" / run_id
+                    attempt_dir.mkdir(parents=True)
                     if len(calls) == 1:
+                        (attempt_dir / "run_manifest.json").write_text(
+                            json.dumps(
+                                {
+                                    "status": "failed",
+                                    "managed_context": {"state": "FAILED"},
+                                }
+                            ),
+                            encoding="utf-8",
+                        )
                         return subprocess.CompletedProcess(command, 1, "", secret)
+                    (attempt_dir / "run_manifest.json").write_text(
+                        json.dumps(
+                            {
+                                "status": "finished",
+                                "managed_context": {"state": "FINISHED"},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
                     return subprocess.CompletedProcess(command, 0, "ok", "")
                 return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
 
             def assess_side_effect(*, candidate_path, **_kwargs):
                 candidate = Path(candidate_path)
                 run_id = candidate.parent.name
-                return _decision(run_id, candidate, reusable=True)
+                return _decision(
+                    run_id, candidate, reusable=run_id == allowed[1]
+                )
 
             captured = {}
 
@@ -224,11 +295,20 @@ class MultiEventDriverTests(unittest.TestCase):
                 M.ATTEMPT_LEDGER_NAME,
                 M.PRIVATE_ATTEMPT_LEDGER_NAME,
                 "driver_summary.json",
+                "driver_failures.private.jsonl",
             }
             self.assertTrue(required <= set(registered))
             for name in required:
                 self.assertEqual(registered[name]["sha256"], sha256_file(run_dir / name))
             self.assertEqual(stat.S_IMODE((run_dir / M.PRIVATE_ATTEMPT_LEDGER_NAME).stat().st_mode), 0o600)
+            self.assertEqual(
+                stat.S_IMODE(
+                    (run_dir / "driver_failures.private.jsonl").stat().st_mode
+                ),
+                0o600,
+            )
+            self.assertFalse(manifest["multi_event_driver"]["network_access"])
+            self.assertFalse(manifest["llm"]["runtime"]["network_access"])
 
     def test_subprocess_exception_is_durable_sanitized_and_partial_exit_is_nonzero(self) -> None:
         secret = "TOP_SECRET_SUBPROCESS_EXCEPTION"
@@ -279,7 +359,17 @@ class MultiEventDriverTests(unittest.TestCase):
                 if isinstance(command, (list, tuple)) and "experiments.run_seed" in command:
                     run_id = command[command.index("--run-id") + 1]
                     launched.append(run_id)
-                    (root / "runs" / run_id).mkdir(parents=True)
+                    attempt_dir = root / "runs" / run_id
+                    attempt_dir.mkdir(parents=True)
+                    (attempt_dir / "run_manifest.json").write_text(
+                        json.dumps(
+                            {
+                                "status": "finished",
+                                "managed_context": {"state": "FINISHED"},
+                            }
+                        ),
+                        encoding="utf-8",
+                    )
                     return subprocess.CompletedProcess(command, 0, "ok", "")
                 return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
 
@@ -342,6 +432,197 @@ class MultiEventDriverTests(unittest.TestCase):
             registered = {item["path"] for item in manifest["results"]}
             self.assertIn(M.PLAN_NAME, registered)
             self.assertIn(M.ATTEMPT_LEDGER_NAME, registered)
+
+    def test_lock_contention_stops_and_stale_file_is_recoverable(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            owner = M._OutputRootAttemptLock(root, parent_run_id="owner")
+            contender = M._OutputRootAttemptLock(root, parent_run_id="contender")
+            with owner:
+                with self.assertRaisesRegex(
+                    M.AttemptCoordinationError, "already held"
+                ):
+                    contender.__enter__()
+            with contender:
+                self.assertTrue(
+                    (root / M.ATTEMPT_COORDINATION_LOCK_NAME).is_file()
+                )
+
+    def test_inherited_lock_fd_blocks_resume_until_orphan_child_exits(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            owner = M._OutputRootAttemptLock(root, parent_run_id="owner")
+            owner.__enter__()
+            child = subprocess.Popen(
+                [sys.executable, "-c", "import time; time.sleep(0.25)"],
+                pass_fds=owner.pass_fds,
+            )
+            owner.close()
+            try:
+                with self.assertRaises(M.AttemptCoordinationError):
+                    M._OutputRootAttemptLock(
+                        root, parent_run_id="early-resume"
+                    ).__enter__()
+            finally:
+                child.wait(timeout=5)
+            with M._OutputRootAttemptLock(root, parent_run_id="late-resume"):
+                pass
+
+    def test_existing_running_attempt_causes_safe_parent_stop(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            patches, _protocol, _job, _expected, allowed = self._patch_one_job(root)
+            attempt = root / "runs" / allowed[0]
+            attempt.mkdir(parents=True)
+            (attempt / "run_manifest.json").write_text(
+                json.dumps(
+                    {"status": "running", "managed_context": {"state": "ACTIVE"}}
+                ),
+                encoding="utf-8",
+            )
+            launched = []
+
+            def no_child(command, *args, **kwargs):
+                if isinstance(command, (list, tuple)) and "experiments.run_seed" in command:
+                    launched.append(command)
+                    raise AssertionError("child launched")
+                return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                M.subprocess, "run", side_effect=no_child
+            ), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ), self.assertRaises(M.AttemptCoordinationError):
+                M.main(["--provider", "mock", "--n", "1", "--k", "1", "--out", str(root), "--run-id", "running-parent"])
+            parent = root / "runs" / "running-parent"
+            manifest = json.loads((parent / "run_manifest.json").read_text(encoding="utf-8"))
+            ledger = _read_jsonl(parent / M.ATTEMPT_LEDGER_NAME)
+            self.assertEqual(manifest["status"], "failed")
+            self.assertEqual([item["status"] for item in ledger], ["in_flight"])
+            self.assertEqual(launched, [])
+
+    def test_same_id_materialization_race_never_launches_next_attempt(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            patches, _protocol, _job, _expected, allowed = self._patch_one_job(root)
+            calls = []
+            inherited = []
+
+            def race(command, *args, **kwargs):
+                if isinstance(command, (list, tuple)) and "experiments.run_seed" in command:
+                    run_id = command[command.index("--run-id") + 1]
+                    calls.append(run_id)
+                    inherited.append(tuple(kwargs.get("pass_fds", ())))
+                    attempt = root / "runs" / run_id
+                    attempt.mkdir(parents=True)
+                    (attempt / "run_manifest.json").write_text(
+                        json.dumps(
+                            {"status": "running", "managed_context": {"state": "ACTIVE"}}
+                        ),
+                        encoding="utf-8",
+                    )
+                    return subprocess.CompletedProcess(command, 1, "", "race")
+                return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                M.subprocess, "run", side_effect=race
+            ), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ), self.assertRaises(M.AttemptCoordinationError):
+                M.main(["--provider", "mock", "--n", "1", "--k", "1", "--out", str(root), "--run-id", "race-parent"])
+            self.assertEqual(calls, [allowed[0]])
+            self.assertEqual(len(inherited[0]), 1)
+
+    def test_live_parent_records_connectivity_probe_network_truth(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            patches, _protocol, job, expected, allowed = self._patch_one_job(root)
+
+            def run_child(command, *args, **kwargs):
+                if not (
+                    isinstance(command, (list, tuple))
+                    and "experiments.run_seed" in command
+                ):
+                    return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+                run_id = command[command.index("--run-id") + 1]
+                attempt = root / "runs" / run_id
+                attempt.mkdir(parents=True)
+                (attempt / "run_manifest.json").write_text(
+                    json.dumps(
+                        {"status": "finished", "managed_context": {"state": "FINISHED"}}
+                    ),
+                    encoding="utf-8",
+                )
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            def candidate(current_job, decision, **kwargs):
+                return self._accepted_record(
+                    current_job, expected, decision, kwargs["attempt_run_ids"]
+                )
+
+            snapshot = {
+                "schema_version": "multi_event_source_snapshot_v1",
+                "execution_mode": "openai_live",
+                "live_snapshot_enforced": True,
+                "live_eligibility_claim": True,
+                "head_commit": "a" * 40,
+                "protocol_last_change_commit": "a" * 40,
+                "scientific_component_fingerprint": "b" * 64,
+            }
+            with patches[0], patches[1], patches[2], patches[3], mock.patch.object(
+                M, "_validate_cli", return_value=([11], [1], "openai_live", True, None)
+            ), mock.patch.object(
+                M, "_resolve_output_root", return_value=root
+            ), mock.patch.object(
+                M, "_source_snapshot", return_value=snapshot
+            ), mock.patch.object(
+                M, "_validate_expected_source_snapshot"
+            ), mock.patch.object(
+                M, "_wait_for_endpoint", return_value=True
+            ), mock.patch.object(
+                M, "_gate_live_source_snapshot", side_effect=lambda decision, **_kwargs: decision
+            ), mock.patch.object(
+                M.subprocess, "run", side_effect=run_child
+            ), mock.patch.object(
+                M, "assess_run_seed_reuse", return_value=_decision(allowed[0], root / "runs" / allowed[0] / "run_manifest.json", reusable=True)
+            ), mock.patch.object(
+                M, "_candidate_record", side_effect=candidate
+            ), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ):
+                M.main(["--provider", "openai", "--live", "--out", str(root), "--run-id", "live-parent"])
+            manifest = json.loads((root / "runs" / "live-parent" / "run_manifest.json").read_text(encoding="utf-8"))
+            self.assertTrue(manifest["multi_event_driver"]["network_access"])
+            self.assertTrue(manifest["llm"]["runtime"]["network_access"])
+            self.assertEqual(manifest["llm"]["mode"], "connectivity_probe_only")
+
+    def test_live_output_root_and_source_snapshot_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            with self.assertRaisesRegex(ValueError, "canonical"):
+                M._resolve_output_root(str(root), mode="openai_live")
+
+        head = "a" * 40
+
+        def git_dirty(*arguments):
+            if arguments[0] == "rev-parse":
+                return head
+            if arguments[0] == "log":
+                return head
+            return " M nmsim/sim.py"
+
+        with mock.patch.object(M, "_git_stdout", side_effect=git_dirty), self.assertRaisesRegex(ValueError, "clean"):
+            M._source_snapshot(mode="openai_live", protocol_path=M.PROTOCOL_PATH)
+
+        def git_later(*arguments):
+            if arguments[0] == "rev-parse":
+                return "b" * 40
+            if arguments[0] == "log":
+                return head
+            return ""
+
+        with mock.patch.object(M, "_git_stdout", side_effect=git_later), self.assertRaisesRegex(ValueError, "last changed"):
+            M._source_snapshot(mode="openai_live", protocol_path=M.PROTOCOL_PATH)
 
 
 if __name__ == "__main__":

@@ -9,11 +9,14 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass, replace
+import errno
+import fcntl
 import hashlib
 import json
 import os
 from pathlib import Path
 import socket
+import stat
 import subprocess
 import sys
 import threading
@@ -45,6 +48,8 @@ from nmsim.multi_event import (
     load_protocol,
 )
 from nmsim.provenance import sha256_file
+from nmsim.fingerprint import scientific_compatibility_metadata
+from nmsim.provider_attempts import safe_reported_model
 from nmsim.result_reuse import (
     ChildRunIdentity,
     REPORTED_MODEL_GATE_REJECTED,
@@ -54,9 +59,10 @@ from nmsim.run_context import ManagedRunContext
 
 
 COMMAND_IDENTITY = "experiments.multi_event"
+REPO_ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL_PATH = Path(__file__).with_name("multi_event_protocol.json")
 CATALOG_PATH = (
-    Path(__file__).resolve().parents[1]
+    REPO_ROOT
     / "nmsim"
     / "reference_data"
     / "v1"
@@ -66,7 +72,114 @@ PLAN_NAME = "multi_event_plan.json"
 SELECTION_NAME = "multi_event_selection.json"
 ATTEMPT_LEDGER_NAME = "multi_event_attempts.jsonl"
 PRIVATE_ATTEMPT_LEDGER_NAME = "multi_event_attempts.private.jsonl"
+ATTEMPT_COORDINATION_LOCK_NAME = ".multi_event_attempts.lock"
+CANONICAL_LIVE_OUT = REPO_ROOT / "results_multi_event"
+LIVE_SOURCE_SNAPSHOT_REJECTED = "live_source_snapshot_rejected"
 MAX_PRIVATE_CHARS = 32768
+
+
+class AttemptCoordinationError(RuntimeError):
+    """A technical-attempt series cannot be inspected or advanced safely."""
+
+
+class _OutputRootAttemptLock:
+    """One durable advisory owner for every attempt series in an output root.
+
+    The stable lock file is deliberately never deleted.  ``flock`` ownership
+    is released by the kernel when the last inherited descriptor closes, so a
+    dead parent is recoverable while an orphaned live child continues to block
+    a resumed parent until that exact child terminates.
+    """
+
+    def __init__(self, out_root: Path, *, parent_run_id: str) -> None:
+        self.path = Path(out_root) / ATTEMPT_COORDINATION_LOCK_NAME
+        self.parent_run_id = str(parent_run_id)
+        self.fd: int | None = None
+
+    @property
+    def pass_fds(self) -> tuple[int, ...]:
+        if self.fd is None:
+            raise RuntimeError("attempt coordination lock is not held")
+        return (self.fd,)
+
+    def __enter__(self) -> "_OutputRootAttemptLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        flags = os.O_RDWR | os.O_CREAT
+        flags |= getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        fd = os.open(self.path, flags, 0o600)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode):
+                raise AttemptCoordinationError(
+                    "multi-event attempt coordination path is not a regular file"
+                )
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError as error:
+                if error.errno not in (errno.EACCES, errno.EAGAIN):
+                    raise
+                try:
+                    owner = os.pread(fd, 4096, 0).decode("utf-8", "replace").strip()
+                except OSError:
+                    owner = ""
+                detail = " owner metadata unavailable"
+                if owner:
+                    try:
+                        parsed = json.loads(owner)
+                        detail = " owner_run_id={}".format(
+                            parsed.get("parent_run_id", "unknown")
+                        )
+                    except (TypeError, ValueError, json.JSONDecodeError):
+                        pass
+                raise AttemptCoordinationError(
+                    "multi-event attempt coordination lock is already held;{}; "
+                    "refusing to inspect or advance any technical-attempt series".format(
+                        detail
+                    )
+                ) from error
+            metadata = (
+                json.dumps(
+                    {
+                        "schema_version": "multi_event_attempt_lock_v1",
+                        "parent_run_id": self.parent_run_id,
+                        "pid": os.getpid(),
+                        "acquired_unix_time": time.time(),
+                    },
+                    sort_keys=True,
+                    allow_nan=False,
+                )
+                + "\n"
+            ).encode("utf-8")
+            os.ftruncate(fd, 0)
+            os.lseek(fd, 0, os.SEEK_SET)
+            offset = 0
+            while offset < len(metadata):
+                written = os.write(fd, metadata[offset:])
+                if written <= 0:
+                    raise OSError("short write to attempt coordination lock")
+                offset += written
+            os.fsync(fd)
+            os.chmod(self.path, 0o600)
+            self.fd = fd
+            return self
+        except BaseException:
+            os.close(fd)
+            raise
+
+    def close(self) -> None:
+        if self.fd is None:
+            return
+        fd, self.fd = self.fd, None
+        # Do not issue LOCK_UN: all pass_fds descendants share this open file
+        # description, and an explicit unlock would release their ownership.
+        # Closing only the parent's descriptor lets the kernel retain the lock
+        # until the last orphaned child descriptor closes.
+        os.close(fd)
+
+    def __exit__(self, exc_type, exc, traceback) -> bool:
+        self.close()
+        return False
 
 
 @dataclass(frozen=True)
@@ -207,6 +320,157 @@ def _validate_cli(args, protocol: Mapping[str, Any]) -> tuple[list[int], list[in
     return selected_seeds, selected_repeats, mode, adherence, reason
 
 
+def _resolve_output_root(raw: str, *, mode: str) -> Path:
+    """Resolve a driver root; live has exactly one non-rebindable location."""
+
+    expanded = os.path.expanduser(str(raw))
+    lexical = Path(os.path.abspath(expanded))
+    if mode != "openai_live":
+        return lexical.resolve()
+    canonical = CANONICAL_LIVE_OUT
+    if lexical != canonical:
+        raise ValueError(
+            "live execution requires the canonical repository results_multi_event root"
+        )
+    if os.path.lexists(canonical):
+        if canonical.is_symlink():
+            raise ValueError("canonical live output root must not be a symlink")
+        if not canonical.is_dir():
+            raise ValueError("canonical live output root must be a directory")
+        if canonical.resolve(strict=True) != canonical:
+            raise ValueError("canonical live output root was rebound")
+    return canonical
+
+
+def _output_root_policy(mode: str, out_root: Path) -> Mapping[str, Any]:
+    live = mode == "openai_live"
+    return {
+        "schema_version": "multi_event_output_root_v1",
+        "effective_root": str(out_root),
+        "canonical_repo_relative_root": "results_multi_event",
+        "live_canonical_root_enforced": live,
+        "alternate_root_allowed": not live,
+        "symlink_or_rebinding_allowed": False if live else None,
+        "attempt_cap_scope": (
+            "single_canonical_study_root" if live else "non_live_engineering_root"
+        ),
+    }
+
+
+def _git_stdout(*arguments: str) -> str:
+    process = subprocess.run(
+        ["git", "-C", str(REPO_ROOT), *arguments],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    if process.returncode != 0:
+        raise ValueError("cannot establish the live source snapshot")
+    return process.stdout.strip()
+
+
+def _source_snapshot(*, mode: str, protocol_path: Path) -> Mapping[str, Any]:
+    """Bind live to the clean Git snapshot that owns the frozen protocol."""
+
+    if mode != "openai_live":
+        return {
+            "schema_version": "multi_event_source_snapshot_v1",
+            "execution_mode": mode,
+            "live_snapshot_enforced": False,
+            "live_eligibility_claim": False,
+            "policy": "explicit_non_live_no_preregistered_source_snapshot_claim",
+            "head_commit": None,
+            "protocol_last_change_commit": None,
+            "scientific_component_fingerprint": None,
+        }
+    canonical_protocol = PROTOCOL_PATH.resolve(strict=True)
+    if protocol_path.resolve(strict=True) != canonical_protocol:
+        raise ValueError("live execution requires the canonical protocol path")
+    head = _git_stdout("rev-parse", "HEAD")
+    protocol_relative = canonical_protocol.relative_to(REPO_ROOT).as_posix()
+    protocol_commit = _git_stdout(
+        "log", "-1", "--format=%H", "--", protocol_relative
+    )
+    status = _git_stdout("status", "--porcelain=v1", "--untracked-files=all")
+    if not head or not protocol_commit:
+        raise ValueError("live source snapshot commits are unavailable")
+    if status:
+        raise ValueError("live execution requires a completely clean repository")
+    if head != protocol_commit:
+        raise ValueError(
+            "live HEAD must equal the commit that last changed the canonical protocol"
+        )
+    compatibility = scientific_compatibility_metadata(
+        REPO_ROOT, git_state={"commit": head, "dirty": False}
+    )
+    return {
+        "schema_version": "multi_event_source_snapshot_v1",
+        "execution_mode": mode,
+        "live_snapshot_enforced": True,
+        "live_eligibility_claim": True,
+        "policy": "clean_head_equals_canonical_protocol_last_change_commit",
+        "repository_clean": True,
+        "head_commit": head,
+        "protocol_last_change_commit": protocol_commit,
+        "protocol_repo_relative_path": protocol_relative,
+        "scientific_component_fingerprint": compatibility[
+            "scientific_component_fingerprint"
+        ],
+    }
+
+
+def _validate_expected_source_snapshot(
+    expected: Mapping[tuple[str, str, int, int], Any],
+    source_snapshot: Mapping[str, Any],
+    *,
+    mode: str,
+) -> None:
+    if mode != "openai_live":
+        return
+    head = source_snapshot["head_commit"]
+    fingerprint = source_snapshot["scientific_component_fingerprint"]
+    if any(
+        identity.git_commit != head
+        or identity.scientific_component_fingerprint != fingerprint
+        for identity in expected.values()
+    ):
+        raise ValueError(
+            "live expected-child identity differs from the frozen source snapshot"
+        )
+
+
+def _attempt_lifecycle(candidate: Path) -> str:
+    """Classify only enough lifecycle state to prevent in-flight advancement."""
+
+    if not os.path.lexists(candidate):
+        return "absent"
+    if candidate.is_symlink() or not candidate.is_dir():
+        return "terminal_invalid"
+    manifest_path = candidate / "run_manifest.json"
+    if not manifest_path.is_file() or manifest_path.is_symlink():
+        return "indeterminate"
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return "indeterminate"
+    if not isinstance(manifest, Mapping):
+        return "indeterminate"
+    managed_context = manifest.get("managed_context")
+    managed_state = (
+        managed_context.get("state")
+        if isinstance(managed_context, Mapping)
+        else None
+    )
+    if manifest.get("status") == "running" or managed_state == "ACTIVE":
+        return "active"
+    if manifest.get("status") in {"finished", "failed"} or managed_state in {
+        "FINISHED",
+        "FAILED",
+    }:
+        return "terminal"
+    return "indeterminate"
+
+
 def build_multi_event_child_command(
     *,
     material: MultiEventMaterial,
@@ -259,10 +523,29 @@ def _build_jobs(
     from nmsim.multi_event import build_experiment_slot
 
     jobs = []
-    for material in materials:
-        for arm in ("social_off", "social_on"):
-            for seed in seeds:
-                for repeat_idx in repeats:
+    canonical_positions = {
+        material.event_id: index for index, material in enumerate(materials)
+    }
+    for repeat_position, repeat_idx in enumerate(repeats):
+        for seed_position, seed in enumerate(seeds):
+            rotation = (repeat_position + seed_position) % len(materials)
+            event_order = [
+                materials[(rotation + offset) % len(materials)]
+                for offset in range(len(materials))
+            ]
+            for material in event_order:
+                canonical_event_position = canonical_positions[material.event_id]
+                on_first = (
+                    repeat_position
+                    + seed_position
+                    + canonical_event_position
+                ) % 2 == 1
+                arms = (
+                    ("social_on", "social_off")
+                    if on_first
+                    else ("social_off", "social_on")
+                )
+                for arm in arms:
                     slot = build_experiment_slot(
                         protocol_hash=material.protocol_hash,
                         event_id=material.event_id,
@@ -339,7 +622,7 @@ def _model_aliases(
         raise ValueError("reported model aliases are truncated")
     raw = attempts.get("reported_models")
     if not isinstance(raw, list) or any(
-        not isinstance(alias, str) or not alias for alias in raw
+        safe_reported_model(alias) != alias for alias in raw
     ):
         raise ValueError("reported model aliases are malformed")
     aliases = sorted(set(raw))
@@ -370,6 +653,46 @@ def _gate_reported_model(
             decision,
             reusable=False,
             reason_codes=(REPORTED_MODEL_GATE_REJECTED,),
+            cross_commit_same_scientific_fingerprint=False,
+        )
+    return decision
+
+
+def _gate_live_source_snapshot(
+    decision: ReuseDecision,
+    *,
+    mode: str,
+    source_snapshot: Mapping[str, Any],
+) -> ReuseDecision:
+    if mode != "openai_live" or not decision.reusable:
+        return decision
+    if decision.manifest_path is None:
+        return replace(
+            decision,
+            reusable=False,
+            reason_codes=(LIVE_SOURCE_SNAPSHOT_REJECTED,),
+            cross_commit_same_scientific_fingerprint=False,
+        )
+    try:
+        manifest = json.loads(
+            decision.manifest_path.read_text(encoding="utf-8")
+        )
+        git = manifest.get("git")
+        if not isinstance(git, Mapping):
+            raise ValueError("missing child Git identity")
+        child = ChildRunIdentity.from_manifest(decision.manifest_path)
+        if (
+            git.get("dirty") is not False
+            or child.git_commit != source_snapshot["head_commit"]
+            or child.scientific_component_fingerprint
+            != source_snapshot["scientific_component_fingerprint"]
+        ):
+            raise ValueError("child source snapshot mismatch")
+    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
+        return replace(
+            decision,
+            reusable=False,
+            reason_codes=(LIVE_SOURCE_SNAPSHOT_REJECTED,),
             cross_commit_same_scientific_fingerprint=False,
         )
     return decision
@@ -495,6 +818,12 @@ def _candidate_record(
             "resolved_model": child.resolved_model,
             "endpoint_identity": child.endpoint_identity,
             "reported_model_aliases": aliases,
+            "scientific_runtime_environment": (
+                child.scientific_runtime_environment
+            ),
+            "scientific_runtime_environment_identity": (
+                child.scientific_runtime_environment_identity
+            ),
         },
     }
 
@@ -518,6 +847,24 @@ def _input_paths(materials: Sequence[MultiEventMaterial]) -> Mapping[str, str]:
     return paths
 
 
+def _launch_order_policy() -> Mapping[str, Any]:
+    return {
+        "schema_version": "multi_event_launch_order_v1",
+        "block_order": "repeat_position_then_seed_position",
+        "event_rotation": "(repeat_position+seed_position)%3",
+        "arm_pairing": "both_arms_adjacent_per_event_seed_repeat",
+        "social_on_first": "(repeat_position+seed_position+canonical_event_position)%2==1",
+        "expected_event_temporal_positions": "8_each_of_3_positions",
+        "expected_arm_first_counts_per_event": {
+            "social_on": 12,
+            "social_off": 12,
+        },
+        "resume_policy": (
+            "filter_ineligible_slots_without_reordering_remaining_jobs"
+        ),
+    }
+
+
 def _plan_document(
     *,
     protocol: Mapping[str, Any],
@@ -533,6 +880,8 @@ def _plan_document(
     provider: str,
     workers: int,
     dry_run: bool,
+    output_root_policy: Mapping[str, Any],
+    source_snapshot: Mapping[str, Any],
 ) -> Mapping[str, Any]:
     return {
         "schema_version": "multi_event_plan_v1",
@@ -547,6 +896,7 @@ def _plan_document(
             "repeat_indices": list(repeats),
             "planned_runs": len(jobs),
             "override_reason": override_reason,
+            "launch_order_policy": dict(_launch_order_policy()),
         },
         "provider_request": {
             "provider": provider,
@@ -557,15 +907,29 @@ def _plan_document(
             ),
             "temperature": protocol["acceptance_and_execution"]["temperature"],
             "cache_enabled": protocol["acceptance_and_execution"]["cache_enabled"],
+            "provider_sdk_max_retries": protocol[
+                "effective_config_freeze"
+            ]["model_request"]["provider_sdk_max_retries"],
             "workers": workers,
             "network_access": bool(execution_mode == "openai_live"),
+            "parent_network_scope": (
+                "connectivity_probe_only_children_own_provider_calls"
+                if execution_mode == "openai_live"
+                else "none"
+            ),
         },
+        "output_root_policy": dict(output_root_policy),
+        "source_snapshot": dict(source_snapshot),
         "health_and_retry": {
             "max_bad_frac": protocol["acceptance_and_execution"]["health_bad_frac_max"],
             "max_child_attempts": protocol["acceptance_and_execution"]["max_child_attempts"],
             "technical_retry_identity": "technical_retry_idx; excluded from repeat_idx/slot",
             "reported_model_gate": (
                 "openai_live requires non-truncated exactly-one alias per child attempt; mock=[]"
+            ),
+            "coordination": (
+                "one output-root advisory lock inherited by launched children; "
+                "ACTIVE attempts never advance"
             ),
         },
         "hash_types": [
@@ -576,6 +940,7 @@ def _plan_document(
             "scientific_input_identity",
             "scenario_definition_hash",
             "multi_event_slot_v1.slot_id",
+            "scientific_runtime_environment_identity",
         ],
         "reference_transform": dict(protocol["reference_phase_transform"]),
         "inputs": [
@@ -592,6 +957,7 @@ def _plan_document(
         "honest_n_complete_seed_pairs": 0,
         "jobs": [
             {
+                "launch_ordinal": launch_ordinal,
                 "event_id": job.event_id,
                 "arm": job.arm,
                 "seed": job.seed,
@@ -622,8 +988,16 @@ def _plan_document(
                 "model_request_config_hash": expected_identities[job.key].model_request_config_hash,
                 "scientific_input_identity": expected_identities[job.key].scientific_input_identity,
                 "scenario_definition_hash": expected_identities[job.key].scenario_definition_hash,
+                "scientific_runtime_environment": (
+                    expected_identities[job.key].scientific_runtime_environment
+                ),
+                "scientific_runtime_environment_identity": (
+                    expected_identities[
+                        job.key
+                    ].scientific_runtime_environment_identity
+                ),
             }
-            for job in jobs
+            for launch_ordinal, job in enumerate(jobs, start=1)
         ],
     }
 
@@ -672,7 +1046,11 @@ def main(argv=None) -> None:
         seeds, repeats, mode, adherence, override_reason = _validate_cli(
             args, protocol
         )
-        out_root = Path(args.out).resolve()
+        out_root = _resolve_output_root(args.out, mode=mode)
+        output_root_policy = _output_root_policy(mode, out_root)
+        source_snapshot = _source_snapshot(
+            mode=mode, protocol_path=protocol_path
+        )
         jobs = _build_jobs(
             materials,
             seeds=seeds,
@@ -683,6 +1061,9 @@ def main(argv=None) -> None:
         expected = {
             job.key: expected_run_seed_identity(job.base_command) for job in jobs
         }
+        _validate_expected_source_snapshot(
+            expected, source_snapshot, mode=mode
+        )
         attempt_series_ids = {
             job.key: _attempt_series_id(job, expected[job.key]) for job in jobs
         }
@@ -703,6 +1084,8 @@ def main(argv=None) -> None:
         provider=args.provider,
         workers=args.workers,
         dry_run=args.dry_run,
+        output_root_policy=output_root_policy,
+        source_snapshot=source_snapshot,
     )
     inputs = _input_paths(materials)
 
@@ -727,6 +1110,9 @@ def main(argv=None) -> None:
                 "dry_run": True,
                 "provider_constructed": False,
                 "network_access": False,
+                "network_scope": "none",
+                "output_root_policy": dict(output_root_policy),
+                "source_snapshot": dict(source_snapshot),
             }
             plan_path = Path(context.run_dir) / PLAN_NAME
             with plan_path.open("x", encoding="utf-8") as handle:
@@ -738,6 +1124,7 @@ def main(argv=None) -> None:
                 mode="dry_run",
                 cache_enabled=False,
                 network_access=False,
+                network_scope="none",
             )
             context.set_experiment_completion(
                 planned_runs=0, started_runs=0, completed_runs=0, failed_runs=0
@@ -758,7 +1145,10 @@ def main(argv=None) -> None:
         run_id=args.run_id,
         input_paths=inputs,
     )
-    with managed:
+    attempt_lock = _OutputRootAttemptLock(
+        out_root, parent_run_id=managed.run_dir.name
+    )
+    with managed, attempt_lock:
         managed.context.manifest["multi_event_driver"] = {
             "schema_version": "1.0",
             "attempt_series_schema_version": ATTEMPT_SERIES_SCHEMA_VERSION,
@@ -766,7 +1156,39 @@ def main(argv=None) -> None:
             "protocol_sha256": protocol_hash,
             "execution_mode": mode,
             "protocol_adherence": adherence,
+            "network_access": bool(mode == "openai_live"),
+            "network_scope": (
+                "connectivity_probe_only_children_own_provider_calls"
+                if mode == "openai_live"
+                else "none"
+            ),
+            "output_root_policy": dict(output_root_policy),
+            "source_snapshot": dict(source_snapshot),
+            "attempt_coordination": {
+                "schema_version": "multi_event_attempt_lock_v1",
+                "path": ATTEMPT_COORDINATION_LOCK_NAME,
+                "scope": "entire_output_root_all_attempt_series",
+                "child_descriptor_inheritance": True,
+                "stale_recovery": "kernel_release_after_last_inherited_fd_closes",
+            },
         }
+        managed.context.register_llm_runtime(
+            provider="none",
+            model="none",
+            mode=(
+                "connectivity_probe_only"
+                if mode == "openai_live"
+                else "offline_driver"
+            ),
+            cache_enabled=False,
+            network_access=bool(mode == "openai_live"),
+            network_scope=(
+                "connectivity_probe_only; LLM provider calls occur in managed children"
+                if mode == "openai_live"
+                else "none; mock children perform no network access"
+            ),
+            provider_calls_owned_by="managed_children",
+        )
         managed.context.manifest.write_atomic()
         plan_path = managed.run_dir / PLAN_NAME
         with plan_path.open("x", encoding="utf-8") as handle:
@@ -877,6 +1299,19 @@ def main(argv=None) -> None:
                 occupied_count += 1
                 attempt_run_ids[job.key].append(run_id)
                 candidate = out_root / "runs" / run_id
+                if _attempt_lifecycle(candidate) == "active":
+                    record_attempt(
+                        job,
+                        source="resumed_attempt",
+                        technical_retry_idx=technical_idx,
+                        run_id=run_id,
+                        status="in_flight",
+                        reason_code="attempt_in_flight",
+                    )
+                    raise AttemptCoordinationError(
+                        "an existing technical attempt is ACTIVE; refusing to "
+                        "advance or classify it as rejected"
+                    )
                 decision = assess_run_seed_reuse(
                     candidate_path=candidate,
                     allowed_result_root=out_root,
@@ -886,6 +1321,11 @@ def main(argv=None) -> None:
                 if decision is None:
                     raise RuntimeError("occupied attempt path produced no reuse decision")
                 decision = _gate_reported_model(decision, mode=mode)
+                decision = _gate_live_source_snapshot(
+                    decision,
+                    mode=mode,
+                    source_snapshot=source_snapshot,
+                )
                 reuse_checks.append((job, decision))
                 if decision.reusable:
                     if decision.run_id != run_id:
@@ -1001,6 +1441,7 @@ def main(argv=None) -> None:
                         text=True,
                         env=env,
                         check=False,
+                        pass_fds=attempt_lock.pass_fds,
                     )
                 except BaseException as error:
                     interrupted = isinstance(error, (KeyboardInterrupt, SystemExit))
@@ -1012,12 +1453,21 @@ def main(argv=None) -> None:
                     materialized = os.path.lexists(
                         str(out_root / "runs" / run_id)
                     )
+                    lifecycle = _attempt_lifecycle(
+                        out_root / "runs" / run_id
+                    )
                     record_attempt(
                         job,
                         source="executed",
                         technical_retry_idx=technical_idx,
                         run_id=run_id,
-                        status="rejected",
+                        status=(
+                            "in_flight"
+                            if lifecycle == "active"
+                            else "indeterminate"
+                            if materialized
+                            else "rejected"
+                        ),
                         reason_code=last_reason,
                         private={
                             "exception_type": type(error).__name__,
@@ -1029,7 +1479,10 @@ def main(argv=None) -> None:
                     if interrupted:
                         raise
                     if materialized:
-                        continue
+                        raise AttemptCoordinationError(
+                            "a subprocess exception left a materialized attempt; "
+                            "refusing an in-process technical retry"
+                        ) from error
                     with lock:
                         final_reasons[job.key].append(last_reason)
                     return DriverJobResult(
@@ -1050,32 +1503,6 @@ def main(argv=None) -> None:
                     "stdout": _bounded_private(managed, process.stdout),
                     "stderr": _bounded_private(managed, process.stderr),
                 }
-                if process.returncode != 0:
-                    last_reason = "subprocess_exit"
-                    record_attempt(
-                        job,
-                        source="executed",
-                        technical_retry_idx=technical_idx,
-                        run_id=run_id,
-                        status="rejected",
-                        reason_code=last_reason,
-                        private=subprocess_private,
-                    )
-                    if not materialized:
-                        last_reason = "child_attempt_not_materialized"
-                        with lock:
-                            final_reasons[job.key].append(last_reason)
-                        return DriverJobResult(
-                            cell=job.cell,
-                            tag=job.tag,
-                            seed=job.seed,
-                            ok=False,
-                            source="failed",
-                            attempts=launched,
-                            reason_code=last_reason,
-                        )
-                    continue
-
                 if not materialized:
                     last_reason = "child_attempt_not_materialized"
                     with lock:
@@ -1099,7 +1526,33 @@ def main(argv=None) -> None:
                         reason_code=last_reason,
                     )
 
-                manifest_path = out_root / "runs" / run_id / "run_manifest.json"
+                candidate = out_root / "runs" / run_id
+                lifecycle = _attempt_lifecycle(candidate)
+                if lifecycle in {"active", "indeterminate"}:
+                    last_reason = (
+                        "attempt_in_flight"
+                        if lifecycle == "active"
+                        else "attempt_materialization_indeterminate"
+                    )
+                    record_attempt(
+                        job,
+                        source="executed",
+                        technical_retry_idx=technical_idx,
+                        run_id=run_id,
+                        status=(
+                            "in_flight"
+                            if lifecycle == "active"
+                            else "indeterminate"
+                        ),
+                        reason_code=last_reason,
+                        private=subprocess_private,
+                    )
+                    raise AttemptCoordinationError(
+                        "a launched attempt is not terminal; refusing to advance "
+                        "the deterministic technical-attempt series"
+                    )
+
+                manifest_path = candidate / "run_manifest.json"
                 decision = assess_run_seed_reuse(
                     candidate_path=manifest_path,
                     allowed_result_root=out_root,
@@ -1107,18 +1560,26 @@ def main(argv=None) -> None:
                     max_bad_frac=health_threshold,
                 )
                 if decision is None:
-                    last_reason = "manifest_missing"
+                    last_reason = "attempt_materialization_indeterminate"
                     record_attempt(
                         job,
                         source="executed",
                         technical_retry_idx=technical_idx,
                         run_id=run_id,
-                        status="rejected",
+                        status="indeterminate",
                         reason_code=last_reason,
                         private=subprocess_private,
                     )
-                    continue
+                    raise AttemptCoordinationError(
+                        "a materialized attempt disappeared during assessment; "
+                        "refusing to advance"
+                    )
                 decision = _gate_reported_model(decision, mode=mode)
+                decision = _gate_live_source_snapshot(
+                    decision,
+                    mode=mode,
+                    source_snapshot=source_snapshot,
+                )
                 if decision.reusable:
                     with lock:
                         decisions[job.key] = decision
@@ -1140,7 +1601,11 @@ def main(argv=None) -> None:
                         attempts=launched,
                     )
 
-                last_reason = decision.primary_reason or "child_identity_rejected"
+                last_reason = decision.primary_reason or (
+                    "subprocess_exit"
+                    if process.returncode != 0
+                    else "child_identity_rejected"
+                )
                 with lock:
                     final_reasons[job.key].extend(decision.reason_codes)
                 record_attempt(
@@ -1172,7 +1637,10 @@ def main(argv=None) -> None:
             try:
                 return execute(job)
             except BaseException as error:
-                if isinstance(error, (KeyboardInterrupt, SystemExit)):
+                if isinstance(
+                    error,
+                    (KeyboardInterrupt, SystemExit, AttemptCoordinationError),
+                ):
                     raise
                 reason = "driver_job_exception"
                 with lock:
@@ -1296,6 +1764,7 @@ def main(argv=None) -> None:
                 "resolved_provider",
                 "resolved_model",
                 "endpoint_identity",
+                "scientific_runtime_environment_identity",
             )
             if any(
                 any(child["identity"][field] != identity[field] for field in strict)
@@ -1311,13 +1780,23 @@ def main(argv=None) -> None:
                 "resolved_provider": identity.resolved_provider,
                 "resolved_model": identity.resolved_model,
                 "endpoint_identity": identity.endpoint_identity,
+                "scientific_runtime_environment": (
+                    identity.scientific_runtime_environment
+                ),
+                "scientific_runtime_environment_identity": (
+                    identity.scientific_runtime_environment_identity
+                ),
             }
         study_model_identity = {
             "execution_mode": mode,
             **{field: identity[field] for field in (
                 "model_request_config_hash", "requested_provider", "requested_model",
-                "resolved_provider", "resolved_model", "endpoint_identity"
+                "resolved_provider", "resolved_model", "endpoint_identity",
+                "scientific_runtime_environment_identity",
             )},
+            "scientific_runtime_environment": identity[
+                "scientific_runtime_environment"
+            ],
             "reported_model_aliases": aliases,
         }
         reference_root = Path(__file__).resolve().parents[1]
@@ -1347,6 +1826,7 @@ def main(argv=None) -> None:
             "repeat_indices": list(repeats),
             "planned_runs": len(jobs),
             "override_reason": override_reason,
+            "launch_order_policy": dict(_launch_order_policy()),
         }
         planned_slots = [
             {

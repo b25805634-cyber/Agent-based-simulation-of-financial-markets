@@ -17,10 +17,15 @@ from experiments.driver_utils import (
     expected_run_seed_identity,
 )
 from experiments.multi_event import build_multi_event_child_command
-from experiments.run_seed import build_argparser, config_from_args
+from experiments.run_seed import (
+    _reported_model_aliases,
+    build_argparser,
+    config_from_args,
+)
 from nmsim.config import Config, NewsTimelineEntry, normalize_news_timeline
+from nmsim.decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
 from nmsim.fingerprint import SCIENTIFIC_COMPONENT_FILES
-from nmsim.llm import CostTracker
+from nmsim.llm import CostTracker, parse_order_with_validity
 from nmsim.multi_event import (
     FROZEN_PROTOCOL_SHA256,
     MultiEventProtocolError,
@@ -32,9 +37,12 @@ from nmsim.multi_event import (
 from nmsim.provenance import sha256_file
 from nmsim.reference_data import load_reference_episode
 from nmsim.result_reuse import (
+    ARTIFACT_INVALID,
+    ARTIFACT_MISSING,
     HEALTH_GATE_REJECTED,
     REPORTED_MODEL_GATE_REJECTED,
     RESULT_IDENTITY_MISMATCH,
+    RUNTIME_ENVIRONMENT_MISMATCH,
 )
 from nmsim.sim import run_sim
 
@@ -335,9 +343,92 @@ class RunSeedMultiEventTests(unittest.TestCase):
         self.assertEqual(cfg.news_timeline, ())
         self.assertEqual(cfg.news_round, Config().news_round)
 
+
+class StrictDecisionResponseTests(unittest.TestCase):
+    def _parse(self, payload, direction_field):
+        return parse_order_with_validity(
+            json.dumps(payload),
+            100.0,
+            response_schema=MULTI_EVENT_DECISION_RESPONSE_SCHEMA,
+            direction_field=direction_field,
+        )
+
+    def test_valid_live_action_and_mock_side_forms(self) -> None:
+        common = {
+            "quantity": 3,
+            "limit_price": 101.5,
+            "sentiment": 0.2,
+            "public_take": "Adding carefully.",
+            "reasoning": "The signal is positive.",
+        }
+        for field in ("action", "side"):
+            with self.subTest(field=field):
+                order, validity = self._parse(
+                    {**common, field: "buy"}, field
+                )
+                self.assertTrue(validity.valid)
+                self.assertEqual(order["side"], "buy")
+                self.assertEqual(order["quantity"], 3)
+
+    def test_empty_unknown_missing_and_invalid_values_fail_strictly(self) -> None:
+        valid = {
+            "action": "hold",
+            "quantity": 0,
+            "limit_price": 100.0,
+            "sentiment": 0.0,
+            "public_take": "Waiting for clarity.",
+            "reasoning": "No edge yet.",
+        }
+        cases = (
+            ({}, "missing_required_field"),
+            ({"unknown": 1}, "missing_required_field"),
+            ({key: value for key, value in valid.items() if key != "action"}, "missing_required_field"),
+            ({**valid, "action": "wait"}, "invalid_action"),
+            ({**valid, "quantity": True}, "invalid_quantity"),
+            ({**valid, "quantity": 2}, "quantity_action_mismatch"),
+            ({**valid, "limit_price": float("nan")}, "invalid_limit_price"),
+            ({**valid, "limit_price": 0}, "invalid_limit_price"),
+            ({**valid, "sentiment": 1.1}, "invalid_sentiment"),
+            ({**valid, "reasoning": " "}, "blank_reasoning"),
+            ({**valid, "public_take": ""}, "blank_public_take"),
+        )
+        for payload, code in cases:
+            with self.subTest(code=code):
+                order, validity = self._parse(payload, "action")
+                self.assertFalse(validity.valid)
+                self.assertEqual(validity.error_code, code)
+                self.assertEqual(order["side"], "hold")
+                self.assertIn("strict-schema-failed", order["rationale"])
+
+    def test_legacy_empty_object_coercion_is_unchanged(self) -> None:
+        order, validity = parse_order_with_validity("{}", 100.0)
+        self.assertTrue(validity.valid)
+        self.assertEqual(order["side"], "hold")
+        self.assertNotIn("strict-schema-failed", order["rationale"])
+
+    def test_run_seed_alias_projection_rejects_without_trimming(self) -> None:
+        for alias in (" ", " leading", "trailing ", "bad\nline", "x" * 257):
+            manager = type(
+                "Manager",
+                (),
+                {
+                    "manifest": {
+                        "completion": {
+                            "application_provider_attempts": {
+                                "reported_models_truncated": False,
+                                "reported_models": [alias],
+                            }
+                        }
+                    }
+                },
+            )()
+            with self.subTest(alias=repr(alias)), self.assertRaises(ValueError):
+                _reported_model_aliases(manager)
+
     def test_scientific_fingerprint_covers_loader_and_result_assembler(self) -> None:
         self.assertIn("experiments/run_seed.py", SCIENTIFIC_COMPONENT_FILES)
         self.assertIn("nmsim/multi_event.py", SCIENTIFIC_COMPONENT_FILES)
+        self.assertIn("nmsim/decision_contract.py", SCIENTIFIC_COMPONENT_FILES)
         self.assertIn("nmsim/reference_data/__init__.py", SCIENTIFIC_COMPONENT_FILES)
 
 
@@ -376,6 +467,14 @@ class ManagedReuseHealthAndIdentityTests(unittest.TestCase):
         cls.result_path = cls.run_dir / "experiment_result.json"
         cls.original_manifest = cls.manifest_path.read_bytes()
         cls.original_result = cls.result_path.read_bytes()
+        cls.audit_artifacts = {
+            name: (cls.run_dir / name).read_bytes()
+            for name in (
+                "llm_records.jsonl",
+                "events.jsonl",
+                "private_events.jsonl",
+            )
+        }
 
     @classmethod
     def tearDownClass(cls) -> None:
@@ -384,6 +483,14 @@ class ManagedReuseHealthAndIdentityTests(unittest.TestCase):
     def setUp(self) -> None:
         self.manifest_path.write_bytes(self.original_manifest)
         self.result_path.write_bytes(self.original_result)
+        for name, content in self.audit_artifacts.items():
+            path = self.run_dir / name
+            if os.path.lexists(path):
+                path.unlink()
+            path.write_bytes(content)
+            path.chmod(0o600 if name != "events.jsonl" else 0o644)
+        for path in self.run_dir.glob("*.symlink-target"):
+            path.unlink()
 
     def _refresh_result_descriptor(self, manifest: dict) -> None:
         content = self.result_path.read_bytes()
@@ -403,6 +510,85 @@ class ManagedReuseHealthAndIdentityTests(unittest.TestCase):
     def test_manifest_candidate_reads_canonical_result_health(self) -> None:
         decision = self._decision()
         self.assertTrue(decision.reusable, decision.reason_codes)
+        result = json.loads(self.result_path.read_text(encoding="utf-8"))
+        counts = result["health"]["failure_union_counts"]
+        self.assertEqual(sum(counts.values()), result["health"]["total_llm_orders"])
+        self.assertEqual(
+            sum(value for key, value in counts.items() if key != "valid_decisions"),
+            result["health"]["bad_orders"],
+        )
+
+    def test_raw_audit_artifacts_are_required_and_registered(self) -> None:
+        expected = expected_run_seed_identity(self.command)
+        self.assertTrue(
+            {
+                "llm_records.jsonl",
+                "events.jsonl",
+                "private_events.jsonl",
+            }
+            <= set(expected.required_artifacts)
+        )
+        for name in ("llm_records.jsonl", "events.jsonl", "private_events.jsonl"):
+            with self.subTest(deleted=name):
+                self.setUp()
+                (self.run_dir / name).unlink()
+                decision = self._decision()
+                self.assertFalse(decision.reusable)
+                self.assertIn(ARTIFACT_MISSING, decision.reason_codes)
+            with self.subTest(unregistered=name):
+                self.setUp()
+                manifest = json.loads(self.original_manifest)
+                manifest["results"] = [
+                    item for item in manifest["results"] if item["path"] != name
+                ]
+                self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                decision = self._decision()
+                self.assertFalse(decision.reusable)
+                self.assertIn(ARTIFACT_MISSING, decision.reason_codes)
+
+    def test_private_artifact_mode_and_symlink_are_rejected(self) -> None:
+        for name in ("llm_records.jsonl", "private_events.jsonl"):
+            with self.subTest(mode=name):
+                self.setUp()
+                (self.run_dir / name).chmod(0o644)
+                decision = self._decision()
+                self.assertFalse(decision.reusable)
+                self.assertIn(ARTIFACT_INVALID, decision.reason_codes)
+            with self.subTest(symlink=name):
+                self.setUp()
+                path = self.run_dir / name
+                target = self.run_dir / (name + ".symlink-target")
+                target.write_bytes(path.read_bytes())
+                target.chmod(0o600)
+                path.unlink()
+                path.symlink_to(target.name)
+                decision = self._decision()
+                self.assertFalse(decision.reusable)
+                self.assertIn(ARTIFACT_INVALID, decision.reason_codes)
+
+    def test_runtime_environment_version_drift_changes_series_and_rejects_reuse(self) -> None:
+        expected = expected_run_seed_identity(self.command)
+        from nmsim.multi_event import build_attempt_series_id
+
+        original_series = build_attempt_series_id(expected.experiment_slot, expected)
+        drifted = replace(
+            expected,
+            scientific_runtime_environment_identity="f" * 64,
+        )
+        self.assertNotEqual(
+            original_series,
+            build_attempt_series_id(expected.experiment_slot, drifted),
+        )
+        manifest = json.loads(self.original_manifest)
+        runtime = manifest["environment"]["scientific_runtime_environment"]
+        runtime["dependencies"]["httpx"] = "999.0"
+        manifest["environment"]["scientific_runtime_environment_identity"] = hashlib.sha256(
+            json.dumps(runtime, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False).encode("utf-8")
+        ).hexdigest()
+        self.manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        decision = self._decision()
+        self.assertFalse(decision.reusable)
+        self.assertIn(RUNTIME_ENVIRONMENT_MISMATCH, decision.reason_codes)
 
     def test_health_threshold_uses_counts_and_rejects_invalid_fraction(self) -> None:
         for health in (
@@ -421,6 +607,19 @@ class ManagedReuseHealthAndIdentityTests(unittest.TestCase):
                 decision = self._decision()
                 self.assertFalse(decision.reusable)
                 self.assertIn(HEALTH_GATE_REJECTED, decision.reason_codes)
+
+    def test_health_union_must_exactly_match_bad_orders(self) -> None:
+        manifest = json.loads(self.original_manifest)
+        result = json.loads(self.original_result)
+        counts = result["health"]["failure_union_counts"]
+        self.assertGreater(counts["valid_decisions"], 0)
+        counts["valid_decisions"] -= 1
+        counts["strict_schema_only"] += 1
+        self.result_path.write_text(json.dumps(result), encoding="utf-8")
+        self._refresh_result_descriptor(manifest)
+        decision = self._decision()
+        self.assertFalse(decision.reusable)
+        self.assertIn(HEALTH_GATE_REJECTED, decision.reason_codes)
 
     def test_self_consistent_transform_tamper_is_rejected_against_expected_material(self) -> None:
         manifest = json.loads(self.original_manifest)

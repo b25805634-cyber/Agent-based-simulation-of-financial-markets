@@ -37,6 +37,7 @@ SCIENTIFIC_COMPONENT_FILES = (
     "nmsim/agents.py",
     "nmsim/config.py",
     "nmsim/contagion.py",
+    "nmsim/decision_contract.py",
     "nmsim/leverage.py",
     "nmsim/llm.py",
     "nmsim/market.py",

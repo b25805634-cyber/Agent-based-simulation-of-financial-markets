@@ -26,6 +26,10 @@ import time
 from dataclasses import dataclass, field
 
 from .config import Config
+from .decision_contract import (
+    DecisionResponseValidity,
+    validate_decision_response,
+)
 from .provider_attempts import (
     ProviderAttemptContext,
     ProviderAttemptContextCarrier,
@@ -96,7 +100,7 @@ def _user_last_price(user: str) -> float:
     return float(m.group(1)) if m else 100.0
 
 
-def parse_order(raw: str, last_price: float) -> Order:
+def _parse_order_legacy(raw: str, last_price: float) -> Order:
     """Parse the model's JSON into a normalized Order. Never raises.
 
     Accepts both ``action`` and legacy ``side`` for the order direction.
@@ -144,10 +148,102 @@ def parse_order(raw: str, last_price: float) -> Order:
                  sentiment=senti, public_take=public, rationale=reasoning)
 
 
-def _is_parse_failure(raw: str) -> bool:
+def parse_order_with_validity(
+    raw: str,
+    last_price: float,
+    *,
+    response_schema: str | None = None,
+    direction_field: str = "action",
+) -> tuple[Order, DecisionResponseValidity]:
+    """Parse under legacy coercion or one explicit strict response schema."""
+
+    if response_schema is None:
+        order = _parse_order_legacy(raw, last_price)
+        failed = order["rationale"] == "parse-failed; holding"
+        return order, DecisionResponseValidity(
+            None,
+            None,
+            not failed,
+            "invalid_or_missing_json_object" if failed else None,
+        )
+    value, validity = validate_decision_response(
+        raw,
+        schema_version=response_schema,
+        direction_field=direction_field,
+    )
+    if value is None:
+        fallback_markers = [
+            marker
+            for marker in ("api-error", "parse-retries-exhausted")
+            if marker in raw
+        ]
+        fallback_suffix = (
+            "; " + ";".join(fallback_markers)
+            if fallback_markers
+            else ""
+        )
+        return (
+            Order(
+                agent="",
+                side="hold",
+                quantity=0,
+                limit_price=last_price,
+                sentiment=0.0,
+                public_take="",
+                rationale="strict-schema-failed:{}; holding{}".format(
+                    validity.error_code, fallback_suffix
+                ),
+            ),
+            validity,
+        )
+    action = value[direction_field]
+    return (
+        Order(
+            agent="",
+            side=action,
+            quantity=value["quantity"],
+            limit_price=float(value["limit_price"]),
+            sentiment=float(value["sentiment"]),
+            public_take=value["public_take"][:140],
+            rationale=value["reasoning"][:240],
+        ),
+        validity,
+    )
+
+
+def parse_order(
+    raw: str,
+    last_price: float,
+    *,
+    response_schema: str | None = None,
+    direction_field: str = "action",
+) -> Order:
+    """Parse one order; strict semantics are opt-in and legacy remains exact."""
+
+    order, _validity = parse_order_with_validity(
+        raw,
+        last_price,
+        response_schema=response_schema,
+        direction_field=direction_field,
+    )
+    return order
+
+
+def _is_parse_failure(
+    raw: str,
+    *,
+    response_schema: str | None = None,
+    direction_field: str = "action",
+) -> bool:
     # Share the parser's notion of failure so the retry-on-parse-failure gate and
     # parse_order cannot diverge (only truly non-JSON output is a parse failure).
-    return parse_order(raw, 100.0)["rationale"] == "parse-failed; holding"
+    _order, validity = parse_order_with_validity(
+        raw,
+        100.0,
+        response_schema=response_schema,
+        direction_field=direction_field,
+    )
+    return not validity.valid
 
 
 # ------------------------------- MockLLM -------------------------------
@@ -242,6 +338,7 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                           if cfg.use_cheap_model else _DEFAULT_MODEL))
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
+        self.decision_response_schema = cfg.decision_response_schema
         self.tracker = tracker
 
     def complete(self, system: str, user: str) -> str:
@@ -254,7 +351,11 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                 system=system, messages=[{"role": "user", "content": user}])
             self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
             text = msg.content[0].text
-            parse_failed = _is_parse_failure(text)
+            parse_failed = _is_parse_failure(
+                text,
+                response_schema=getattr(self, "decision_response_schema", None),
+                direction_field="action",
+            )
         except Exception as error:
             observe_provider_attempt(
                 context,
@@ -324,7 +425,11 @@ class AnthropicLLM(ProviderAttemptContextCarrier):
                     system=system, messages=[{"role": "user", "content": user}])
                 self.tracker.add(self.model, msg.usage.input_tokens, msg.usage.output_tokens)
                 text = msg.content[0].text
-                parse_failed = _is_parse_failure(text)
+                parse_failed = _is_parse_failure(
+                    text,
+                    response_schema=getattr(self, "decision_response_schema", None),
+                    direction_field="action",
+                )
             except Exception as error:
                 will_retry = attempt < retries
                 observe_provider_attempt(
@@ -422,13 +527,22 @@ class OpenAILLM(ProviderAttemptContextCarrier):
         # cap at 40: enough headroom for one run, but workers*40 stays well under
         # the level that hung it (benchmark: a single client is healthy to 96+).
         _limits = httpx.Limits(max_connections=40, max_keepalive_connections=40)
-        self._async = AsyncOpenAI(base_url=base_url, api_key=api_key,
-                                  http_client=httpx.AsyncClient(trust_env=False, limits=_limits))
-        self._sync = OpenAI(base_url=base_url, api_key=api_key,
-                            http_client=httpx.Client(trust_env=False, limits=_limits))
+        client_options = {"base_url": base_url, "api_key": api_key}
+        if cfg.provider_sdk_max_retries is not None:
+            client_options["max_retries"] = cfg.provider_sdk_max_retries
+        self._async = AsyncOpenAI(
+            **client_options,
+            http_client=httpx.AsyncClient(trust_env=False, limits=_limits),
+        )
+        self._sync = OpenAI(
+            **client_options,
+            http_client=httpx.Client(trust_env=False, limits=_limits),
+        )
         self.model = os.getenv("LLM_MODEL") or cfg.model or cfg.openai_model
         self.temperature = cfg.temperature
         self.max_tokens = cfg.max_tokens
+        self.decision_response_schema = cfg.decision_response_schema
+        self.provider_sdk_max_retries = cfg.provider_sdk_max_retries
         self.tracker = tracker
 
     def _track(self, resp, system: str, user: str, text: str):
@@ -452,7 +566,11 @@ class OpenAILLM(ProviderAttemptContextCarrier):
                           {"role": "user", "content": user}])
             text = resp.choices[0].message.content or ""
             self._track(resp, system, user, text)
-            parse_failed = _is_parse_failure(text)
+            parse_failed = _is_parse_failure(
+                text,
+                response_schema=getattr(self, "decision_response_schema", None),
+                direction_field="action",
+            )
         except Exception as error:
             observe_provider_attempt(
                 context,
@@ -524,7 +642,11 @@ class OpenAILLM(ProviderAttemptContextCarrier):
                               {"role": "user", "content": user}])
                 text = resp.choices[0].message.content or ""
                 self._track(resp, system, user, text)
-                parse_failed = _is_parse_failure(text)
+                parse_failed = _is_parse_failure(
+                    text,
+                    response_schema=getattr(self, "decision_response_schema", None),
+                    direction_field="action",
+                )
             except Exception as error:
                 will_retry = attempt < retries
                 observe_provider_attempt(

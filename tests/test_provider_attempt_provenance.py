@@ -10,7 +10,9 @@ import json
 import os
 from pathlib import Path
 import stat
+import sys
 from types import SimpleNamespace
+import types
 import tempfile
 import unittest
 from unittest import mock
@@ -22,6 +24,7 @@ from nmsim.llm import AnthropicLLM, CachingLLM, CostTracker, OpenAILLM
 from nmsim.provider_attempts import (
     ProviderAttemptContext,
     prompt_hash,
+    safe_reported_model,
     sha256_text,
 )
 from nmsim.recording import RecordingLLM, ReplayLLM
@@ -200,6 +203,43 @@ def _outcomes(observer):
 
 
 class OpenAIProviderAttemptTests(unittest.TestCase):
+    def test_reported_model_alias_contract_is_exact_and_never_trims(self):
+        self.assertEqual(safe_reported_model("MiniMax M2.7"), "MiniMax M2.7")
+        for value in (
+            "",
+            " ",
+            " MiniMax",
+            "MiniMax ",
+            "Mini\nMax",
+            "Mini\x00Max",
+            "x" * 257,
+        ):
+            with self.subTest(value=repr(value)):
+                self.assertIsNone(safe_reported_model(value))
+
+    def test_multi_event_sdk_retry_zero_reaches_both_openai_clients(self):
+        fake_openai = types.ModuleType("openai")
+        fake_openai.AsyncOpenAI = mock.Mock(return_value=SimpleNamespace())
+        fake_openai.OpenAI = mock.Mock(return_value=SimpleNamespace())
+        fake_httpx = types.ModuleType("httpx")
+        fake_httpx.Limits = mock.Mock(return_value=SimpleNamespace())
+        fake_httpx.AsyncClient = mock.Mock(return_value=SimpleNamespace())
+        fake_httpx.Client = mock.Mock(return_value=SimpleNamespace())
+        cfg = Config(
+            provider="openai",
+            provider_sdk_max_retries=0,
+            cache_enabled=False,
+        )
+        with mock.patch.dict(
+            sys.modules, {"openai": fake_openai, "httpx": fake_httpx}
+        ):
+            llm = OpenAILLM(cfg, CostTracker())
+        self.assertEqual(llm.provider_sdk_max_retries, 0)
+        self.assertEqual(
+            fake_openai.AsyncOpenAI.call_args.kwargs["max_retries"], 0
+        )
+        self.assertEqual(fake_openai.OpenAI.call_args.kwargs["max_retries"], 0)
+
     def test_first_valid_response_is_byte_exact_one_attempt_with_reported_model(self):
         observer = CollectingObserver()
         llm, client, _ = _openai(async_script=[(VALID, "HiggsAI")])

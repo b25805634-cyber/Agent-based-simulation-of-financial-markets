@@ -225,11 +225,20 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
         sentiments: dict[str, float] = {}
         flips = 0
         for a, raw in zip(order_owners, completions):
-            order = a.ingest(raw, r, price)
+            order = a.ingest(
+                raw,
+                r,
+                price,
+                response_schema=cfg.decision_response_schema,
+                direction_field="action" if mode == "real" else "side",
+            )
             orders.append(order)
             statements[a.name] = a.statement(order)
             sentiments[a.name] = order["sentiment"]
-            parse_failed = order["rationale"] == "parse-failed; holding"
+            validity = a.last_decision_validity
+            parse_failed = not bool(
+                validity is not None and getattr(validity, "valid", False)
+            )
             if event_logger is not None:
                 public_decision = {
                     "persona_id": a.persona_id,
@@ -239,6 +248,20 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
                     "sentiment": order["sentiment"],
                     "public_take": order["public_take"],
                     "parse_status": "error" if parse_failed else "parsed",
+                    "decision_response_schema": getattr(
+                        validity, "schema_version", None
+                    ),
+                    "decision_response_direction_field": getattr(
+                        validity, "direction_field", None
+                    ),
+                    "strict_schema_valid": (
+                        getattr(validity, "valid", None)
+                        if cfg.decision_response_schema is not None
+                        else None
+                    ),
+                    "strict_schema_error_code": getattr(
+                        validity, "error_code", None
+                    ),
                     "raw_response_sha256": _digest(raw),
                 }
                 event_logger.emit(
@@ -253,7 +276,13 @@ def run_sim(cfg: Config, llm, tracker, event_logger=None, run_id: str | None = N
                     event_logger.emit(
                         "AgentDecisionParseError", round_i=r, agent_id=a.name,
                         data={
-                            "error_code": "invalid_or_missing_json_object",
+                            "error_code": (
+                                getattr(validity, "error_code", None)
+                                or "invalid_or_missing_json_object"
+                            ),
+                            "decision_response_schema": getattr(
+                                validity, "schema_version", None
+                            ),
                             "raw_response_sha256": _digest(raw),
                         },
                     )

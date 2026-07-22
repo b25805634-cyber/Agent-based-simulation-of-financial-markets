@@ -16,7 +16,7 @@ import random
 from dataclasses import dataclass, field
 
 from .types import Order, Statement
-from .llm import parse_order
+from .llm import parse_order_with_validity
 from . import prompts as P
 
 
@@ -68,6 +68,9 @@ class Agent:
     lev_pnl: float = 0.0               # realised book P&L at liquidation (analysis only)
     memory: list = field(default_factory=list)
     last_sentiment: float = 0.0        # for stance-flip detection (Phase 3)
+    last_decision_validity: object | None = field(
+        default=None, repr=False, compare=False
+    )
     is_llm: bool = True
 
     def build_prompt(self, mode, round_i, last_price, recent, fundamental, news,
@@ -122,9 +125,23 @@ class Agent:
         )
         return system, user
 
-    def ingest(self, raw: str, round_i: int, last_price: float) -> Order:
+    def ingest(
+        self,
+        raw: str,
+        round_i: int,
+        last_price: float,
+        *,
+        response_schema: str | None = None,
+        direction_field: str = "action",
+    ) -> Order:
         """Parse a completion into an Order, update memory + last_sentiment."""
-        order = parse_order(raw, last_price)
+        order, validity = parse_order_with_validity(
+            raw,
+            last_price,
+            response_schema=response_schema,
+            direction_field=direction_field,
+        )
+        self.last_decision_validity = validity
         order["agent"] = self.name
         self.last_sentiment = order["sentiment"]
         self.memory.append(

@@ -20,7 +20,13 @@ from typing import Any, Mapping, Optional, Sequence
 
 from .config_contract import build_effective_config_contract
 from .fingerprint import scientific_compatibility_metadata
-from .provenance import MANIFEST_SCHEMA_VERSION, sha256_file
+from .provenance import (
+    MANIFEST_SCHEMA_VERSION,
+    SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION,
+    scientific_runtime_environment_identity,
+    sha256_file,
+)
+from .provider_attempts import safe_reported_model
 from .recording import runtime_model_config
 from .recording_schema import CURRENT_RECORDING_SCHEMA_VERSION
 
@@ -65,6 +71,7 @@ LEGACY_FLAT_RESULT_UNVERIFIED = "legacy_flat_result_unverified"
 HEALTH_GATE_REJECTED = "health_gate_rejected"
 EXPERIMENT_SLOT_MISMATCH = "experiment_slot_mismatch"
 REPORTED_MODEL_GATE_REJECTED = "reported_model_gate_rejected"
+RUNTIME_ENVIRONMENT_MISMATCH = "runtime_environment_mismatch"
 
 REUSE_REASON_CODES = frozenset(
     {
@@ -106,6 +113,7 @@ REUSE_REASON_CODES = frozenset(
         HEALTH_GATE_REJECTED,
         EXPERIMENT_SLOT_MISMATCH,
         REPORTED_MODEL_GATE_REJECTED,
+        RUNTIME_ENVIRONMENT_MISMATCH,
     }
 )
 
@@ -218,6 +226,8 @@ class ChildRunIdentity:
     experiment_slot: Optional[Mapping[str, Any]]
     multi_event_identity: Optional[Mapping[str, Any]]
     multi_event_material_identity: Optional[Mapping[str, Any]]
+    scientific_runtime_environment: Optional[Mapping[str, Any]]
+    scientific_runtime_environment_identity: Optional[str]
     reported_model_aliases: Optional[tuple[str, ...]]
     artifacts: tuple[ArtifactIdentity, ...]
     legacy_links: tuple[LegacyLinkIdentity, ...]
@@ -272,6 +282,10 @@ class ChildRunIdentity:
             reported_model_aliases = _manifest_reported_model_aliases(
                 raw, experiment_slot
             )
+            (
+                runtime_environment,
+                runtime_environment_identity,
+            ) = _manifest_runtime_environment_identity(raw, experiment_slot)
             artifacts = _artifact_identities(raw.get("results"))
             legacy_links = _legacy_link_identities(raw.get("compatibility"))
             endpoint_identity = _endpoint_identity(raw, model_config)
@@ -339,6 +353,10 @@ class ChildRunIdentity:
                 experiment_slot=experiment_slot,
                 multi_event_identity=multi_event_identity,
                 multi_event_material_identity=multi_event_material_identity,
+                scientific_runtime_environment=runtime_environment,
+                scientific_runtime_environment_identity=(
+                    runtime_environment_identity
+                ),
                 reported_model_aliases=reported_model_aliases,
                 artifacts=artifacts,
                 legacy_links=legacy_links,
@@ -397,6 +415,8 @@ class ExpectedRunIdentity:
     experiment_slot: Optional[Mapping[str, Any]]
     multi_event_identity: Optional[Mapping[str, Any]]
     multi_event_material_identity: Optional[Mapping[str, Any]]
+    scientific_runtime_environment: Optional[Mapping[str, Any]]
+    scientific_runtime_environment_identity: Optional[str]
     required_artifacts: tuple[str, ...]
     git_commit: Optional[str]
 
@@ -444,6 +464,12 @@ class ExpectedRunIdentity:
             experiment_slot=child.experiment_slot,
             multi_event_identity=child.multi_event_identity,
             multi_event_material_identity=child.multi_event_material_identity,
+            scientific_runtime_environment=(
+                child.scientific_runtime_environment
+            ),
+            scientific_runtime_environment_identity=(
+                child.scientific_runtime_environment_identity
+            ),
             required_artifacts=required,
             git_commit=child.git_commit if git_commit is None else git_commit,
         )
@@ -522,6 +548,11 @@ class ExpectedRunIdentity:
         resolved_model = _resolved_model_without_provider(cfg, model_config)
         if not resolved_provider or not resolved_model:
             raise ResultReuseError(MANIFEST_INVALID, "resolved_model_identity")
+        runtime_environment = (
+            scientific_runtime_environment_identity()
+            if experiment_slot is not None
+            else None
+        )
         return cls(
             run_kind=str(run_kind),
             command_identity=str(command_identity),
@@ -571,6 +602,16 @@ class ExpectedRunIdentity:
                     multi_event_material_identity
                 )
                 if multi_event_material_identity is not None
+                else None
+            ),
+            scientific_runtime_environment=(
+                runtime_environment["environment"]
+                if runtime_environment is not None
+                else None
+            ),
+            scientific_runtime_environment_identity=(
+                runtime_environment["sha256"]
+                if runtime_environment is not None
                 else None
             ),
             required_artifacts=required,
@@ -855,6 +896,18 @@ def validate_child_run_reuse(
             child.multi_event_material_identity,
             expected.multi_event_material_identity,
             RESULT_IDENTITY_MISMATCH,
+        )
+        _mismatch(
+            reasons,
+            (
+                child.scientific_runtime_environment,
+                child.scientific_runtime_environment_identity,
+            ),
+            (
+                expected.scientific_runtime_environment,
+                expected.scientific_runtime_environment_identity,
+            ),
+            RUNTIME_ENVIRONMENT_MISMATCH,
         )
         aliases = child.reported_model_aliases
         if (
@@ -1144,13 +1197,63 @@ def _manifest_multi_event_material_identity(
 
 def _normalized_aliases(value: Any) -> tuple[str, ...]:
     if not isinstance(value, list) or any(
-        not isinstance(alias, str) or not alias for alias in value
+        safe_reported_model(alias) != alias for alias in value
     ):
         raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
     aliases = tuple(value)
     if list(aliases) != sorted(set(aliases)):
         raise ResultReuseError(REPORTED_MODEL_GATE_REJECTED)
     return aliases
+
+
+def _manifest_runtime_environment_identity(
+    raw: Mapping[str, Any], slot: Optional[Mapping[str, Any]]
+) -> tuple[Optional[Mapping[str, Any]], Optional[str]]:
+    environment = raw.get("environment")
+    if not isinstance(environment, Mapping):
+        if slot is None:
+            return None, None
+        raise ResultReuseError(MANIFEST_INVALID, "environment")
+    runtime = environment.get("scientific_runtime_environment")
+    digest = environment.get("scientific_runtime_environment_identity")
+    if runtime is None and digest is None and slot is None:
+        return None, None
+    if not isinstance(runtime, Mapping) or not isinstance(digest, str):
+        raise ResultReuseError(MANIFEST_INVALID, "scientific_runtime_environment")
+    expected_keys = {
+        "schema_version",
+        "python_implementation",
+        "python_version",
+        "platform",
+        "architecture",
+        "dependencies",
+    }
+    dependencies = runtime.get("dependencies")
+    if (
+        set(runtime) != expected_keys
+        or runtime.get("schema_version")
+        != SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION
+        or not all(
+            isinstance(runtime.get(field), str) and runtime.get(field)
+            for field in (
+                "python_implementation",
+                "python_version",
+                "platform",
+                "architecture",
+            )
+        )
+        or not isinstance(dependencies, Mapping)
+        or set(dependencies)
+        != {"numpy", "matplotlib", "anthropic", "openai", "httpx"}
+        or any(
+            value is not None and (not isinstance(value, str) or not value)
+            for value in dependencies.values()
+        )
+        or not _HEX_SHA256.fullmatch(digest)
+        or _stable_hash(runtime) != digest
+    ):
+        raise ResultReuseError(MANIFEST_INVALID, "scientific_runtime_environment")
+    return dict(runtime), digest
 
 
 def _manifest_reported_model_aliases(
@@ -1669,6 +1772,7 @@ __all__ = [
     "REUSE_REASON_CODES",
     "EXPERIMENT_SLOT_MISMATCH",
     "REPORTED_MODEL_GATE_REJECTED",
+    "RUNTIME_ENVIRONMENT_MISMATCH",
     "ArtifactIdentity",
     "ChildRunIdentity",
     "ExpectedRunIdentity",

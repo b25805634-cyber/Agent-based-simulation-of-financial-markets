@@ -8,15 +8,18 @@ import json
 import math
 import os
 from pathlib import Path
+import stat
 import threading
 import uuid
 from datetime import datetime, timezone
 from typing import Any, Callable, Mapping, Optional, Sequence
 
 from nmsim.config import Config
+from nmsim.decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
 from nmsim.run_context import ManagedRunContext
 from nmsim.result_reuse import (
     ExpectedRunIdentity,
+    ARTIFACT_INVALID,
     HEALTH_GATE_REJECTED,
     RESULT_REUSE_POLICY_VERSION,
     ReusableRunCandidate,
@@ -26,6 +29,42 @@ from nmsim.result_reuse import (
 
 
 DRIVER_SUMMARY_SCHEMA_VERSION = "1.0"
+MULTI_EVENT_PRIVATE_ARTIFACTS = (
+    "llm_records.jsonl",
+    "private_events.jsonl",
+)
+
+
+def _gate_multi_event_private_artifacts(
+    decision: ReuseDecision, expected: ExpectedRunIdentity
+) -> ReuseDecision:
+    """Require exact private-file type and mode without changing legacy reuse."""
+
+    if (
+        not decision.reusable
+        or expected.experiment_slot is None
+        or decision.manifest_path is None
+    ):
+        return decision
+    run_dir = decision.manifest_path.parent
+    try:
+        for relative in MULTI_EVENT_PRIVATE_ARTIFACTS:
+            path = run_dir / relative
+            info = path.lstat()
+            if (
+                path.is_symlink()
+                or not stat.S_ISREG(info.st_mode)
+                or stat.S_IMODE(info.st_mode) != 0o600
+            ):
+                raise ValueError("private artifact policy mismatch")
+    except (OSError, ValueError):
+        return replace(
+            decision,
+            reusable=False,
+            reason_codes=(ARTIFACT_INVALID,),
+            cross_commit_same_scientific_fingerprint=False,
+        )
+    return decision
 
 
 @dataclass(frozen=True)
@@ -563,12 +602,21 @@ def expected_run_seed_identity(command: Sequence[str]) -> ExpectedRunIdentity:
         value = getattr(args, attribute, None)
         if value:
             input_paths[label] = str(value)
+    required_artifacts = ["experiment_result.json", basename]
+    if args.multi_event_material is not None:
+        required_artifacts.extend(
+            (
+                "llm_records.jsonl",
+                "events.jsonl",
+                "private_events.jsonl",
+            )
+        )
     return ExpectedRunIdentity.from_effective_config(
         cfg,
         command_identity="python -m experiments.run_seed",
         run_kind="simulation",
         input_paths=input_paths or None,
-        required_artifacts=("experiment_result.json", basename),
+        required_artifacts=required_artifacts,
         experiment_slot=args.experiment_slot,
         multi_event_identity=result_cell_identity,
         multi_event_material_identity=material_identity,
@@ -592,6 +640,7 @@ def assess_run_seed_reuse(
     decision = validate_child_run_reuse(
         ReusableRunCandidate(candidate, Path(allowed_result_root)), expected
     )
+    decision = _gate_multi_event_private_artifacts(decision, expected)
     if not decision.reusable or max_bad_frac is None:
         return decision
     # The canonical health projection lives in the registered result artifact,
@@ -623,6 +672,47 @@ def assess_run_seed_reuse(
         ):
             raise ValueError("invalid health counts")
         raw_fraction = bad_orders / total_orders if total_orders else 0.0
+        if expected.experiment_slot is not None:
+            if set(health) != {
+                "bad_orders",
+                "total_llm_orders",
+                "bad_frac",
+                "schema_version",
+                "decision_response_schema",
+                "failure_union",
+                "failure_union_counts",
+            }:
+                raise ValueError("multi-event health schema changed")
+            union_counts = health["failure_union_counts"]
+            count_keys = {
+                "strict_schema_only",
+                "legacy_parse_only",
+                "provider_fallback_only",
+                "multiple_failure_causes",
+                "valid_decisions",
+            }
+            if (
+                health["schema_version"] != "multi_event_health_v1"
+                or health["decision_response_schema"]
+                != MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+                or health["failure_union"]
+                != "strict_schema_or_legacy_parse_or_provider_fallback"
+                or not isinstance(union_counts, Mapping)
+                or set(union_counts) != count_keys
+                or any(
+                    isinstance(value, bool)
+                    or not isinstance(value, int)
+                    or value < 0
+                    for value in union_counts.values()
+                )
+                or sum(union_counts.values()) != total_orders
+                or sum(
+                    union_counts[key]
+                    for key in count_keys - {"valid_decisions"}
+                )
+                != bad_orders
+            ):
+                raise ValueError("multi-event health union is inconsistent")
         if (
             not math.isfinite(declared_fraction)
             or not 0.0 <= declared_fraction <= 1.0

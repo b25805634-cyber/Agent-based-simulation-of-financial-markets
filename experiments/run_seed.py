@@ -33,6 +33,7 @@ from nmsim.managed_cli import (
     fail_cli,
 )
 from nmsim.run_context import ManagedRunContext
+from nmsim.provider_attempts import safe_reported_model
 from nmsim.result_reuse import inspect_legacy_analysis_inputs
 from nmsim.multi_event import (
     MultiEventMaterial,
@@ -44,7 +45,12 @@ from nmsim.multi_event import (
 from nmsim import validation as V
 
 META = "nmsim/meta_feb2022_reference.csv"
-_BAD_MARKERS = ("parse-failed", "api-error", "parse-retries-exhausted")
+_BAD_MARKERS = (
+    "parse-failed",
+    "strict-schema-failed",
+    "api-error",
+    "parse-retries-exhausted",
+)
 
 # Placebo headline: same "BREAKING:" salience/structure as the real Meta news, but
 # directionally NEUTRAL — controls for the act of news arriving so the real-vs-placebo
@@ -157,7 +163,7 @@ def _reported_model_aliases(manager) -> list[str]:
         raise ValueError("reported model aliases are truncated")
     raw = attempts.get("reported_models", [])
     if not isinstance(raw, list) or any(
-        not isinstance(value, str) or not value for value in raw
+        safe_reported_model(value) != value for value in raw
     ):
         raise ValueError("reported model aliases are malformed")
     return sorted(set(raw))
@@ -179,11 +185,34 @@ def _live(args, cfg, manager, multi_event_material=None):
     manager.set_population(res.agents)
     manager.sync_llm_accounting(llm, tracker)
     bad = total = 0
+    failure_union_counts = {
+        "strict_schema_only": 0,
+        "legacy_parse_only": 0,
+        "provider_fallback_only": 0,
+        "multiple_failure_causes": 0,
+        "valid_decisions": 0,
+    }
     for items in res.traces.values():
         for (_a, _s, _q, _l, _se, _tk, why) in items:
             total += 1
-            if any(k in why for k in _BAD_MARKERS):
+            causes = {
+                "strict_schema" if "strict-schema-failed" in why else None,
+                (
+                    "legacy_parse"
+                    if "parse-failed" in why
+                    or "parse-retries-exhausted" in why
+                    else None
+                ),
+                "provider_fallback" if "api-error" in why else None,
+            } - {None}
+            if causes:
                 bad += 1
+            if not causes:
+                failure_union_counts["valid_decisions"] += 1
+            elif len(causes) > 1:
+                failure_union_counts["multiple_failure_causes"] += 1
+            else:
+                failure_union_counts["{}_only".format(next(iter(causes)))] += 1
     out = _assemble(
         args.label,
         args.seed,
@@ -194,6 +223,17 @@ def _live(args, cfg, manager, multi_event_material=None):
         total,
         multi_event_material,
     )
+    if cfg.decision_response_schema is not None:
+        out["health"].update(
+            {
+                "schema_version": "multi_event_health_v1",
+                "decision_response_schema": cfg.decision_response_schema,
+                "failure_union": (
+                    "strict_schema_or_legacy_parse_or_provider_fallback"
+                ),
+                "failure_union_counts": failure_union_counts,
+            }
+        )
     # Provenance: record the SERVED model id so same-seed pairs can be checked to
     # come from the same model (the endpoint can silently swap MiniMax/HiggsAI).
     out["model"] = getattr(llm, "model", None) or cfg.provider
@@ -501,6 +541,12 @@ def config_from_args(args, *, environment=None):
         cfg.temperature = float(frozen_model_request["temperature"])
         cfg.cache_enabled = bool(frozen_model_request["cache_enabled"])
         cfg.max_tokens = int(frozen_model_request["max_tokens"])
+        cfg.provider_sdk_max_retries = int(
+            frozen_model_request["provider_sdk_max_retries"]
+        )
+        cfg.decision_response_schema = str(
+            frozen["decision_response_schema"]
+        )
         cfg.population = dict(frozen["population"])
         cfg.seed_fraction = float(frozen["seed_fraction"])
         cfg.n_noise_agents = int(frozen["n_noise_agents"])

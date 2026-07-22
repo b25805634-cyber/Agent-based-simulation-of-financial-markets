@@ -17,6 +17,7 @@ import threading
 from typing import Any, Callable, Iterable, Mapping, Optional
 
 from .config import Config
+from .provider_attempts import safe_reported_model
 from .provenance import RunManager, redact_secrets
 
 
@@ -471,7 +472,7 @@ class ManagedRunContext:
                     and outcome in {"response_parse_failed", "provider_exception"}
                 ):
                     attempts["exhausted_logical_requests"] += 1
-                reported_model = data.get("reported_model")
+                reported_model = safe_reported_model(data.get("reported_model"))
                 reported_models = attempts["reported_models"]
                 if (
                     isinstance(reported_model, str)

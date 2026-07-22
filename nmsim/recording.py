@@ -402,6 +402,12 @@ def runtime_model_config(
         # itself may contain userinfo. Match its digest without persisting it.
         "endpoint_sha256": _sha256_text(str(endpoint)) if endpoint else None,
     }
+    provider_sdk_max_retries = getattr(cfg, "provider_sdk_max_retries", None)
+    if provider_sdk_max_retries is not None:
+        # Preserve the legacy runtime projection byte-for-byte when the SDK
+        # retry policy is not opted in.  Multi-event runs bind the explicit
+        # zero in both their model-request hash and recorded runtime config.
+        config["provider_sdk_max_retries"] = provider_sdk_max_retries
     if resolved == "codex_exec" or requested == "codex_exec":
         from .codex_exec import (
             codex_reasoning_effort_from_environment,

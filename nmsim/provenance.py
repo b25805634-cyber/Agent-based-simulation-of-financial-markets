@@ -43,6 +43,9 @@ _SECRET_QUERY_RE = re.compile(
     re.IGNORECASE,
 )
 _DEPENDENCIES = ("numpy", "matplotlib", "anthropic", "openai", "httpx")
+SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION = (
+    "scientific_runtime_environment_v1"
+)
 
 
 def utc_now() -> str:
@@ -201,6 +204,24 @@ def _dependency_versions() -> dict:
         except importlib.metadata.PackageNotFoundError:
             versions[package] = None
     return versions
+
+
+def scientific_runtime_environment_identity() -> dict[str, Any]:
+    """Return the versioned runtime mapping and its canonical stable hash."""
+
+    environment = {
+        "schema_version": SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION,
+        "python_implementation": platform.python_implementation(),
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "architecture": platform.machine(),
+        "dependencies": _dependency_versions(),
+    }
+    return {
+        "schema_version": SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION,
+        "environment": environment,
+        "sha256": _stable_json_hash(environment),
+    }
 
 
 def _file_descriptor(path: Path, display_path: Optional[str] = None) -> dict:
@@ -515,6 +536,7 @@ class RunManager:
                 ),
             }
 
+        runtime_environment = scientific_runtime_environment_identity()
         initial = {
             "schema_version": MANIFEST_SCHEMA_VERSION,
             "run_id": self.run_id,
@@ -574,6 +596,12 @@ class RunManager:
                 "python_executable": sys.executable,
                 "platform": platform.platform(),
                 "dependencies": _dependency_versions(),
+                "scientific_runtime_environment": runtime_environment[
+                    "environment"
+                ],
+                "scientific_runtime_environment_identity": runtime_environment[
+                    "sha256"
+                ],
             },
             "samples": {"expected": None, "completed": 0, "failed": 0, "honest_n": 0},
             "results": [],
@@ -1001,5 +1029,7 @@ __all__ = [
     "redact_secrets",
     "sha256_bytes",
     "sha256_file",
+    "SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION",
+    "scientific_runtime_environment_identity",
     "utc_now",
 ]
