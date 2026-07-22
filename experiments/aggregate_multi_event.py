@@ -15,8 +15,10 @@ from dataclasses import dataclass, replace
 import hashlib
 import json
 import math
+import os
 from pathlib import Path
 import random
+import re
 import stat
 from statistics import mean, stdev
 import sys
@@ -35,7 +37,12 @@ from nmsim.managed_cli import (
     bootstrap_cli,
     fail_cli,
 )
-from nmsim.provenance import sha256_file
+from nmsim.decision_contract import MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+from nmsim.provenance import (
+    SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION,
+    sha256_file,
+)
+from nmsim.provider_attempts import safe_reported_model
 from nmsim.multi_event import (
     ATTEMPT_SERIES_SCHEMA_VERSION,
     FROZEN_PROTOCOL_SHA256,
@@ -55,16 +62,20 @@ from nmsim.result_reuse import (
     ResultReuseError,
     ReusableRunCandidate,
     load_child_run_identity,
-    validate_child_run_reuse,
 )
 from nmsim.run_context import ManagedRunContext
 
-from experiments.driver_utils import expected_run_seed_identity
+from experiments.driver_utils import (
+    assess_run_seed_reuse,
+    expected_run_seed_identity,
+)
 from experiments.multi_event import build_multi_event_child_command
 from experiments.run_seed import build_population
 
 
 PROTOCOL_PATH = Path(__file__).with_name("multi_event_protocol.json")
+REPO_ROOT = Path(__file__).resolve().parents[1]
+CANONICAL_LIVE_OUT = REPO_ROOT / "results_multi_event"
 SELECTION_SCHEMA_VERSION = "1.0"
 CELL_IDENTITY_SCHEMA_VERSION = "1.0"
 SUMMARY_SCHEMA_VERSION = "1.0"
@@ -81,6 +92,7 @@ DRIVER_ATTEMPT_LEDGER_FILENAME = "multi_event_attempts.jsonl"
 DRIVER_PRIVATE_ATTEMPT_LEDGER_FILENAME = "multi_event_attempts.private.jsonl"
 DRIVER_SUMMARY_FILENAME = "driver_summary.json"
 DRIVER_PRIVATE_FAILURES_FILENAME = "driver_failures.private.jsonl"
+ATTEMPT_COORDINATION_LOCK_NAME = ".multi_event_attempts.lock"
 _HASH_HEX = frozenset("0123456789abcdef")
 
 
@@ -137,6 +149,8 @@ class PreparedSelection:
     input_paths: Mapping[str, Path]
     driver_manifest_path: Optional[Path] = None
     driver_run_id: Optional[str] = None
+    output_root_policy: Optional[Mapping[str, Any]] = None
+    source_snapshot: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -202,6 +216,96 @@ def _sha256(value: Any, field: str) -> str:
     return digest
 
 
+def _stable_json_sha256(value: Any) -> str:
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validated_runtime_environment(
+    raw: Any, digest: Any, field: str
+) -> Mapping[str, Any]:
+    environment = _mapping(raw, field)
+    required = {
+        "schema_version",
+        "python_implementation",
+        "python_version",
+        "platform",
+        "architecture",
+        "dependencies",
+    }
+    dependencies = _mapping(
+        environment.get("dependencies"), f"{field}.dependencies"
+    )
+    if (
+        set(environment) != required
+        or environment.get("schema_version")
+        != SCIENTIFIC_RUNTIME_ENVIRONMENT_SCHEMA_VERSION
+        or any(
+            not isinstance(environment.get(name), str)
+            or not environment.get(name)
+            for name in (
+                "python_implementation",
+                "python_version",
+                "platform",
+                "architecture",
+            )
+        )
+        or set(dependencies)
+        != {"numpy", "matplotlib", "anthropic", "openai", "httpx"}
+        or any(
+            value is not None
+            and (not isinstance(value, str) or not value)
+            for value in dependencies.values()
+        )
+    ):
+        raise MultiEventInputError(
+            f"{field} does not satisfy scientific_runtime_environment_v1"
+        )
+    expected_digest = _sha256(digest, f"{field}_identity")
+    if _stable_json_sha256(environment) != expected_digest:
+        raise MultiEventInputError(f"{field} hash is inconsistent")
+    return dict(environment)
+
+
+def _validated_reported_aliases(raw: Any, field: str) -> list[str]:
+    aliases = _list(raw, field)
+    if aliases != sorted(set(aliases)) or any(
+        safe_reported_model(alias) != alias for alias in aliases
+    ):
+        raise MultiEventInputError(
+            f"{field} must be a sorted unique list of exact safe aliases"
+        )
+    return aliases
+
+
+def launch_order_policy() -> Mapping[str, Any]:
+    """Return the frozen acquisition-order declaration independently."""
+
+    return {
+        "schema_version": "multi_event_launch_order_v1",
+        "block_order": "repeat_position_then_seed_position",
+        "event_rotation": "(repeat_position+seed_position)%3",
+        "arm_pairing": "both_arms_adjacent_per_event_seed_repeat",
+        "social_on_first": (
+            "(repeat_position+seed_position+canonical_event_position)%2==1"
+        ),
+        "expected_event_temporal_positions": "8_each_of_3_positions",
+        "expected_arm_first_counts_per_event": {
+            "social_on": 12,
+            "social_off": 12,
+        },
+        "resume_policy": (
+            "filter_ineligible_slots_without_reordering_remaining_jobs"
+        ),
+    }
+
+
 def _read_json(path: Path, field: str) -> Mapping[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -248,6 +352,18 @@ def _validated_execution_plan(
     raw: Any, protocol: Mapping[str, Any]
 ) -> Mapping[str, Any]:
     plan = _mapping(raw, "execution_plan")
+    if set(plan) != {
+        "protocol_adherence",
+        "execution_mode",
+        "seeds",
+        "repeat_indices",
+        "planned_runs",
+        "override_reason",
+        "launch_order_policy",
+    }:
+        raise MultiEventInputError(
+            "execution_plan does not have the exact frozen fields"
+        )
     adherence = plan.get("protocol_adherence")
     if not isinstance(adherence, bool):
         raise MultiEventInputError("execution_plan.protocol_adherence must be boolean")
@@ -287,6 +403,10 @@ def _validated_execution_plan(
     planned_runs = len(_events) * len(ARMS) * len(seeds) * len(repeats)
     if plan.get("planned_runs") != planned_runs:
         raise MultiEventInputError("execution_plan.planned_runs is inconsistent")
+    if plan.get("launch_order_policy") != launch_order_policy():
+        raise MultiEventInputError(
+            "execution_plan.launch_order_policy differs from the frozen policy"
+        )
     return {
         "protocol_adherence": adherence,
         "execution_mode": mode,
@@ -294,6 +414,7 @@ def _validated_execution_plan(
         "repeat_indices": repeats,
         "planned_runs": planned_runs,
         "override_reason": plan.get("override_reason"),
+        "launch_order_policy": dict(launch_order_policy()),
     }
 
 
@@ -314,6 +435,41 @@ def _planned_cells(
         for seed in seeds
         for repeat_idx in repeats
     }
+
+
+def _counterbalanced_cells(
+    protocol: Mapping[str, Any], execution_plan: Mapping[str, Any]
+) -> list[tuple[str, str, int, int]]:
+    """Reconstruct the exact launch sequence without trusting the driver."""
+
+    event_ids, _frozen_seeds, _frozen_repeats = _planned_values(protocol)
+    order: list[tuple[str, str, int, int]] = []
+    canonical_positions = {
+        event_id: index for index, event_id in enumerate(event_ids)
+    }
+    for repeat_position, repeat_idx in enumerate(
+        execution_plan["repeat_indices"]
+    ):
+        for seed_position, seed in enumerate(execution_plan["seeds"]):
+            rotation = (repeat_position + seed_position) % len(event_ids)
+            rotated_events = [
+                event_ids[(rotation + offset) % len(event_ids)]
+                for offset in range(len(event_ids))
+            ]
+            for event_id in rotated_events:
+                event_position = canonical_positions[event_id]
+                social_on_first = (
+                    repeat_position + seed_position + event_position
+                ) % 2 == 1
+                arms = (
+                    ("social_on", "social_off")
+                    if social_on_first
+                    else ("social_off", "social_on")
+                )
+                order.extend(
+                    (event_id, arm, seed, repeat_idx) for arm in arms
+                )
+    return order
 
 
 def _selection_slot(raw: Any, field: str) -> tuple[str, str, int, int]:
@@ -634,16 +790,11 @@ def prepare_selection(
     study_model = _mapping(
         selection.get("study_model_identity"), "study_model_identity"
     )
-    expected_study_keys = {
-        "execution_mode",
-        "model_request_config_hash",
-        "requested_provider",
-        "requested_model",
-        "resolved_provider",
-        "resolved_model",
-        "endpoint_identity",
-        "reported_model_aliases",
-    }
+    expected_study_keys = set(
+        protocol["analysis_input_contract"][
+            "required_study_model_identity"
+        ]
+    ) | {"scientific_runtime_environment"}
     if set(study_model) != expected_study_keys:
         raise MultiEventInputError("study_model_identity has unexpected fields")
     execution_mode = _text(
@@ -687,17 +838,30 @@ def prepare_selection(
         raise MultiEventInputError(
             "openai_live execution must request provider=openai"
         )
-    study_reported_aliases = _list(
+    study_reported_aliases = _validated_reported_aliases(
         study_model.get("reported_model_aliases"),
         "study_model_identity.reported_model_aliases",
     )
-    if study_reported_aliases != sorted(set(study_reported_aliases)) or any(
-        not isinstance(alias, str) or not alias
-        for alias in study_reported_aliases
+    invalid_alias_count = study_model.get(
+        "invalid_reported_model_alias_count"
+    )
+    if (
+        isinstance(invalid_alias_count, bool)
+        or not isinstance(invalid_alias_count, int)
+        or invalid_alias_count != 0
     ):
         raise MultiEventInputError(
-            "study reported_model_aliases must be a sorted unique string list"
+            "study invalid_reported_model_alias_count must be exact integer zero"
         )
+    study_runtime_identity = _sha256(
+        study_model.get("scientific_runtime_environment_identity"),
+        "study_model_identity.scientific_runtime_environment_identity",
+    )
+    study_runtime = _validated_runtime_environment(
+        study_model.get("scientific_runtime_environment"),
+        study_runtime_identity,
+        "study_model_identity.scientific_runtime_environment",
+    )
     if execution_mode == "mock" and study_reported_aliases:
         raise MultiEventInputError(
             "mock execution must not fabricate endpoint-reported model aliases"
@@ -830,16 +994,36 @@ def prepare_selection(
             raise MultiEventInputError(
                 "mock child requested_model must be null or a string"
             )
-        reported_aliases = _list(
+        reported_aliases = _validated_reported_aliases(
             identity.get("reported_model_aliases"),
             "children[].identity.reported_model_aliases",
         )
-        if reported_aliases != sorted(set(reported_aliases)) or any(
-            not isinstance(alias, str) or not alias
-            for alias in reported_aliases
+        child_invalid_alias_count = identity.get(
+            "invalid_reported_model_alias_count"
+        )
+        if (
+            isinstance(child_invalid_alias_count, bool)
+            or not isinstance(child_invalid_alias_count, int)
+            or child_invalid_alias_count != 0
         ):
             raise MultiEventInputError(
-                "child reported_model_aliases must be sorted unique strings"
+                "child invalid_reported_model_alias_count must be exact integer zero"
+            )
+        child_runtime_identity = _sha256(
+            identity.get("scientific_runtime_environment_identity"),
+            "children[].identity.scientific_runtime_environment_identity",
+        )
+        child_runtime = _validated_runtime_environment(
+            identity.get("scientific_runtime_environment"),
+            child_runtime_identity,
+            "children[].identity.scientific_runtime_environment",
+        )
+        if (
+            child_runtime_identity != study_runtime_identity
+            or child_runtime != study_runtime
+        ):
+            raise MultiEventInputError(
+                "child scientific runtime environment differs from the study"
             )
         if execution_mode == "mock" and reported_aliases:
             raise MultiEventInputError(
@@ -858,6 +1042,10 @@ def prepare_selection(
         if identity.get("requested_model") != requested_model:
             raise MultiEventInputError(
                 "child identity does not match study requested_model"
+            )
+        if child_invalid_alias_count != invalid_alias_count:
+            raise MultiEventInputError(
+                "child invalid-alias evidence differs from the study"
             )
         children.append(
             ChildSelection(
@@ -995,6 +1183,120 @@ def _provider_for_execution_mode(mode: str) -> str:
     raise MultiEventInputError("unsupported execution mode")
 
 
+def _expected_output_root_policy(
+    mode: str, child_root: Path
+) -> Mapping[str, Any]:
+    live = mode == "openai_live"
+    return {
+        "schema_version": "multi_event_output_root_v1",
+        "effective_root": str(child_root),
+        "canonical_repo_relative_root": "results_multi_event",
+        "live_canonical_root_enforced": live,
+        "alternate_root_allowed": not live,
+        "symlink_or_rebinding_allowed": False if live else None,
+        "attempt_cap_scope": (
+            "single_canonical_study_root"
+            if live
+            else "non_live_engineering_root"
+        ),
+    }
+
+
+def _validated_output_root_policy(
+    raw: Any, *, mode: str, child_root: Path
+) -> Mapping[str, Any]:
+    policy = _mapping(raw, "output_root_policy")
+    expected = _expected_output_root_policy(mode, child_root)
+    if dict(policy) != expected:
+        raise MultiEventInputError(
+            "driver output_root_policy differs from the canonical policy"
+        )
+    if mode == "openai_live" and child_root != CANONICAL_LIVE_OUT:
+        raise MultiEventInputError(
+            "openai_live analysis requires the canonical results_multi_event root"
+        )
+    return dict(expected)
+
+
+def _validated_source_snapshot(
+    raw: Any,
+    *,
+    mode: str,
+    protocol_path: Path,
+    expected_identities: Optional[Iterable[Any]] = None,
+) -> Mapping[str, Any]:
+    snapshot = _mapping(raw, "source_snapshot")
+    if mode != "openai_live":
+        expected = {
+            "schema_version": "multi_event_source_snapshot_v1",
+            "execution_mode": mode,
+            "live_snapshot_enforced": False,
+            "live_eligibility_claim": False,
+            "policy": "explicit_non_live_no_preregistered_source_snapshot_claim",
+            "head_commit": None,
+            "protocol_last_change_commit": None,
+            "scientific_component_fingerprint": None,
+        }
+        if dict(snapshot) != expected:
+            raise MultiEventInputError(
+                "non-live source_snapshot differs from the explicit null policy"
+            )
+        return expected
+
+    required = {
+        "schema_version",
+        "execution_mode",
+        "live_snapshot_enforced",
+        "live_eligibility_claim",
+        "policy",
+        "repository_clean",
+        "head_commit",
+        "protocol_last_change_commit",
+        "protocol_repo_relative_path",
+        "scientific_component_fingerprint",
+    }
+    if set(snapshot) != required:
+        raise MultiEventInputError(
+            "live source_snapshot does not have the exact v1 fields"
+        )
+    head = _text(snapshot.get("head_commit"), "source_snapshot.head_commit")
+    protocol_commit = _text(
+        snapshot.get("protocol_last_change_commit"),
+        "source_snapshot.protocol_last_change_commit",
+    )
+    fingerprint = _sha256(
+        snapshot.get("scientific_component_fingerprint"),
+        "source_snapshot.scientific_component_fingerprint",
+    )
+    if (
+        snapshot.get("schema_version") != "multi_event_source_snapshot_v1"
+        or snapshot.get("execution_mode") != "openai_live"
+        or snapshot.get("live_snapshot_enforced") is not True
+        or snapshot.get("live_eligibility_claim") is not True
+        or snapshot.get("repository_clean") is not True
+        or snapshot.get("policy")
+        != "clean_head_equals_canonical_protocol_last_change_commit"
+        or head != protocol_commit
+        or protocol_path.resolve(strict=True) != PROTOCOL_PATH.resolve(strict=True)
+        or snapshot.get("protocol_repo_relative_path")
+        != "experiments/multi_event_protocol.json"
+    ):
+        raise MultiEventInputError(
+            "live source_snapshot is not the clean protocol-owning snapshot"
+        )
+    if len(head) != 40 or any(char not in _HASH_HEX for char in head):
+        raise MultiEventInputError("live source_snapshot commit is not a Git SHA")
+    if expected_identities is not None and any(
+        identity.git_commit != head
+        or identity.scientific_component_fingerprint != fingerprint
+        for identity in expected_identities
+    ):
+        raise MultiEventInputError(
+            "live source_snapshot differs from reconstructed child source identity"
+        )
+    return dict(snapshot)
+
+
 def _canonical_child_command(
     event: EventInput,
     *,
@@ -1032,6 +1334,25 @@ def _driver_plan_cells(
     """Independently reconstruct every frozen plan slot and child identity."""
 
     expected_protocol_hash = protocol_sha256(protocol_path)
+    if set(plan) != {
+        "schema_version",
+        "protocol_id",
+        "protocol_sha256",
+        "pre_run_plan",
+        "dry_run",
+        "execution_plan",
+        "provider_request",
+        "output_root_policy",
+        "source_snapshot",
+        "health_and_retry",
+        "hash_types",
+        "reference_transform",
+        "inputs",
+        "planned_complete_seed_pairs",
+        "honest_n_complete_seed_pairs",
+        "jobs",
+    }:
+        raise MultiEventInputError("driver plan has unexpected top-level fields")
     if (
         plan.get("schema_version") != "multi_event_plan_v1"
         or plan.get("protocol_id") != protocol["protocol_id"]
@@ -1053,6 +1374,19 @@ def _driver_plan_cells(
     provider_request = _mapping(
         plan.get("provider_request"), "driver plan provider_request"
     )
+    if set(provider_request) != {
+        "provider",
+        "model",
+        "temperature",
+        "cache_enabled",
+        "provider_sdk_max_retries",
+        "workers",
+        "network_access",
+        "parent_network_scope",
+    }:
+        raise MultiEventInputError(
+            "driver plan provider_request has unexpected fields"
+        )
     expected_model = (
         protocol["effective_config_freeze"]["model_request"]["model"]
         if provider == "openai"
@@ -1074,20 +1408,62 @@ def _driver_plan_cells(
         != protocol["acceptance_and_execution"]["temperature"]
         or provider_request.get("cache_enabled")
         is not protocol["acceptance_and_execution"]["cache_enabled"]
+        or provider_request.get("provider_sdk_max_retries")
+        != protocol["effective_config_freeze"]["model_request"][
+            "provider_sdk_max_retries"
+        ]
+        or provider_request.get("provider_sdk_max_retries") != 0
         or provider_request.get("network_access")
         is not (execution_plan["execution_mode"] == "openai_live")
+        or provider_request.get("parent_network_scope")
+        != (
+            "connectivity_probe_only_children_own_provider_calls"
+            if execution_plan["execution_mode"] == "openai_live"
+            else "none"
+        )
     ):
         raise MultiEventInputError("driver plan provider request mismatch")
+    _validated_output_root_policy(
+        plan.get("output_root_policy"),
+        mode=execution_plan["execution_mode"],
+        child_root=child_root,
+    )
     health_retry = _mapping(
         plan.get("health_and_retry"), "driver plan health_and_retry"
     )
-    if (
-        health_retry.get("max_bad_frac")
-        != protocol["acceptance_and_execution"]["health_bad_frac_max"]
-        or health_retry.get("max_child_attempts")
-        != protocol["acceptance_and_execution"]["max_child_attempts"]
-    ):
+    expected_health_retry = {
+        "max_bad_frac": protocol["acceptance_and_execution"][
+            "health_bad_frac_max"
+        ],
+        "max_child_attempts": protocol["acceptance_and_execution"][
+            "max_child_attempts"
+        ],
+        "technical_retry_identity": (
+            "technical_retry_idx; excluded from repeat_idx/slot"
+        ),
+        "reported_model_gate": (
+            "openai_live requires non-truncated exactly-one alias and "
+            "invalid_reported_model_alias_count=0 per child; mock=[] and zero"
+        ),
+        "coordination": (
+            "one output-root advisory lock inherited by launched children; "
+            "ACTIVE attempts never advance"
+        ),
+    }
+    if dict(health_retry) != expected_health_retry:
         raise MultiEventInputError("driver plan health/retry policy mismatch")
+    expected_hash_types = [
+        "scientific_config_hash",
+        "model_request_config_hash",
+        "execution_config_hash",
+        "full_effective_config_hash",
+        "scientific_input_identity",
+        "scenario_definition_hash",
+        "multi_event_slot_v1.slot_id",
+        "scientific_runtime_environment_identity",
+    ]
+    if plan.get("hash_types") != expected_hash_types:
+        raise MultiEventInputError("driver plan hash-type declaration mismatch")
     if plan.get("reference_transform") != protocol["reference_phase_transform"]:
         raise MultiEventInputError("driver plan reference transform mismatch")
     expected_inputs = [
@@ -1118,24 +1494,45 @@ def _driver_plan_cells(
     max_attempts = int(
         protocol["acceptance_and_execution"]["max_child_attempts"]
     )
-    expected_order = [
-        (event_id, arm, seed, repeat_idx)
-        for event_id in events
-        for arm in ARMS
-        for seed in execution_plan["seeds"]
-        for repeat_idx in execution_plan["repeat_indices"]
-    ]
+    expected_order = _counterbalanced_cells(protocol, execution_plan)
     raw_jobs = _list(plan.get("jobs"), "driver plan jobs")
     if len(raw_jobs) != len(expected_order):
         raise MultiEventInputError(
             "driver plan jobs do not equal the execution grid"
         )
-    for raw, expected_cell in zip(raw_jobs, expected_order):
+    for launch_ordinal, (raw, expected_cell) in enumerate(
+        zip(raw_jobs, expected_order), start=1
+    ):
         job = _mapping(raw, "driver plan jobs[]")
-        cell = _selection_slot(job, "driver plan jobs[]")
-        if cell != expected_cell or cell in jobs:
+        if set(job) != {
+            "launch_ordinal",
+            "event_id",
+            "arm",
+            "seed",
+            "repeat_idx",
+            "slot",
+            "basename",
+            "attempt_series_id",
+            "allowed_attempt_run_ids",
+            "child_command",
+            "scientific_config_hash",
+            "model_request_config_hash",
+            "scientific_input_identity",
+            "scenario_definition_hash",
+            "scientific_runtime_environment",
+            "scientific_runtime_environment_identity",
+        }:
             raise MultiEventInputError(
-                "driver plan job order/cell differs from the frozen grid"
+                "driver plan job does not have the exact frozen fields"
+            )
+        cell = _selection_slot(job, "driver plan jobs[]")
+        if (
+            cell != expected_cell
+            or cell in jobs
+            or job.get("launch_ordinal") != launch_ordinal
+        ):
+            raise MultiEventInputError(
+                "driver plan launch ordinal/order differs from the counterbalanced grid"
             )
         event_id, arm, seed, repeat_idx = cell
         event = events[event_id]
@@ -1180,11 +1577,22 @@ def _driver_plan_cells(
             "model_request_config_hash",
             "scientific_input_identity",
             "scenario_definition_hash",
+            "scientific_runtime_environment_identity",
         ):
             if job.get(field) != getattr(expected, field):
                 raise MultiEventInputError(
                     f"driver plan job expected identity mismatch: {field}"
                 )
+        expected_runtime = expected.scientific_runtime_environment
+        listed_runtime = _validated_runtime_environment(
+            job.get("scientific_runtime_environment"),
+            job.get("scientific_runtime_environment_identity"),
+            "driver plan jobs[].scientific_runtime_environment",
+        )
+        if listed_runtime != expected_runtime:
+            raise MultiEventInputError(
+                "driver plan job runtime environment differs from reconstructed identity"
+            )
         jobs[cell] = job
         expected_identities[cell] = expected
 
@@ -1202,6 +1610,12 @@ def _driver_plan_cells(
         raise MultiEventInputError(
             "attempt run IDs are not unique across plan cells"
         )
+    _validated_source_snapshot(
+        plan.get("source_snapshot"),
+        mode=execution_plan["execution_mode"],
+        protocol_path=protocol_path,
+        expected_identities=expected_identities.values(),
+    )
     return jobs, planned, expected_identities
 
 
@@ -1424,6 +1838,105 @@ def _validate_driver_attempt_ledger(
                 )
 
 
+def _validate_private_attempt_ledger(
+    public_records: Sequence[Mapping[str, Any]],
+    private_records: Sequence[Mapping[str, Any]],
+) -> None:
+    """Require each private record to be an exact public-record projection."""
+
+    public_keys = {
+        "schema_version",
+        "event_id",
+        "arm",
+        "seed",
+        "repeat_idx",
+        "slot_id",
+        "source",
+        "technical_retry_idx",
+        "run_id",
+        "status",
+        "reason_code",
+    }
+    cursor = 0
+    for raw in private_records:
+        record = _mapping(raw, "private driver attempt ledger[]")
+        if set(record) != public_keys | {"private"} or not isinstance(
+            record.get("private"), Mapping
+        ):
+            raise MultiEventInputError(
+                "private attempt record must be exact public identity plus private mapping"
+            )
+        projection = {key: record[key] for key in public_keys}
+        while cursor < len(public_records) and public_records[cursor] != projection:
+            cursor += 1
+        if cursor >= len(public_records):
+            raise MultiEventInputError(
+                "private attempt ledger is not an ordered subset of the public ledger"
+            )
+        cursor += 1
+
+
+def _validate_attempt_lock_artifact(child_root: Path) -> None:
+    lock_path = child_root / ATTEMPT_COORDINATION_LOCK_NAME
+    try:
+        info = lock_path.lstat()
+    except OSError as error:
+        raise MultiEventInputError(
+            "attempt coordination lock artifact is missing"
+        ) from error
+    if (
+        lock_path.is_symlink()
+        or not stat.S_ISREG(info.st_mode)
+        or stat.S_IMODE(info.st_mode) != 0o600
+    ):
+        raise MultiEventInputError(
+            "attempt coordination lock must be regular, non-symlink, mode 0600"
+        )
+
+
+def _validate_live_foreign_attempt_cap(
+    *,
+    child_root: Path,
+    jobs: Mapping[tuple[str, str, int, int], Mapping[str, Any]],
+    execution_mode: str,
+) -> None:
+    """Audit same-slot materializations without using them as input selectors."""
+
+    if execution_mode != "openai_live":
+        return
+    runs_root = child_root / "runs"
+    try:
+        info = runs_root.lstat()
+    except OSError as error:
+        raise MultiEventInputError("canonical live runs root is missing") from error
+    if runs_root.is_symlink() or not stat.S_ISDIR(info.st_mode):
+        raise MultiEventInputError(
+            "canonical live runs root must be a non-symlink directory"
+        )
+    try:
+        materialized_names = [entry.name for entry in os.scandir(runs_root)]
+    except OSError as error:
+        raise MultiEventInputError(
+            "canonical live runs root cannot be audited"
+        ) from error
+    for job in jobs.values():
+        slot_id = job["slot"]["slot_id"]
+        prefix = f"me-{slot_id}-"
+        pattern = re.compile(
+            rf"^{re.escape(prefix)}[0-9a-f]{{64}}-ta[1-9][0-9]*$"
+        )
+        allowed = set(job["allowed_attempt_run_ids"])
+        foreign = sorted(
+            name
+            for name in materialized_names
+            if pattern.fullmatch(name) and name not in allowed
+        )
+        if foreign:
+            raise MultiEventInputError(
+                "canonical live root contains a foreign-series same-slot attempt"
+            )
+
+
 def prepare_driver_selection(
     driver_manifest_path: Path,
     *,
@@ -1434,7 +1947,11 @@ def prepare_driver_selection(
 ) -> PreparedSelection:
     """Derive analysis input only from one terminal registered driver parent."""
 
-    child_root = Path(child_root).resolve(strict=True)
+    lexical_child_root = Path(
+        os.path.abspath(os.path.expanduser(str(child_root)))
+    )
+    child_root_was_symlink = lexical_child_root.is_symlink()
+    child_root = lexical_child_root.resolve(strict=True)
     protocol_path = Path(protocol_path).resolve(strict=True)
     reference_root = Path(reference_root).resolve(strict=True)
     supplied = Path(driver_manifest_path)
@@ -1474,6 +1991,7 @@ def prepare_driver_selection(
     parent_identity = _mapping(
         manifest.get("multi_event_driver"), "multi_event_driver"
     )
+    parent_mode = parent_identity.get("execution_mode")
     if (
         set(parent_identity)
         != {
@@ -1483,14 +2001,116 @@ def prepare_driver_selection(
             "protocol_sha256",
             "execution_mode",
             "protocol_adherence",
+            "network_access",
+            "network_scope",
+            "output_root_policy",
+            "source_snapshot",
+            "attempt_coordination",
         }
         or parent_identity.get("schema_version") != "1.0"
         or parent_identity.get("attempt_series_schema_version")
         != ATTEMPT_SERIES_SCHEMA_VERSION
         or parent_identity.get("protocol_id") != protocol["protocol_id"]
         or parent_identity.get("protocol_sha256") != expected_protocol_hash
+        or parent_mode not in {"mock", "openai_live"}
     ):
         raise MultiEventInputError("driver parent protocol identity mismatch")
+    live = parent_mode == "openai_live"
+    if live and (
+        lexical_child_root != CANONICAL_LIVE_OUT
+        or child_root_was_symlink
+        or child_root != CANONICAL_LIVE_OUT
+    ):
+        raise MultiEventInputError(
+            "openai_live parent must use the lexical non-symlink canonical root"
+        )
+    output_root_policy = _validated_output_root_policy(
+        parent_identity.get("output_root_policy"),
+        mode=str(parent_mode),
+        child_root=child_root,
+    )
+    source_snapshot = _validated_source_snapshot(
+        parent_identity.get("source_snapshot"),
+        mode=str(parent_mode),
+        protocol_path=protocol_path,
+    )
+    expected_coordination = {
+        "schema_version": "multi_event_attempt_lock_v1",
+        "path": ATTEMPT_COORDINATION_LOCK_NAME,
+        "scope": "entire_output_root_all_attempt_series",
+        "child_descriptor_inheritance": True,
+        "stale_recovery": "kernel_release_after_last_inherited_fd_closes",
+        "live_slot_cap_guard": (
+            "all preserved canonical me-{slot_id}-*-ta* materializations; "
+            "foreign series fail closed"
+        ),
+    }
+    if (
+        parent_identity.get("network_access") is not live
+        or parent_identity.get("network_scope")
+        != (
+            "connectivity_probe_only_children_own_provider_calls"
+            if live
+            else "none"
+        )
+        or parent_identity.get("attempt_coordination")
+        != expected_coordination
+    ):
+        raise MultiEventInputError(
+            "driver parent network/attempt coordination identity mismatch"
+        )
+    _validate_attempt_lock_artifact(child_root)
+    parent_llm = _mapping(manifest.get("llm"), "driver parent llm")
+    parent_runtime = _mapping(
+        parent_llm.get("runtime"), "driver parent llm.runtime"
+    )
+    expected_network_scope = (
+        "connectivity_probe_only; LLM provider calls occur in managed children"
+        if live
+        else "none; mock children perform no network access"
+    )
+    if (
+        parent_llm.get("mode")
+        != ("connectivity_probe_only" if live else "offline_driver")
+        or parent_llm.get("resolved_provider") != "none"
+        or parent_llm.get("resolved_model") != "none"
+        or parent_llm.get("cache_enabled") is not False
+        or set(parent_runtime)
+        != {
+            "network_access",
+            "network_scope",
+            "provider_calls_owned_by",
+            "provider_calls",
+            "provider_calls_succeeded",
+            "provider_calls_failed",
+            "response_sources",
+        }
+        or parent_runtime.get("network_access") is not live
+        or parent_runtime.get("network_scope") != expected_network_scope
+        or parent_runtime.get("provider_calls_owned_by") != "managed_children"
+        or any(
+            parent_runtime.get(field) != 0
+            for field in (
+                "provider_calls",
+                "provider_calls_succeeded",
+                "provider_calls_failed",
+            )
+        )
+        or parent_runtime.get("response_sources")
+        != {"provider": 0, "cache": 0, "replay": 0}
+    ):
+        raise MultiEventInputError("driver parent LLM network metadata mismatch")
+    if live:
+        parent_git = _mapping(manifest.get("git"), "driver parent git")
+        if (
+            parent_git.get("commit") != source_snapshot["head_commit"]
+            or parent_git.get("dirty") is not False
+            or manifest.get("scientific_component_fingerprint")
+            != source_snapshot["scientific_component_fingerprint"]
+        ):
+            raise MultiEventInputError(
+                "driver parent source identity differs from source_snapshot"
+            )
     expected_inputs: dict[str, tuple[Path, str]] = {
         "protocol": (protocol_path, expected_protocol_hash),
         "catalog": (
@@ -1555,12 +2175,29 @@ def prepare_driver_selection(
     plan = _read_json(artifacts[DRIVER_PLAN_FILENAME], "driver plan")
     selection = _read_json(selection_path, "driver selection")
     summary = _read_json(artifacts[DRIVER_SUMMARY_FILENAME], "driver summary")
+    if (
+        plan.get("output_root_policy") != output_root_policy
+        or plan.get("source_snapshot") != source_snapshot
+    ):
+        raise MultiEventInputError(
+            "driver parent and plan root/source policies disagree"
+        )
     technical_ledger = _mapping(
         manifest.get("technical_attempt_ledger"),
         "technical_attempt_ledger",
     )
     if (
-        technical_ledger.get("schema_version") != "1.0"
+        set(technical_ledger)
+        != {
+            "schema_version",
+            "durability",
+            "public_path",
+            "private_path",
+            "max_child_attempts_per_series",
+            "public_records",
+            "private_records",
+        }
+        or technical_ledger.get("schema_version") != "1.0"
         or technical_ledger.get("durability")
         != "append_flush_fsync_per_record"
         or technical_ledger.get("public_path")
@@ -1569,6 +2206,12 @@ def prepare_driver_selection(
         != DRIVER_PRIVATE_ATTEMPT_LEDGER_FILENAME
         or technical_ledger.get("max_child_attempts_per_series")
         != protocol["acceptance_and_execution"]["max_child_attempts"]
+        or isinstance(technical_ledger.get("public_records"), bool)
+        or not isinstance(technical_ledger.get("public_records"), int)
+        or technical_ledger.get("public_records") < 0
+        or isinstance(technical_ledger.get("private_records"), bool)
+        or not isinstance(technical_ledger.get("private_records"), int)
+        or technical_ledger.get("private_records") < 0
     ):
         raise MultiEventInputError(
             "driver parent technical-attempt ledger contract mismatch"
@@ -1603,6 +2246,11 @@ def prepare_driver_selection(
         events=prepared.events,
         child_root=child_root,
     )
+    _validate_live_foreign_attempt_cap(
+        child_root=child_root,
+        jobs=jobs,
+        execution_mode=execution_plan["execution_mode"],
+    )
     first_expected = expected_identities[next(iter(jobs))]
     expected_study_identity = {
         "model_request_config_hash": first_expected.model_request_config_hash,
@@ -1611,6 +2259,13 @@ def prepare_driver_selection(
         "resolved_provider": first_expected.resolved_provider,
         "resolved_model": first_expected.resolved_model,
         "endpoint_identity": first_expected.endpoint_identity,
+        "scientific_runtime_environment": (
+            first_expected.scientific_runtime_environment
+        ),
+        "scientific_runtime_environment_identity": (
+            first_expected.scientific_runtime_environment_identity
+        ),
+        "invalid_reported_model_alias_count": 0,
     }
     study_identity = _mapping(
         selection.get("study_model_identity"), "study_model_identity"
@@ -1625,6 +2280,22 @@ def prepare_driver_selection(
     ledger = _read_jsonl_objects(
         artifacts[DRIVER_ATTEMPT_LEDGER_FILENAME], "driver attempt ledger"
     )
+    private_ledger = _read_jsonl_objects(
+        artifacts[DRIVER_PRIVATE_ATTEMPT_LEDGER_FILENAME],
+        "private driver attempt ledger",
+    )
+    _read_jsonl_objects(
+        artifacts[DRIVER_PRIVATE_FAILURES_FILENAME],
+        "private driver failures",
+    )
+    if (
+        technical_ledger.get("public_records") != len(ledger)
+        or technical_ledger.get("private_records") != len(private_ledger)
+    ):
+        raise MultiEventInputError(
+            "technical-attempt ledger declared counts disagree with files"
+        )
+    _validate_private_attempt_ledger(ledger, private_ledger)
     _validate_driver_attempt_ledger(ledger, jobs=jobs, selection=selection)
 
     accepted_count = len(selection["children"])
@@ -1673,6 +2344,7 @@ def prepare_driver_selection(
         != complete_pairs_by_event
         or summary.get("incomplete") is not bool(failed_count)
         or summary.get("reported_model_aliases") != reported_aliases
+        or summary.get("invalid_reported_model_alias_count") != 0
         or summary.get("underlying_model_identity_verified") is not False
         or summary.get("model_specific_inference_allowed") is not False
         or summary.get("reported_alias_homogeneous_pooling_allowed")
@@ -1722,6 +2394,8 @@ def prepare_driver_selection(
         input_paths=anchored_inputs,
         driver_manifest_path=manifest_path,
         driver_run_id=str(manifest["run_id"]),
+        output_root_policy=output_root_policy,
+        source_snapshot=source_snapshot,
     )
 
 
@@ -1740,6 +2414,15 @@ def _child_actual_identity(child: Any) -> Mapping[str, Any]:
         "resolved_provider": child.resolved_provider,
         "resolved_model": child.resolved_model,
         "endpoint_identity": child.endpoint_identity,
+        "invalid_reported_model_alias_count": (
+            child.invalid_reported_model_alias_count
+        ),
+        "scientific_runtime_environment": (
+            child.scientific_runtime_environment
+        ),
+        "scientific_runtime_environment_identity": (
+            child.scientific_runtime_environment_identity
+        ),
     }
 
 
@@ -1784,7 +2467,12 @@ def _config_mismatches(
         elif actual != wanted:
             mismatches.append(f"config_mismatch:{field}")
     model = protocol["effective_config_freeze"]["model_request"]
-    strict_model_fields = ["temperature", "max_tokens", "cache_enabled"]
+    strict_model_fields = [
+        "temperature",
+        "max_tokens",
+        "cache_enabled",
+        "provider_sdk_max_retries",
+    ]
     if execution_mode == "openai_live":
         strict_model_fields.extend(
             [
@@ -1849,9 +2537,18 @@ def _reported_model_aliases_from_manifest(
         raise MultiEventInputError("application_provider_attempts evidence is missing")
     if attempts.get("reported_models_truncated") is not False:
         raise MultiEventInputError("application_provider_attempts evidence is truncated")
+    invalid_count = attempts.get("invalid_reported_model_alias_count")
+    if (
+        isinstance(invalid_count, bool)
+        or not isinstance(invalid_count, int)
+        or invalid_count != 0
+    ):
+        raise MultiEventInputError(
+            "application_provider_attempts contains invalid alias evidence"
+        )
     reported = attempts.get("reported_models")
     if not isinstance(reported, list) or any(
-        not isinstance(model, str) or not model for model in reported
+        safe_reported_model(model) != model for model in reported
     ):
         raise MultiEventInputError("application_provider_attempts.reported_models is invalid")
     aliases = sorted(set(reported))
@@ -1865,6 +2562,7 @@ def validate_reported_model_alias_binding(
     *,
     selected_aliases: Sequence[str],
     result_aliases: Sequence[str],
+    result_invalid_alias_count: Any,
     execution_mode: str,
 ) -> list[str]:
     """Bind manifest attempt evidence, selection identity, and result projection."""
@@ -1874,7 +2572,13 @@ def validate_reported_model_alias_binding(
     )
     selected = list(selected_aliases)
     result = list(result_aliases)
-    if manifest_aliases != selected or result != selected:
+    if (
+        manifest_aliases != selected
+        or result != selected
+        or isinstance(result_invalid_alias_count, bool)
+        or not isinstance(result_invalid_alias_count, int)
+        or result_invalid_alias_count != 0
+    ):
         raise MultiEventInputError(
             "reported model aliases disagree across attempts, selection, and result"
         )
@@ -1891,6 +2595,15 @@ def model_identity_interpretation(
     )
     return {
         "reported_model_aliases": aliases,
+        "invalid_reported_model_alias_count": study_model_identity.get(
+            "invalid_reported_model_alias_count"
+        ),
+        "scientific_runtime_environment": study_model_identity.get(
+            "scientific_runtime_environment"
+        ),
+        "scientific_runtime_environment_identity": study_model_identity.get(
+            "scientific_runtime_environment_identity"
+        ),
         "underlying_model_identity_verified": False,
         "model_specific_inference_allowed": False,
         "reported_alias_homogeneous_pooling_allowed": homogeneous_reported_alias,
@@ -1904,6 +2617,11 @@ def model_identity_interpretation(
             "weights; homogeneous live aliases permit only alias-stratified endpoint "
             "pooling, while mixed, absent, or mock aliases prohibit that pooling"
         ),
+        "provider_retry_semantics": {
+            "provider_sdk_max_retries": 0,
+            "observable_attempt_scope": "visible_adapter_loop_attempts_only",
+            "unobservable_scope": "transport_proxy_and_server_internal_behavior",
+        },
     }
 
 
@@ -1975,6 +2693,200 @@ def _rejection(selection: ChildSelection, reasons: Iterable[str]) -> Mapping[str
     }
 
 
+def _validated_application_attempt_evidence(
+    manifest: Mapping[str, Any], events_path: Path, *, execution_mode: str
+) -> Mapping[str, Any]:
+    completion = _mapping(manifest.get("completion"), "completion")
+    attempts = _mapping(
+        completion.get("application_provider_attempts"),
+        "completion.application_provider_attempts",
+    )
+    expected_keys = {
+        "unit",
+        "attempted",
+        "responses_received",
+        "parse_failed_responses",
+        "provider_exceptions",
+        "retries_scheduled",
+        "logical_requests_with_retry",
+        "exhausted_logical_requests",
+        "reported_models",
+        "reported_models_truncated",
+        "invalid_reported_model_alias_count",
+        "coverage",
+    }
+    count_fields = {
+        "attempted",
+        "responses_received",
+        "parse_failed_responses",
+        "provider_exceptions",
+        "retries_scheduled",
+        "logical_requests_with_retry",
+        "exhausted_logical_requests",
+        "invalid_reported_model_alias_count",
+    }
+    aliases = _validated_reported_aliases(
+        attempts.get("reported_models"),
+        "completion.application_provider_attempts.reported_models",
+    )
+    if (
+        set(attempts) != expected_keys
+        or attempts.get("unit") != "visible_adapter_loop_attempts"
+        or attempts.get("coverage")
+        != (
+            "OpenAI/Anthropic application retry loops only; excludes SDK, "
+            "transport, proxy, and server-internal retries"
+        )
+        or attempts.get("reported_models_truncated") is not False
+        or any(
+            isinstance(attempts.get(field), bool)
+            or not isinstance(attempts.get(field), int)
+            or attempts.get(field) < 0
+            for field in count_fields
+        )
+        or attempts.get("invalid_reported_model_alias_count") != 0
+        or (execution_mode == "mock" and aliases)
+        or (execution_mode == "openai_live" and len(aliases) != 1)
+    ):
+        raise MultiEventInputError(
+            "application provider-attempt evidence has an invalid exact schema"
+        )
+
+    observed = {field: 0 for field in count_fields}
+    observed_aliases: set[str] = set()
+    for record in _read_jsonl_objects(events_path, "child public events"):
+        if record.get("type") != "LLMProviderAttemptObserved":
+            continue
+        data = _mapping(record.get("data"), "provider-attempt event data")
+        observed["attempted"] += 1
+        outcome = data.get("outcome")
+        if outcome in {"response_parseable", "response_parse_failed"}:
+            observed["responses_received"] += 1
+        if outcome == "response_parse_failed":
+            observed["parse_failed_responses"] += 1
+        elif outcome == "provider_exception":
+            observed["provider_exceptions"] += 1
+        elif outcome != "response_parseable":
+            raise MultiEventInputError(
+                "provider-attempt event has an unsupported outcome"
+            )
+        will_retry = data.get("will_retry")
+        if not isinstance(will_retry, bool):
+            raise MultiEventInputError(
+                "provider-attempt event will_retry must be boolean"
+            )
+        if will_retry:
+            observed["retries_scheduled"] += 1
+        attempt_index = _integer(
+            data.get("attempt_index"), "provider-attempt event attempt_index"
+        )
+        if attempt_index == 2:
+            observed["logical_requests_with_retry"] += 1
+        if not will_retry and outcome in {
+            "response_parse_failed",
+            "provider_exception",
+        }:
+            observed["exhausted_logical_requests"] += 1
+        alias = data.get("reported_model")
+        invalid_alias = data.get("reported_model_alias_invalid")
+        if not isinstance(invalid_alias, bool):
+            raise MultiEventInputError(
+                "provider-attempt invalid-alias flag must be boolean"
+            )
+        if invalid_alias or (alias is not None and safe_reported_model(alias) is None):
+            observed["invalid_reported_model_alias_count"] += 1
+        if alias is not None:
+            if safe_reported_model(alias) != alias:
+                if not invalid_alias:
+                    raise MultiEventInputError(
+                        "unsafe provider-attempt alias lacks invalid evidence"
+                    )
+            else:
+                observed_aliases.add(alias)
+    if any(attempts[field] != observed[field] for field in count_fields) or aliases != sorted(
+        observed_aliases
+    ):
+        raise MultiEventInputError(
+            "application provider-attempt completion disagrees with public events"
+        )
+    return dict(attempts)
+
+
+def _validated_multi_event_health(
+    result: Mapping[str, Any], manifest: Mapping[str, Any]
+) -> float:
+    health = _mapping(result.get("health"), "health")
+    if set(health) != {
+        "bad_orders",
+        "total_llm_orders",
+        "bad_frac",
+        "schema_version",
+        "decision_response_schema",
+        "failure_union",
+        "failure_union_counts",
+    }:
+        raise MultiEventInputError("health does not have the exact multi-event schema")
+    bad_orders = _integer(health.get("bad_orders"), "health.bad_orders")
+    total_orders = _integer(
+        health.get("total_llm_orders"), "health.total_llm_orders"
+    )
+    union = _mapping(health.get("failure_union_counts"), "health.failure_union_counts")
+    count_keys = {
+        "strict_schema_invalid",
+        "legacy_parse_invalid",
+        "provider_exception_exhausted",
+        "provider_parse_exhausted",
+        "valid_decisions",
+    }
+    if (
+        health.get("schema_version") != "multi_event_health_v1"
+        or health.get("decision_response_schema")
+        != MULTI_EVENT_DECISION_RESPONSE_SCHEMA
+        or health.get("failure_union") != "exact_terminal_decision_status"
+        or set(union) != count_keys
+        or any(
+            isinstance(value, bool)
+            or not isinstance(value, int)
+            or value < 0
+            for value in union.values()
+        )
+        or total_orders <= 0
+        or bad_orders < 0
+        or bad_orders > total_orders
+        or union.get("legacy_parse_invalid") != 0
+        or sum(union.values()) != total_orders
+        or sum(union[key] for key in count_keys - {"valid_decisions"})
+        != bad_orders
+    ):
+        raise MultiEventInputError("health terminal-status union is inconsistent")
+    completion = _mapping(manifest.get("completion"), "completion")
+    decisions = _mapping(
+        completion.get("agent_decisions"), "completion.agent_decisions"
+    )
+    parsing = _mapping(completion.get("parsing"), "completion.parsing")
+    attempts = _mapping(
+        completion.get("application_provider_attempts"),
+        "completion.application_provider_attempts",
+    )
+    if (
+        decisions.get("completed") != total_orders
+        or parsing.get("failed") != bad_orders
+        or union["provider_exception_exhausted"]
+        + union["provider_parse_exhausted"]
+        != attempts.get("exhausted_logical_requests")
+    ):
+        raise MultiEventInputError(
+            "health terminal counts do not close against completion"
+        )
+    bad_frac = _finite(health.get("bad_frac"), "health.bad_frac")
+    raw_bad_frac = bad_orders / total_orders
+    if bad_frac != round(raw_bad_frac, 4):
+        raise MultiEventInputError(
+            "health.bad_frac does not match the exact unrounded counts"
+        )
+    return raw_bad_frac
+
+
 def validate_selected_children(
     prepared: PreparedSelection,
     protocol: Mapping[str, Any],
@@ -2016,8 +2928,15 @@ def validate_selected_children(
         except ResultReuseError as error:
             rejections.append(_rejection(selected, [error.reason_code]))
             continue
-        decision = validate_child_run_reuse(candidate, expected)
-        if not decision.reusable:
+        decision = assess_run_seed_reuse(
+            candidate_path=selected.manifest_path,
+            allowed_result_root=prepared.child_root,
+            child_command=canonical_command,
+            max_bad_frac=health_max,
+        )
+        if decision is None:
+            reasons.append("manifest_missing")
+        elif not decision.reusable:
             reasons.extend(decision.reason_codes)
         if child.reference_path_content_hash != event.reference_csv_sha256:
             reasons.append("frozen_reference_content_hash_mismatch")
@@ -2032,6 +2951,19 @@ def validate_selected_children(
         except MultiEventInputError:
             reasons.append("manifest_invalid")
             raw_manifest = {}
+        if prepared.execution_plan["execution_mode"] == "openai_live":
+            snapshot = prepared.source_snapshot
+            git = raw_manifest.get("git")
+            if (
+                not isinstance(snapshot, Mapping)
+                or not isinstance(git, Mapping)
+                or git.get("dirty") is not False
+                or child.git_dirty is not False
+                or child.git_commit != snapshot.get("head_commit")
+                or child.scientific_component_fingerprint
+                != snapshot.get("scientific_component_fingerprint")
+            ):
+                reasons.append("live_source_snapshot_mismatch")
         reasons.extend(
             _config_mismatches(
                 raw_manifest,
@@ -2073,12 +3005,20 @@ def validate_selected_children(
             reported_aliases = _list(
                 result.get("reported_model_aliases"), "reported_model_aliases"
             )
+            _validated_application_attempt_evidence(
+                raw_manifest,
+                selected.manifest_path.parent / "events.jsonl",
+                execution_mode=prepared.execution_plan["execution_mode"],
+            )
             validate_reported_model_alias_binding(
                 raw_manifest,
                 selected_aliases=selected.expected_identity[
                     "reported_model_aliases"
                 ],
                 result_aliases=reported_aliases,
+                result_invalid_alias_count=result.get(
+                    "invalid_reported_model_alias_count"
+                ),
                 execution_mode=prepared.execution_plan["execution_mode"],
             )
             condition = _mapping(result.get("condition"), "condition")
@@ -2090,29 +3030,9 @@ def validate_selected_children(
             reported_drop_depth = _finite(
                 metrics.get("drop_depth"), "metrics.drop_depth"
             )
-            health = _mapping(result.get("health"), "health")
-            bad_orders = health.get("bad_orders")
-            total_orders = health.get("total_llm_orders")
-            if (
-                isinstance(bad_orders, bool)
-                or not isinstance(bad_orders, int)
-                or isinstance(total_orders, bool)
-                or not isinstance(total_orders, int)
-                or bad_orders < 0
-                or total_orders <= 0
-                or bad_orders > total_orders
-            ):
-                raise MultiEventInputError("health counts are invalid")
-            bad_frac = _finite(health.get("bad_frac"), "health.bad_frac")
-            raw_bad_frac = bad_orders / total_orders
-            if (
-                bad_frac < 0
-                or bad_frac > 1
-                or bad_frac != round(raw_bad_frac, 4)
-            ):
-                raise MultiEventInputError(
-                    "health.bad_frac does not match exact health counts"
-                )
+            raw_bad_frac = _validated_multi_event_health(
+                result, raw_manifest
+            )
             raw_path = _list(result.get("norm_log_path"), "norm_log_path")
             norm_log_path = tuple(
                 _finite(value, "norm_log_path[]") for value in raw_path
@@ -2441,6 +3361,7 @@ def analyze_observations(
             "repeat_indices": list(design["repeat_indices"]),
             "planned_runs": int(design["planned_runs"]),
             "override_reason": None,
+            "launch_order_policy": dict(launch_order_policy()),
         }
     )
     seeds = list(effective_plan["seeds"])
@@ -2745,6 +3666,20 @@ def analyze_observations(
             "primary_realism_criterion": design["primary_realism_criterion"],
             "primary_social_estimand": design["primary_social_estimand"],
         },
+        "acquisition_order": {
+            "schema_version": "multi_event_acquisition_interpretation_v1",
+            "counterbalanced": True,
+            "launch_order_policy": dict(
+                effective_plan["launch_order_policy"]
+            ),
+            "interpretation": (
+                "adjacent arm pairs, rotated event temporal positions, and "
+                "balanced arm-first parity reduce acquisition-time confounding"
+            ),
+            "resume_semantics": (
+                "ineligible slots are filtered without reordering remaining jobs"
+            ),
+        },
         "honest_n": {
             "unit": "event_seed_complete_cases; seed_clusters for cross-event aggregate",
             "planned_event_seed_pairs": len(event_ids) * len(seeds),
@@ -3024,6 +3959,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "driver_run_id": prepared.driver_run_id,
         "driver_manifest_sha256": sha256_file(prepared.driver_manifest_path),
         "study_model_identity": dict(prepared.study_model_identity),
+        "output_root_policy": (
+            None
+            if prepared.output_root_policy is None
+            else dict(prepared.output_root_policy)
+        ),
+        "source_snapshot": (
+            None
+            if prepared.source_snapshot is None
+            else dict(prepared.source_snapshot)
+        ),
     }
     managed.manifest.write_atomic()
     with managed:
@@ -3062,6 +4007,16 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
                 prepared.driver_manifest_path
             )
             summary["study_model_identity"] = dict(prepared.study_model_identity)
+            summary["output_root_policy"] = (
+                None
+                if prepared.output_root_policy is None
+                else dict(prepared.output_root_policy)
+            )
+            summary["source_snapshot"] = (
+                None
+                if prepared.source_snapshot is None
+                else dict(prepared.source_snapshot)
+            )
             summary["model_identity_interpretation"] = (
                 model_identity_interpretation(prepared.study_model_identity)
             )
