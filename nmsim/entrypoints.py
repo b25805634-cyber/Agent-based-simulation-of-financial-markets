@@ -187,8 +187,8 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DELEGATED_MANAGED_DRIVER,
         (
             "driver bootstrap",
-            "frozen protocol and source-byte validation",
-            "managed immutable execution plan",
+            "allowlisted protocol-profile and source-byte validation",
+            "managed immutable stage-specific execution plan",
             "identity-gated experiments.run_seed attempts",
             "immutable selection and retry ledger",
         ),
@@ -200,7 +200,7 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
             "managed child runs",
         ),
         PROVIDER_INDIRECT, True,
-        "Dry-run constructs no Provider; real OpenAI-compatible children require --live and the exact frozen 144-slot protocol.",
+        "Dry-run constructs no Provider; real OpenAI-compatible children require --live and one exact allowlisted profile. The historical workers=1 and paired-workers2 canary/full profiles bind distinct canonical roots, source snapshots, launch policies, and attempt series and are never pooled.",
     ),
 
     # Derived research artifacts.  These do not run a market or call a Provider,

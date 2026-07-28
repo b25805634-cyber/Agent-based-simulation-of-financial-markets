@@ -7,6 +7,7 @@ identities.  It never discovers sibling inputs and never writes a result.
 """
 from __future__ import annotations
 
+from copy import deepcopy
 from dataclasses import dataclass
 import hashlib
 import json
@@ -28,6 +29,7 @@ from .validation import norm_log_path
 
 
 PROTOCOL_SCHEMA_VERSION = "multi_event_protocol_v1"
+PROTOCOL_SCHEMA_VERSION_V2 = "multi_event_protocol_v2"
 SLOT_SCHEMA_VERSION = "multi_event_slot_v1"
 ATTEMPT_SERIES_SCHEMA_VERSION = "multi_event_attempt_series_v1"
 TRANSFORM_ID = "event_phase_normalized_log_linear_25_v1"
@@ -35,6 +37,9 @@ TRANSFORM_N_ROUNDS = 24
 TRANSFORM_POINT_COUNT = 25
 FROZEN_PROTOCOL_SHA256 = (
     "f5ff63c16ca8393b8f801ce52c2ba66455c3c3aef384b38e654592fb4888987e"
+)
+FROZEN_PROTOCOL_SHA256_V2 = (
+    "245be765444b5f93b86d5d05c95e81c7eee13b127180739c88a966eca3371d4a"
 )
 
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
@@ -48,6 +53,66 @@ _SLOT_KEYS = frozenset(
         "seed",
         "repeat_idx",
         "slot_id",
+    }
+)
+_EXECUTION_ACCELERATION_KEYS = frozenset(
+    {
+        "schema_version",
+        "profile_id",
+        "treatment_workers",
+        "control_protocol_path",
+        "control_protocol_sha256",
+        "control_workers",
+        "control_parent_run_id",
+        "scheduler",
+        "max_in_flight_children",
+        "submission_unit",
+        "pair_barrier",
+        "within_pair_submission_order",
+        "within_pair_start_and_completion_order",
+        "between_pair_policy",
+        "canonical_live_output_root",
+        "nominal_request_concurrency",
+        "client_pool_connection_upper_bound",
+        "canary_pair_count",
+        "canary_slot_count",
+        "canary_max_child_attempts_per_slot",
+        "canary_selection",
+        "canary_resume_policy",
+        "canary_metric_definitions",
+        "full_stage_slot_count",
+        "full_stage_max_child_attempts_per_slot",
+        "full_stage_requires_explicit_approval",
+        "control_or_ablation",
+        "pooling_policy",
+        "evaluation_metrics",
+        "evaluation_policy",
+        "canary_promotion_gate",
+        "scientific_semantics",
+        "escalation_policy",
+    }
+)
+_CANARY_METRIC_DEFINITION_KEYS = frozenset(
+    {
+        "terminal_children",
+        "combined_logical_requests_per_second",
+        "provider_exception_attempt_fraction",
+        "non_exception_provider_attempt_latency_p95_ms",
+        "pooled_terminal_bad_fraction",
+        "accepted_slots_per_parent_wall_hour",
+        "missing_or_invalid_policy",
+    }
+)
+_CANARY_PROMOTION_GATE_KEYS = frozenset(
+    {
+        "decision_rule",
+        "minimum_terminal_children",
+        "minimum_combined_logical_requests_per_second",
+        "maximum_provider_exception_attempt_fraction",
+        "maximum_non_exception_provider_attempt_latency_p95_ms",
+        "maximum_pooled_terminal_bad_fraction",
+        "accepted_slots_per_parent_wall_hour",
+        "failure_action",
     }
 )
 
@@ -84,6 +149,26 @@ def _required_int(value: Any, field: str, *, minimum: int = 0) -> int:
     return value
 
 
+def _require_exact_keys(
+    value: Mapping[str, Any], expected: frozenset[str], field: str
+) -> None:
+    actual = frozenset(value)
+    if actual != expected:
+        missing = sorted(expected - actual)
+        unexpected = sorted(actual - expected)
+        raise MultiEventProtocolError(
+            f"{field} keys changed: missing={missing}, unexpected={unexpected}"
+        )
+
+
+def _required_nonempty_string(value: Any, field: str) -> str:
+    if not isinstance(value, str) or not value or value != value.strip():
+        raise MultiEventProtocolError(
+            f"{field} must be a non-empty trimmed string"
+        )
+    return value
+
+
 def _load_json_object(path: Path, *, field: str) -> dict[str, Any]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -92,6 +177,53 @@ def _load_json_object(path: Path, *, field: str) -> dict[str, Any]:
     if not isinstance(value, dict):
         raise MultiEventProtocolError(f"{field} must contain a JSON object")
     return value
+
+
+@dataclass(frozen=True)
+class ProtocolProfile:
+    """Execution-facing facts for one exact frozen protocol artifact."""
+
+    schema_version: str
+    protocol_id: str
+    protocol_sha256: str
+    canonical_protocol_relative_path: str
+    canonical_live_output_relative_path: str
+    workers: int
+    execution_acceleration: Mapping[str, Any] | None
+
+
+_PROTOCOL_PROFILE_REGISTRY = {
+    FROZEN_PROTOCOL_SHA256: ProtocolProfile(
+        schema_version=PROTOCOL_SCHEMA_VERSION,
+        protocol_id="multi_event_distribution_v1",
+        protocol_sha256=FROZEN_PROTOCOL_SHA256,
+        canonical_protocol_relative_path="experiments/multi_event_protocol.json",
+        canonical_live_output_relative_path="results_multi_event",
+        workers=1,
+        execution_acceleration=None,
+    ),
+    FROZEN_PROTOCOL_SHA256_V2: ProtocolProfile(
+        schema_version=PROTOCOL_SCHEMA_VERSION_V2,
+        protocol_id="multi_event_distribution_workers2_v1",
+        protocol_sha256=FROZEN_PROTOCOL_SHA256_V2,
+        canonical_protocol_relative_path=(
+            "experiments/multi_event_protocol_workers2.json"
+        ),
+        canonical_live_output_relative_path="results_multi_event_workers2",
+        workers=2,
+        execution_acceleration=None,
+    ),
+}
+_PROTOCOL_STATUS_REGISTRY = {
+    FROZEN_PROTOCOL_SHA256: (
+        "preregistered_before_live_multi_event_grid",
+        "preregistered_variance_components_pilot",
+    ),
+    FROZEN_PROTOCOL_SHA256_V2: (
+        "preregistered_before_live_workers2_acceleration",
+        "preregistered_execution_acceleration_pilot",
+    ),
+}
 
 
 @dataclass(frozen=True)
@@ -302,22 +434,285 @@ def transform_reference_episode(
     )
 
 
+def _validate_execution_acceleration(
+    protocol: Mapping[str, Any], profile: ProtocolProfile
+) -> Mapping[str, Any]:
+    acceleration = _required_mapping(
+        protocol.get("execution_acceleration"), "execution_acceleration"
+    )
+    _require_exact_keys(
+        acceleration, _EXECUTION_ACCELERATION_KEYS, "execution_acceleration"
+    )
+    exact_values = {
+        "schema_version": "multi_event_execution_acceleration_v1",
+        "profile_id": "paired_workers2_v1",
+        "treatment_workers": profile.workers,
+        "control_protocol_path": (
+            _PROTOCOL_PROFILE_REGISTRY[
+                FROZEN_PROTOCOL_SHA256
+            ].canonical_protocol_relative_path
+        ),
+        "control_protocol_sha256": FROZEN_PROTOCOL_SHA256,
+        "control_workers": 1,
+        "control_parent_run_id": "wave1-t2-live-20260722-a1",
+        "scheduler": "paired_arm_barrier_v1",
+        "max_in_flight_children": profile.workers,
+        "submission_unit": (
+            "one adjacent event-seed-repeat social_on/social_off pair"
+        ),
+        "pair_barrier": True,
+        "within_pair_submission_order": (
+            "the frozen counterbalanced canonical plan order"
+        ),
+        "within_pair_start_and_completion_order": (
+            "OS and provider scheduled; no deterministic order claim"
+        ),
+        "between_pair_policy": (
+            "the next pair is not submitted until both jobs in the current "
+            "pair are terminal"
+        ),
+        "canonical_live_output_root": (
+            profile.canonical_live_output_relative_path
+        ),
+        "nominal_request_concurrency": 60,
+        "client_pool_connection_upper_bound": 80,
+        "canary_pair_count": 1,
+        "canary_slot_count": 2,
+        "canary_max_child_attempts_per_slot": 1,
+        "canary_selection": (
+            "the first adjacent two-arm pair in the frozen canonical launch "
+            "plan; no other slot is submitted by a canary parent"
+        ),
+        "canary_resume_policy": (
+            "a later full-stage parent uses the same canonical root and "
+            "protocol identities, reuses any accepted canary child, preserves "
+            "any rejected ta1, and resumes that slot at ta2 without resetting "
+            "the five-attempt cap"
+        ),
+        "full_stage_slot_count": 144,
+        "full_stage_max_child_attempts_per_slot": 5,
+        "full_stage_requires_explicit_approval": True,
+        "control_or_ablation": (
+            "compare only against the separately preserved workers=1 "
+            "protocol and parent; never treat either acquisition regime as a "
+            "child of the other"
+        ),
+        "pooling_policy": (
+            "workers=1 and workers=2 children are never pooled into one "
+            "primary or variance-component estimate"
+        ),
+        "evaluation_metrics": [
+            "accepted_slots_per_parent_wall_hour",
+            "terminal_child_wall_seconds",
+            "provider_attempt_exception_fraction",
+            "provider_attempt_latency_p95_ms",
+            "pooled_terminal_bad_fraction",
+        ],
+        "evaluation_policy": (
+            "report acquisition-regime differences honestly; do not change "
+            "N, K, the health threshold, the five-attempt cap, prompts, "
+            "parser, model request, or workers based on observed outcomes"
+        ),
+        "scientific_semantics": (
+            "the event grid and estimand are unchanged, but endpoint load, "
+            "acquisition timing, failure distribution, and real-provider "
+            "outputs may change; no real-provider determinism claim is made"
+        ),
+        "escalation_policy": (
+            "workers=3 or workers=4 require a separately reviewed and "
+            "versioned protocol; this protocol never escalates automatically"
+        ),
+    }
+    for field, expected in exact_values.items():
+        actual = acceleration.get(field)
+        if type(actual) is not type(expected) or actual != expected:
+            raise MultiEventProtocolError(
+                f"execution_acceleration field changed: {field}"
+            )
+
+    metric_definitions = _required_mapping(
+        acceleration.get("canary_metric_definitions"),
+        "execution_acceleration.canary_metric_definitions",
+    )
+    _require_exact_keys(
+        metric_definitions,
+        _CANARY_METRIC_DEFINITION_KEYS,
+        "execution_acceleration.canary_metric_definitions",
+    )
+    for field in sorted(_CANARY_METRIC_DEFINITION_KEYS):
+        _required_nonempty_string(
+            metric_definitions.get(field),
+            f"execution_acceleration.canary_metric_definitions.{field}",
+        )
+
+    gate = _required_mapping(
+        acceleration.get("canary_promotion_gate"),
+        "execution_acceleration.canary_promotion_gate",
+    )
+    _require_exact_keys(
+        gate,
+        _CANARY_PROMOTION_GATE_KEYS,
+        "execution_acceleration.canary_promotion_gate",
+    )
+    expected_gate = {
+        "decision_rule": (
+            "all numeric gates must pass; missing or non-finite evidence is a "
+            "failure"
+        ),
+        "minimum_terminal_children": acceleration["canary_slot_count"],
+        "minimum_combined_logical_requests_per_second": 0.6,
+        "maximum_provider_exception_attempt_fraction": 0.1,
+        "maximum_non_exception_provider_attempt_latency_p95_ms": 50000,
+        "maximum_pooled_terminal_bad_fraction": 0.25,
+        "accepted_slots_per_parent_wall_hour": (
+            "report_only_not_a_two-child_promotion_gate"
+        ),
+        "failure_action": (
+            "do not launch the full stage; preserve all canary artifacts and "
+            "keep workers=1 as the operational default"
+        ),
+    }
+    for field, expected in expected_gate.items():
+        value = gate.get(field)
+        if (
+            type(value) is not type(expected)
+            or (
+                isinstance(value, (int, float))
+                and not isinstance(value, bool)
+                and not math.isfinite(float(value))
+            )
+            or value != expected
+        ):
+            raise MultiEventProtocolError(
+                f"canary promotion gate changed: {field}"
+            )
+
+    acceptance = _required_mapping(
+        protocol.get("acceptance_and_execution"),
+        "acceptance_and_execution",
+    )
+    freeze = _required_mapping(
+        protocol.get("effective_config_freeze"), "effective_config_freeze"
+    )
+    frozen_execution = _required_mapping(
+        freeze.get("execution"), "execution freeze"
+    )
+    design = _required_mapping(protocol.get("design"), "design")
+    if (
+        _required_int(
+            acceleration.get("canary_slot_count"),
+            "execution_acceleration.canary_slot_count",
+            minimum=1,
+        )
+        != 2
+        * _required_int(
+            acceleration.get("canary_pair_count"),
+            "execution_acceleration.canary_pair_count",
+            minimum=1,
+        )
+        or acceleration.get("treatment_workers") != acceptance.get("workers")
+        or acceleration.get("treatment_workers")
+        != frozen_execution.get("workers")
+        or acceleration.get("full_stage_slot_count") != design.get("planned_runs")
+        or acceleration.get("full_stage_max_child_attempts_per_slot")
+        != acceptance.get("max_child_attempts")
+        or acceleration.get("canary_max_child_attempts_per_slot")
+        > acceleration.get("full_stage_max_child_attempts_per_slot")
+        or gate.get("minimum_terminal_children")
+        != acceleration.get("canary_slot_count")
+    ):
+        raise MultiEventProtocolError(
+            "execution_acceleration cross-field contract changed"
+        )
+    return acceleration
+
+
+def get_protocol_profile(
+    protocol: Mapping[str, Any], protocol_hash: str
+) -> ProtocolProfile:
+    """Return execution facts only for a matching frozen protocol profile."""
+
+    if not isinstance(protocol, Mapping):
+        raise MultiEventProtocolError("protocol must be an object")
+    profile = _PROTOCOL_PROFILE_REGISTRY.get(protocol_hash)
+    if profile is None:
+        raise MultiEventProtocolError(
+            "protocol bytes differ from the preregistered frozen artifacts"
+        )
+    if (
+        protocol.get("schema_version") != profile.schema_version
+        or protocol.get("protocol_id") != profile.protocol_id
+    ):
+        raise MultiEventProtocolError("protocol profile identity changed")
+
+    acceptance = _required_mapping(
+        protocol.get("acceptance_and_execution"),
+        "acceptance_and_execution",
+    )
+    freeze = _required_mapping(
+        protocol.get("effective_config_freeze"), "effective_config_freeze"
+    )
+    frozen_execution = _required_mapping(
+        freeze.get("execution"), "execution freeze"
+    )
+    acceptance_workers = _required_int(
+        acceptance.get("workers"), "acceptance_and_execution.workers", minimum=1
+    )
+    frozen_workers = _required_int(
+        frozen_execution.get("workers"),
+        "effective_config_freeze.execution.workers",
+        minimum=1,
+    )
+    expected_out_dir = (
+        "canonical_repository_root/"
+        f"{profile.canonical_live_output_relative_path}"
+        "_no_symlink_or_override_for_live"
+    )
+    if (
+        acceptance_workers != profile.workers
+        or frozen_workers != profile.workers
+        or acceptance_workers != frozen_workers
+        or frozen_execution.get("workers_role") != "execution_only"
+        or frozen_execution.get("out_dir") != expected_out_dir
+    ):
+        raise MultiEventProtocolError(
+            "protocol workers or canonical live output profile changed"
+        )
+
+    acceleration: Mapping[str, Any] | None = None
+    if profile.protocol_sha256 == FROZEN_PROTOCOL_SHA256:
+        if "execution_acceleration" in protocol:
+            raise MultiEventProtocolError(
+                "workers=1 protocol cannot declare execution_acceleration"
+            )
+    else:
+        acceleration = _validate_execution_acceleration(protocol, profile)
+    return ProtocolProfile(
+        schema_version=profile.schema_version,
+        protocol_id=profile.protocol_id,
+        protocol_sha256=profile.protocol_sha256,
+        canonical_protocol_relative_path=(
+            profile.canonical_protocol_relative_path
+        ),
+        canonical_live_output_relative_path=(
+            profile.canonical_live_output_relative_path
+        ),
+        workers=profile.workers,
+        execution_acceleration=(
+            None if acceleration is None else deepcopy(dict(acceleration))
+        ),
+    )
+
+
 def load_protocol(path: str | Path) -> tuple[dict[str, Any], str]:
     protocol_path = Path(path).resolve()
     value = _load_json_object(protocol_path, field="protocol")
     protocol_hash = sha256_file(protocol_path)
-    if protocol_hash != FROZEN_PROTOCOL_SHA256:
-        raise MultiEventProtocolError(
-            "protocol bytes differ from the preregistered frozen artifact"
-        )
-    if value.get("schema_version") != PROTOCOL_SCHEMA_VERSION:
-        raise MultiEventProtocolError("unsupported multi-event protocol schema")
+    profile = get_protocol_profile(value, protocol_hash)
+    protocol_status, study_status = _PROTOCOL_STATUS_REGISTRY[protocol_hash]
     if (
-        value.get("protocol_id") != "multi_event_distribution_v1"
-        or value.get("protocol_status")
-        != "preregistered_before_live_multi_event_grid"
-        or value.get("study_status")
-        != "preregistered_variance_components_pilot"
+        value.get("protocol_status") != protocol_status
+        or value.get("study_status") != study_status
         or value.get("confirmatory") is not False
     ):
         raise MultiEventProtocolError("multi-event pilot status changed")
@@ -416,7 +811,7 @@ def load_protocol(path: str | Path) -> tuple[dict[str, Any], str]:
     for field, expected in {
         "max_child_attempts": 5,
         "health_bad_frac_max": 0.15,
-        "workers": 1,
+        "workers": profile.workers,
         "cache_enabled": False,
         "temperature": 0.3,
     }.items():
@@ -514,7 +909,9 @@ def load_protocol(path: str | Path) -> tuple[dict[str, Any], str]:
         freeze.get("execution"), "execution freeze"
     )
     if frozen_execution.get("out_dir") != (
-        "canonical_repository_root/results_multi_event_no_symlink_or_override_for_live"
+        "canonical_repository_root/"
+        f"{profile.canonical_live_output_relative_path}"
+        "_no_symlink_or_override_for_live"
     ):
         raise MultiEventProtocolError("canonical live output root policy changed")
     return value, protocol_hash
@@ -832,8 +1229,12 @@ def multi_event_material_identity(
 __all__ = [
     "MultiEventMaterial",
     "MultiEventProtocolError",
+    "ProtocolProfile",
     "ATTEMPT_SERIES_SCHEMA_VERSION",
+    "FROZEN_PROTOCOL_SHA256",
+    "FROZEN_PROTOCOL_SHA256_V2",
     "PROTOCOL_SCHEMA_VERSION",
+    "PROTOCOL_SCHEMA_VERSION_V2",
     "SLOT_SCHEMA_VERSION",
     "TRANSFORM_ID",
     "TRANSFORM_N_ROUNDS",
@@ -843,6 +1244,7 @@ __all__ = [
     "build_attempt_run_id",
     "build_attempt_series_id",
     "canonical_multi_event_basename",
+    "get_protocol_profile",
     "load_multi_event_material",
     "load_protocol",
     "multi_event_material_identity",

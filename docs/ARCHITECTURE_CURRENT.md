@@ -38,8 +38,8 @@
 | 正式派生分析入口 | 在 managed analysis attempt 中读取历史 JSON/trace，把 legacy input 路径/大小/hash 和未验证身份计数入 manifest，并计算原有表/图 | 不伪造 child manifest；不统一或静默修改历史 analyzer 的过滤、配对和 CI 公式 |
 | `experiments/model_qualification.py` | `run_kind=model_qualification` 的 managed 入口；加载冻结 protocol/fixtures/rubric，构造 6×8=48 cases，执行 Mock/Fake，支持 CodexExec 安全 dry-run，并以确认参数和 case 上限保护未来小规模真实试跑 | 不调用市场、不产生价格路径；Phase 1.2B-CX1 未执行真实 Codex case；低层函数不是绕过 CLI 确认的正式入口 |
 | `experiments/endpoint_stochasticity.py` | `run_kind=endpoint_stochasticity` 的 managed Wave 0 入口；验证 qualification 48-case universe 和冻结 6-case 子集，执行 temp×K×concurrency 网格、独立 same-seed probe、pairwise byte agreement 与 within-case pooled sigma | 不调用 `run_sim`、不生成价格路径或市场 replicate；dry-run 不构造 Provider；真实 OpenAI-compatible 路径必须显式 `--live` |
-| `experiments/multi_event.py` | 冻结三事件×双臂×N=8×K=3 网格、counterbalanced acquisition、五次技术尝试上限、canonical live root 与受管 child selection | 不聚合结果、不把 ACTIVE/foreign-series materialization 当作可跳过失败、不声称真实 Provider 确定性 |
-| `experiments/aggregate_multi_event.py` | 从一个完成的父 manifest 重验 plan/ledger/selection、源码/runtime/alias/health/private artifact，并输出 complete-case seed-cluster 统计 | 不按 glob 或 legacy flat 文件选择样本；不构造 Provider；该 pilot 不升级为 confirmatory claim |
+| `experiments/multi_event.py` | 通过精确 path/hash 白名单分派版本化协议；workers=1 保留历史顺序 acquisition，workers=2 只并发同一 event/seed/repeat 的双臂并以 pair barrier 推进；各 profile 绑定独立 canonical live root、source snapshot 与 stage | 不聚合结果、不跨 workers profile 复用或混池、不把 ACTIVE/foreign-series materialization 当作可跳过失败、不声称真实 Provider 确定性 |
+| `experiments/aggregate_multi_event.py` | 从一个完成的父 manifest 重验 profile-specific protocol/root/source/stage/paired-launch policy、plan/ledger/selection、runtime/alias/health/private artifact，并输出 complete-case seed-cluster 统计或明确不完整的 canary 描述 | 不按 glob 或 legacy flat 文件选择样本；不构造 Provider；workers=1/2 不混池；canary 不声称 full/realism/variance-component 结论；该 pilot 不升级为 confirmatory claim |
 | `qualification/*.json` | protocol 1.1、字节不变的 8 个 Observation fixtures、rubric 1.1 和 field-level visibility contract 1.0 | 不包含未来价格、private rationale、评价答案或 rubric 泄漏到 Observation；真实 Prompt 不可见的 fundamental anchor 明确 not-scored |
 
 ## Scientific Component Fingerprint

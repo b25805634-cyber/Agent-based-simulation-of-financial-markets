@@ -24,6 +24,40 @@ ROOT = Path(__file__).resolve().parents[1]
 CATALOG = ROOT / "nmsim" / "reference_data" / "v1" / "catalog.json"
 
 
+def _profile(protocol, path=A.PROTOCOL_PATH):
+    return A._protocol_profile(protocol, path)
+
+
+def _acceleration_stage(profile, stage="canary"):
+    acceleration = profile.execution_acceleration
+    assert acceleration is not None
+    if stage == "canary":
+        pairs = acceleration["canary_pair_count"]
+        slots = acceleration["canary_slot_count"]
+        attempts = acceleration["canary_max_child_attempts_per_slot"]
+        approved = False
+        deferred = "acceleration_canary_deferred"
+    else:
+        slots = acceleration["full_stage_slot_count"]
+        pairs = slots // 2
+        attempts = acceleration["full_stage_max_child_attempts_per_slot"]
+        approved = True
+        deferred = None
+    return {
+        "schema_version": "multi_event_acceleration_stage_v1",
+        "profile_id": acceleration["profile_id"],
+        "stage": stage,
+        "scheduler": acceleration["scheduler"],
+        "workers": profile.workers,
+        "max_in_flight_children": acceleration["max_in_flight_children"],
+        "submitted_pair_limit": pairs,
+        "submitted_slot_limit": slots,
+        "max_child_attempts_per_slot": attempts,
+        "full_stage_approved": approved,
+        "deferred_reason_code": deferred,
+    }
+
+
 def _material(protocol, event_id):
     row = next(
         item for item in protocol["design"]["events"]
@@ -109,7 +143,7 @@ def _observations(protocol, *, remove=()):
     return observations
 
 
-def _execution_plan(protocol, mode="openai_live"):
+def _execution_plan(protocol, mode="openai_live", profile=None):
     if mode == "mock":
         return {
             "protocol_adherence": False,
@@ -118,7 +152,7 @@ def _execution_plan(protocol, mode="openai_live"):
             "repeat_indices": list(protocol["design"]["repeat_indices"][:2]),
             "planned_runs": 24,
             "override_reason": "bounded N=2 K=2 engineering acceptance fixture",
-            "launch_order_policy": dict(A.launch_order_policy()),
+            "launch_order_policy": dict(A.launch_order_policy(profile)),
         }
     return {
         "protocol_adherence": True,
@@ -127,7 +161,7 @@ def _execution_plan(protocol, mode="openai_live"):
         "repeat_indices": list(protocol["design"]["repeat_indices"]),
         "planned_runs": protocol["design"]["planned_runs"],
         "override_reason": None,
-        "launch_order_policy": dict(A.launch_order_policy()),
+        "launch_order_policy": dict(A.launch_order_policy(profile)),
     }
 
 
@@ -172,6 +206,242 @@ class AggregateMultiEventTests(unittest.TestCase):
             "no outcome-dependent",
             self.protocol["reference_phase_transform"]["no_curve_fit"],
         )
+
+    def test_workers2_profile_binds_exact_path_root_workers_and_policy(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        self.assertEqual(
+            profile.protocol_sha256,
+            "245be765444b5f93b86d5d05c95e81c7eee13b127180739c88a966eca3371d4a",
+        )
+        self.assertEqual(profile.workers, 2)
+        self.assertEqual(
+            profile.canonical_protocol_relative_path,
+            "experiments/multi_event_protocol_workers2.json",
+        )
+        self.assertEqual(
+            profile.canonical_live_output_relative_path,
+            "results_multi_event_workers2",
+        )
+        policy = A.launch_order_policy(profile)
+        self.assertEqual(
+            policy["schema_version"],
+            "multi_event_paired_workers2_launch_order_v1",
+        )
+        self.assertEqual(policy["scheduler"], "paired_arm_barrier_v1")
+        self.assertTrue(policy["pair_barrier"])
+        self.assertIn("both jobs", policy["between_pair_policy"])
+        with tempfile.TemporaryDirectory(dir="/tmp") as temporary:
+            copied = Path(temporary) / A.WORKERS2_PROTOCOL_PATH.name
+            copied.write_bytes(A.WORKERS2_PROTOCOL_PATH.read_bytes())
+            with self.assertRaisesRegex(
+                A.MultiEventProtocolError, "canonical repository path"
+            ):
+                A.load_protocol(copied)
+
+    def test_workers2_stage_document_is_exact_and_v1_rejects_it(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        canary = _acceleration_stage(profile)
+        self.assertEqual(
+            A._validated_acceleration_stage(
+                canary, profile, required=True
+            ),
+            canary,
+        )
+        mutated = dict(canary)
+        mutated["submitted_slot_limit"] = 4
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "frozen stage profile"
+        ):
+            A._validated_acceleration_stage(
+                mutated, profile, required=True
+            )
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "cannot declare"
+        ):
+            A._validated_acceleration_stage(
+                canary,
+                _profile(self.protocol),
+                required=False,
+            )
+
+    def test_workers2_mock_full_stage_binds_to_selected_grid_extent(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        plan = _execution_plan(protocol, mode="mock", profile=profile)
+        stage = _acceleration_stage(profile, stage="full")
+        stage["submitted_slot_limit"] = plan["planned_runs"]
+        stage["submitted_pair_limit"] = plan["planned_runs"] // 2
+        validated = A._validated_acceleration_stage(
+            stage, profile, required=True
+        )
+        A._validate_acceleration_stage_extent(validated, plan)
+
+        wrong_extent = dict(validated)
+        wrong_extent["submitted_slot_limit"] -= 2
+        wrong_extent["submitted_pair_limit"] -= 1
+        wrong_extent = A._validated_acceleration_stage(
+            wrong_extent, profile, required=True
+        )
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "selected grid"
+        ):
+            A._validate_acceleration_stage_extent(wrong_extent, plan)
+
+        live_plan = _execution_plan(protocol, profile=profile)
+        live_short = _acceleration_stage(profile, stage="full")
+        live_short["submitted_slot_limit"] = 142
+        live_short["submitted_pair_limit"] = 71
+        live_short = A._validated_acceleration_stage(
+            live_short, profile, required=True
+        )
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "selected grid"
+        ):
+            A._validate_acceleration_stage_extent(
+                live_short, live_plan
+            )
+
+    def test_workers2_analysis_requires_its_exact_profile(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        plan = _execution_plan(protocol, profile=profile)
+        observations = _observations_for_plan(protocol, plan)
+        stage = _acceleration_stage(profile, stage="full")
+
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "requires its exact protocol profile"
+        ):
+            A.analyze_observations(
+                observations,
+                protocol=protocol,
+                execution_plan=plan,
+                execution_acceleration=stage,
+            )
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "does not match"
+        ):
+            A.analyze_observations(
+                observations,
+                protocol=protocol,
+                execution_plan=plan,
+                protocol_profile=replace(profile, workers=1),
+                execution_acceleration=stage,
+            )
+
+    def test_workers2_canary_is_incomplete_descriptive_and_never_pooled(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        stage = _acceleration_stage(profile)
+        plan = _execution_plan(
+            protocol, mode="openai_live", profile=profile
+        )
+        first_pair = set(A._counterbalanced_cells(protocol, plan)[:2])
+        observations = [
+            item
+            for item in _observations(protocol)
+            if item.cell in first_pair
+        ]
+        rejections = [
+            {
+                "event_id": cell[0],
+                "arm": cell[1],
+                "seed": cell[2],
+                "repeat_idx": cell[3],
+                "run_id": None,
+                "slot_status": "missing",
+                "attempt_run_ids": [],
+                "reason_codes": ["acceleration_canary_deferred"],
+            }
+            for cell in A._counterbalanced_cells(protocol, plan)[2:]
+        ]
+        summary = A.analyze_observations(
+            observations,
+            protocol=protocol,
+            rejections=rejections,
+            execution_plan=plan,
+            protocol_profile=profile,
+            execution_acceleration=stage,
+        )
+        acquisition = summary["acquisition_profile"]
+        self.assertEqual(
+            acquisition["interpretation"],
+            "incomplete_canary_descriptive_only",
+        )
+        self.assertEqual(acquisition["submitted_slots"], 2)
+        self.assertEqual(acquisition["deferred_slots"], 142)
+        self.assertFalse(acquisition["complete_grid_claim_allowed"])
+        self.assertFalse(
+            acquisition["workers1_workers2_pooling_allowed"]
+        )
+        self.assertEqual(
+            acquisition["scientific_n_k_contribution_to_workers1"], 0
+        )
+        claims = summary["qualitative_claims"]
+        self.assertFalse(
+            claims["protocol_adherent_realism_claim_allowed"]
+        )
+        self.assertFalse(claims["preregistered_realism_claim_eligible"])
+        self.assertEqual(
+            claims["realism_assessment_status"],
+            "workers2_canary_incomplete_descriptive_not_claim_eligible",
+        )
+
+    def test_workers2_canary_selection_requires_exact_first_pair_deferral(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        stage = _acceleration_stage(profile)
+        plan = _execution_plan(
+            protocol, mode="openai_live", profile=profile
+        )
+        ordered = A._counterbalanced_cells(protocol, plan)
+        slots = [
+            {
+                "event_id": cell[0],
+                "arm": cell[1],
+                "seed": cell[2],
+                "repeat_idx": cell[3],
+                "status": "missing",
+                "reason_codes": (
+                    ["child_result_missing"]
+                    if index < 2
+                    else ["acceleration_canary_deferred"]
+                ),
+                "attempt_run_ids": [],
+            }
+            for index, cell in enumerate(ordered)
+        ]
+        built = A.build_selection_document(
+            protocol=protocol,
+            protocol_sha256=profile.protocol_sha256,
+            execution_plan=plan,
+            events=[],
+            catalog_inputs=[],
+            study_model_identity={},
+            planned_slots=slots,
+            accepted_children=[],
+            rejected_slots=slots,
+            execution_acceleration=stage,
+        )
+        self.assertEqual(built["execution_acceleration"], stage)
+        changed = json.loads(json.dumps(slots))
+        changed[2]["reason_codes"] = ["child_result_missing"]
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "canary deferred selection"
+        ):
+            A.build_selection_document(
+                protocol=protocol,
+                protocol_sha256=profile.protocol_sha256,
+                execution_plan=plan,
+                events=[],
+                catalog_inputs=[],
+                study_model_identity={},
+                planned_slots=changed,
+                accepted_children=[],
+                rejected_slots=changed,
+                execution_acceleration=stage,
+            )
 
     def test_counterbalanced_launch_order_has_exact_frozen_balance(self):
         plan = _execution_plan(self.protocol)
@@ -733,6 +1003,82 @@ class AggregateMultiEventTests(unittest.TestCase):
                 mode="openai_live",
                 protocol_path=A.PROTOCOL_PATH,
                 expected_identities=[identity],
+            )
+
+    def test_workers2_source_snapshot_and_root_use_only_v2_profile(self):
+        protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        profile = _profile(protocol, A.WORKERS2_PROTOCOL_PATH)
+        head = "a" * 40
+        fingerprint = "b" * 64
+        snapshot = {
+            "schema_version": "multi_event_source_snapshot_v1",
+            "execution_mode": "openai_live",
+            "live_snapshot_enforced": True,
+            "live_eligibility_claim": True,
+            "policy": "clean_head_equals_canonical_protocol_last_change_commit",
+            "repository_clean": True,
+            "head_commit": head,
+            "protocol_last_change_commit": head,
+            "protocol_repo_relative_path": (
+                "experiments/multi_event_protocol_workers2.json"
+            ),
+            "scientific_component_fingerprint": fingerprint,
+        }
+
+        def completed(stdout):
+            return subprocess.CompletedProcess(
+                [], 0, stdout=stdout, stderr=""
+            )
+
+        with mock.patch.object(
+            A.subprocess,
+            "run",
+            side_effect=[
+                completed(head + "\n"),
+                completed(head + "\n"),
+                completed(""),
+            ],
+        ) as run:
+            self.assertEqual(
+                A._validated_source_snapshot(
+                    snapshot,
+                    mode="openai_live",
+                    protocol_path=A.WORKERS2_PROTOCOL_PATH,
+                    profile=profile,
+                ),
+                snapshot,
+            )
+        self.assertIn(
+            "experiments/multi_event_protocol_workers2.json",
+            run.call_args_list[1].args[0],
+        )
+        canonical = ROOT / "results_multi_event_workers2"
+        policy = A._expected_output_root_policy(
+            "openai_live", canonical, profile
+        )
+        self.assertEqual(
+            policy["canonical_repo_relative_root"],
+            "results_multi_event_workers2",
+        )
+        self.assertEqual(
+            A._validated_output_root_policy(
+                policy,
+                mode="openai_live",
+                child_root=canonical,
+                profile=profile,
+            ),
+            policy,
+        )
+        wrong = dict(policy)
+        wrong["canonical_repo_relative_root"] = "results_multi_event"
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "canonical policy"
+        ):
+            A._validated_output_root_policy(
+                wrong,
+                mode="openai_live",
+                child_root=canonical,
+                profile=profile,
             )
 
     def test_reference_transform_is_fixed_linear_full_horizon(self):
@@ -2010,6 +2356,186 @@ class ManagedParentAndChildIntegrationTests(unittest.TestCase):
             rejections[0]["reason_codes"],
             ["health_gate_rejected"],
         )
+
+
+class ManagedWorkers2CanaryAnalyzerIntegrationTests(unittest.TestCase):
+    """Exercise one real mock paired canary through the analyzer boundary."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.protocol = A.load_protocol(A.WORKERS2_PROTOCOL_PATH)
+        cls.profile = _profile(
+            cls.protocol, A.WORKERS2_PROTOCOL_PATH
+        )
+        cls.temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        cls.root = Path(cls.temporary.name)
+        environment = {
+            key: value
+            for key, value in os.environ.items()
+            if key
+            not in {
+                "LLM_PROVIDER",
+                "LLM_MODEL",
+                "OPENAI_BASE_URL",
+                "OPENAI_API_KEY",
+            }
+        }
+        command = [
+            sys.executable,
+            "-m",
+            "experiments.multi_event",
+            "--protocol",
+            str(A.WORKERS2_PROTOCOL_PATH),
+            "--provider",
+            "mock",
+            "--n",
+            "1",
+            "--k",
+            "1",
+            "--workers",
+            "2",
+            "--acceleration-stage",
+            "canary",
+            "--out",
+            str(cls.root),
+            "--run-id",
+            "analysis-workers2-canary-fixture",
+        ]
+        completed = subprocess.run(
+            command,
+            cwd=ROOT,
+            env=environment,
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=180,
+        )
+        if completed.returncode != 1:
+            raise AssertionError(completed.stderr or completed.stdout)
+        cls.parent_dir = (
+            cls.root / "runs" / "analysis-workers2-canary-fixture"
+        )
+        cls.parent_manifest = cls.parent_dir / "run_manifest.json"
+        cls.plan_path = cls.parent_dir / A.DRIVER_PLAN_FILENAME
+        cls.selection_path = (
+            cls.parent_dir / A.DRIVER_SELECTION_FILENAME
+        )
+        cls.summary_path = cls.parent_dir / A.DRIVER_SUMMARY_FILENAME
+        cls.original_bytes = {
+            path: path.read_bytes()
+            for path in (
+                cls.parent_manifest,
+                cls.plan_path,
+                cls.selection_path,
+                cls.summary_path,
+            )
+        }
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.temporary.cleanup()
+
+    def setUp(self):
+        for path, content in self.original_bytes.items():
+            path.write_bytes(content)
+
+    @staticmethod
+    def _write_json(path, value):
+        path.write_text(
+            json.dumps(value, indent=2, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+
+    def _refresh_parent_descriptor(self, artifact_path):
+        manifest = json.loads(
+            self.parent_manifest.read_text(encoding="utf-8")
+        )
+        descriptor = next(
+            item
+            for item in manifest["results"]
+            if item["path"] == artifact_path.name
+        )
+        descriptor["size_bytes"] = artifact_path.stat().st_size
+        descriptor["sha256"] = A.sha256_file(artifact_path)
+        self._write_json(self.parent_manifest, manifest)
+
+    def _prepare(self):
+        return A.prepare_driver_selection(
+            self.parent_manifest,
+            protocol=self.protocol,
+            protocol_path=A.WORKERS2_PROTOCOL_PATH,
+            child_root=self.root,
+            reference_root=ROOT,
+        )
+
+    def test_real_mock_canary_is_accepted_only_as_incomplete_description(self):
+        prepared = self._prepare()
+        self.assertEqual(
+            prepared.execution_acceleration["stage"], "canary"
+        )
+        self.assertEqual(prepared.protocol_profile.workers, 2)
+        observations, runtime_rejections = A.validate_selected_children(
+            prepared, self.protocol
+        )
+        self.assertEqual(len(observations), 2)
+        self.assertEqual(runtime_rejections, [])
+        summary = A.analyze_observations(
+            observations,
+            protocol=self.protocol,
+            rejections=prepared.declared_missing_or_rejected,
+            execution_plan=prepared.execution_plan,
+            protocol_profile=prepared.protocol_profile,
+            execution_acceleration=prepared.execution_acceleration,
+        )
+        self.assertEqual(
+            summary["acquisition_profile"]["interpretation"],
+            "incomplete_canary_descriptive_only",
+        )
+        self.assertFalse(
+            summary["qualitative_claims"][
+                "preregistered_realism_claim_eligible"
+            ]
+        )
+
+    def test_profile_stage_mirror_and_pair_ordinals_fail_closed(self):
+        parent = json.loads(
+            self.parent_manifest.read_text(encoding="utf-8")
+        )
+        parent["multi_event_driver"]["execution_acceleration"][
+            "workers"
+        ] = 1
+        self._write_json(self.parent_manifest, parent)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "frozen stage profile"
+        ):
+            self._prepare()
+
+        self.parent_manifest.write_bytes(
+            self.original_bytes[self.parent_manifest]
+        )
+        plan = json.loads(self.plan_path.read_text(encoding="utf-8"))
+        plan["jobs"][1]["within_pair_ordinal"] = 1
+        self._write_json(self.plan_path, plan)
+        self._refresh_parent_descriptor(self.plan_path)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "counterbalanced grid"
+        ):
+            self._prepare()
+
+        self.plan_path.write_bytes(self.original_bytes[self.plan_path])
+        self.parent_manifest.write_bytes(
+            self.original_bytes[self.parent_manifest]
+        )
+        selection = json.loads(
+            self.selection_path.read_text(encoding="utf-8")
+        )
+        selection["execution_acceleration"]["submitted_slot_limit"] = 4
+        self._write_json(self.selection_path, selection)
+        self._refresh_parent_descriptor(self.selection_path)
+        with self.assertRaisesRegex(
+            A.MultiEventInputError, "frozen stage profile"
+        ):
+            self._prepare()
 
 
 if __name__ == "__main__":

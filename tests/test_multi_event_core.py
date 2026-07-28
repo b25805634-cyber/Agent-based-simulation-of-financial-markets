@@ -37,8 +37,14 @@ from nmsim.fingerprint import SCIENTIFIC_COMPONENT_FILES
 from nmsim.llm import CostTracker, parse_order_with_validity
 from nmsim.multi_event import (
     FROZEN_PROTOCOL_SHA256,
+    FROZEN_PROTOCOL_SHA256_V2,
+    PROTOCOL_SCHEMA_VERSION,
+    PROTOCOL_SCHEMA_VERSION_V2,
     MultiEventProtocolError,
+    ProtocolProfile,
+    build_experiment_slot,
     canonical_multi_event_basename,
+    get_protocol_profile,
     load_multi_event_material,
     load_protocol,
     transform_reference_episode,
@@ -58,6 +64,7 @@ from nmsim.sim import run_sim
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = ROOT / "experiments" / "multi_event_protocol.json"
+PROTOCOL_V2 = ROOT / "experiments" / "multi_event_protocol_workers2.json"
 CATALOG = ROOT / "nmsim" / "reference_data" / "v1" / "catalog.json"
 
 
@@ -210,6 +217,54 @@ class ProtocolAndTransformTests(unittest.TestCase):
             self.assertEqual(sha256_file(ROOT / row["reference_csv"]), row["reference_csv_sha256"])
             self.assertEqual(sha256_file(ROOT / row["news_timeline"]), row["news_timeline_sha256"])
 
+    def test_frozen_protocol_profiles_are_versioned_and_fail_closed(self) -> None:
+        v1, v1_digest = load_protocol(PROTOCOL)
+        v2, v2_digest = load_protocol(PROTOCOL_V2)
+        v1_profile = get_protocol_profile(v1, v1_digest)
+        v2_profile = get_protocol_profile(v2, v2_digest)
+        self.assertIsInstance(v1_profile, ProtocolProfile)
+        self.assertIsInstance(v2_profile, ProtocolProfile)
+        self.assertEqual(v1_digest, FROZEN_PROTOCOL_SHA256)
+        self.assertEqual(v2_digest, FROZEN_PROTOCOL_SHA256_V2)
+        self.assertEqual(sha256_file(PROTOCOL_V2), FROZEN_PROTOCOL_SHA256_V2)
+        self.assertEqual(v1_profile.schema_version, PROTOCOL_SCHEMA_VERSION)
+        self.assertEqual(v2_profile.schema_version, PROTOCOL_SCHEMA_VERSION_V2)
+        self.assertEqual(v1_profile.protocol_id, "multi_event_distribution_v1")
+        self.assertEqual(
+            v2_profile.protocol_id,
+            "multi_event_distribution_workers2_v1",
+        )
+        self.assertEqual(
+            v1_profile.canonical_protocol_relative_path,
+            "experiments/multi_event_protocol.json",
+        )
+        self.assertEqual(
+            v2_profile.canonical_protocol_relative_path,
+            "experiments/multi_event_protocol_workers2.json",
+        )
+        self.assertEqual(
+            v1_profile.canonical_live_output_relative_path,
+            "results_multi_event",
+        )
+        self.assertEqual(
+            v2_profile.canonical_live_output_relative_path,
+            "results_multi_event_workers2",
+        )
+        self.assertEqual((v1_profile.workers, v2_profile.workers), (1, 2))
+        self.assertIsNone(v1_profile.execution_acceleration)
+        self.assertEqual(
+            v2_profile.execution_acceleration,
+            v2["execution_acceleration"],
+        )
+
+    def test_both_frozen_protocols_reject_any_byte_tamper(self) -> None:
+        for source in (PROTOCOL, PROTOCOL_V2):
+            with self.subTest(source=source.name), tempfile.TemporaryDirectory() as raw:
+                copied = Path(raw) / source.name
+                copied.write_bytes(source.read_bytes() + b" ")
+                with self.assertRaises(MultiEventProtocolError):
+                    load_protocol(copied)
+
     def test_any_protocol_byte_tamper_is_rejected(self) -> None:
         original = json.loads(PROTOCOL.read_text(encoding="utf-8"))
         mutations = (
@@ -226,6 +281,84 @@ class ProtocolAndTransformTests(unittest.TestCase):
                 path.write_text(json.dumps(value), encoding="utf-8")
                 with self.assertRaises(MultiEventProtocolError):
                     load_protocol(path)
+
+    def test_workers2_profile_rejects_worker_root_and_acceleration_drift(self) -> None:
+        original, digest = load_protocol(PROTOCOL_V2)
+
+        def clone():
+            return json.loads(json.dumps(original))
+
+        mutations = {
+            "acceptance_workers": lambda value: value[
+                "acceptance_and_execution"
+            ].__setitem__("workers", 1),
+            "frozen_workers": lambda value: value[
+                "effective_config_freeze"
+            ]["execution"].__setitem__("workers", 1),
+            "frozen_root": lambda value: value["effective_config_freeze"][
+                "execution"
+            ].__setitem__(
+                "out_dir",
+                "canonical_repository_root/results_multi_event_no_symlink_or_override_for_live",
+            ),
+            "treatment_workers": lambda value: value[
+                "execution_acceleration"
+            ].__setitem__("treatment_workers", 1),
+            "acceleration_root": lambda value: value[
+                "execution_acceleration"
+            ].__setitem__("canonical_live_output_root", "results_multi_event"),
+            "missing_acceleration_key": lambda value: value[
+                "execution_acceleration"
+            ].pop("scheduler"),
+            "extra_acceleration_key": lambda value: value[
+                "execution_acceleration"
+            ].__setitem__("unregistered", True),
+            "missing_metric_definition": lambda value: value[
+                "execution_acceleration"
+            ]["canary_metric_definitions"].pop("terminal_children"),
+            "extra_metric_definition": lambda value: value[
+                "execution_acceleration"
+            ]["canary_metric_definitions"].__setitem__("unregistered", "x"),
+            "missing_canary_gate": lambda value: value[
+                "execution_acceleration"
+            ]["canary_promotion_gate"].pop("minimum_terminal_children"),
+            "extra_canary_gate": lambda value: value[
+                "execution_acceleration"
+            ]["canary_promotion_gate"].__setitem__("unregistered", 0),
+            "canary_cross_field": lambda value: value[
+                "execution_acceleration"
+            ].__setitem__("canary_slot_count", 3),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                value = clone()
+                mutate(value)
+                with self.assertRaises(MultiEventProtocolError):
+                    get_protocol_profile(value, digest)
+
+        v1, v1_digest = load_protocol(PROTOCOL)
+        v1["execution_acceleration"] = {}
+        with self.assertRaises(MultiEventProtocolError):
+            get_protocol_profile(v1, v1_digest)
+
+    def test_protocol_hash_isolates_workers2_experiment_slots(self) -> None:
+        common = {
+            "event_id": "meta_2022_02_crash_v1",
+            "social_arm": "social_on",
+            "seed": 11,
+            "repeat_idx": 1,
+        }
+        v1_slot = build_experiment_slot(
+            protocol_hash=FROZEN_PROTOCOL_SHA256, **common
+        )
+        v2_slot = build_experiment_slot(
+            protocol_hash=FROZEN_PROTOCOL_SHA256_V2, **common
+        )
+        self.assertNotEqual(v1_slot["slot_id"], v2_slot["slot_id"])
+        self.assertNotEqual(v1_slot["protocol_hash"], v2_slot["protocol_hash"])
+        for field, expected in common.items():
+            self.assertEqual(v1_slot[field], expected)
+            self.assertEqual(v2_slot[field], expected)
 
     def test_catalog_and_event_files_cannot_be_rebound_to_copies(self) -> None:
         material = _material()

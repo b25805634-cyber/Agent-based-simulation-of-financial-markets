@@ -329,9 +329,15 @@ and analysis-summary identity. Runtime drift therefore cannot silently reset a
 slot's bounded attempt series or enter a pooled study.
 
 Driver worker count is execution-only under the existing configuration
-contract, but it is held at one for this pilot and recorded in the execution
-manifest. Changing workers does not change the stated estimand; it does create
-a different execution identity and must not be mixed invisibly into one study.
+contract, but it is held at one for this historical profile and recorded in
+the execution manifest. Changing workers does not change the stated estimand;
+it does create a different acquisition regime and execution identity and must
+not be mixed invisibly into one study. The separately frozen paired-workers2
+profile is specified in
+[`MULTI_EVENT_WORKERS2_PROTOCOL.md`](MULTI_EVENT_WORKERS2_PROTOCOL.md). It
+uses a different protocol path/hash, canonical live root, source snapshot,
+paired launch policy, stage identity, and attempt series. It does not revise
+or overwrite this workers=1 protocol.
 
 ## Managed driver-anchored analyzer input
 
@@ -352,8 +358,9 @@ must come from the central reuse registry or a fixed driver/analyzer code set;
 arbitrary exception or response prose remains in mode-`0600` private artifacts
 and cannot enter the public analysis summary.
 
-A live parent is eligible only at the repository's lexical, non-symlink
-`results_multi_event` root. It records a clean source snapshot whose `HEAD` is
+A live parent under this workers=1 profile is eligible only at the
+repository's lexical, non-symlink `results_multi_event` root. It records a
+clean source snapshot whose `HEAD` is
 the last commit that changed the canonical protocol; parent, plan, every
 accepted child, and the analyzer's independently reconstructed identities must
 agree on that commit and scientific fingerprint. The parent truthfully records
@@ -541,3 +548,14 @@ usable only in explicitly labeled legacy analyses and cannot enter this
 identity-validated pilot input contract. Driver retry and attempt-level
 Provider provenance must pass their own tests before the 144-run live grid is
 eligible.
+
+The paired-workers2 profile is a separate acquisition-semantics change: it may
+alter endpoint contention, timing, failure distribution, and stochastic
+Provider outputs even though the event grid and stated social estimand are
+retained. Its canary may be analyzed only as explicitly incomplete
+descriptive evidence. Workers=1 and workers=2 children, attempt series,
+complete-case estimates, variance components, and honest N are never pooled.
+Both canonical result roots and every failed or canary materialization are
+retained as long-lived provenance. See
+[`MULTI_EVENT_WORKERS2_PROTOCOL.md`](MULTI_EVENT_WORKERS2_PROTOCOL.md) for the
+exact protocol hash, paired barrier, stage fields, and frozen promotion gate.

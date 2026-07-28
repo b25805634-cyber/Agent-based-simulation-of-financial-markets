@@ -8,6 +8,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import threading
 import types
 import unittest
 from unittest import mock
@@ -25,6 +26,7 @@ from nmsim.result_reuse import (
 
 ROOT = Path(__file__).resolve().parents[1]
 PROTOCOL = ROOT / "experiments" / "multi_event_protocol.json"
+PROTOCOL_V2 = ROOT / "experiments" / "multi_event_protocol_workers2.json"
 CATALOG = ROOT / "nmsim" / "reference_data" / "v1" / "catalog.json"
 REAL_SUBPROCESS_RUN = subprocess.run
 
@@ -57,7 +59,7 @@ def _decision(run_id: str, manifest_path: Path, *, reusable: bool) -> ReuseDecis
 
 
 def _fake_builder(**kwargs):
-    return {
+    selection = {
         "schema_version": "1.0",
         "protocol_sha256": kwargs["protocol_sha256"],
         "execution_plan": dict(kwargs["execution_plan"]),
@@ -67,6 +69,11 @@ def _fake_builder(**kwargs):
         "children": list(kwargs["accepted_children"]),
         "missing_or_rejected_slots": list(kwargs["rejected_slots"]),
     }
+    if kwargs.get("execution_acceleration") is not None:
+        selection["execution_acceleration"] = dict(
+            kwargs["execution_acceleration"]
+        )
+    return selection
 
 
 class MultiEventDriverTests(unittest.TestCase):
@@ -190,6 +197,192 @@ class MultiEventDriverTests(unittest.TestCase):
         )
         with mock.patch.dict(os.environ, _clean_environment(), clear=True), self.assertRaises(ValueError):
             M._validate_cli(args, protocol)
+
+    def test_v1_rejects_workers2_stage_options(self) -> None:
+        protocol, digest = load_protocol(PROTOCOL)
+        profile = M.get_protocol_profile(protocol, digest)
+        for argv in (
+            ["--acceleration-stage", "canary"],
+            [
+                "--acceleration-stage",
+                "full",
+                "--approve-workers2-full",
+            ],
+        ):
+            args = M.build_argparser().parse_args(argv)
+            with self.subTest(argv=argv), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ), self.assertRaisesRegex(ValueError, "v1 protocol rejects"):
+                M._validate_cli(args, protocol, profile)
+
+    def test_v2_live_gates_workers_stage_approval_root_and_protocol_path(
+        self,
+    ) -> None:
+        protocol, digest = load_protocol(PROTOCOL_V2)
+        profile = M.get_protocol_profile(protocol, digest)
+
+        invalid = (
+            (
+                [
+                    "--provider",
+                    "openai",
+                    "--live",
+                    "--workers",
+                    "1",
+                    "--acceleration-stage",
+                    "canary",
+                ],
+                "workers 2",
+            ),
+            (
+                ["--provider", "openai", "--live", "--workers", "2"],
+                "requires --acceleration-stage",
+            ),
+            (
+                [
+                    "--provider",
+                    "openai",
+                    "--live",
+                    "--workers",
+                    "2",
+                    "--acceleration-stage",
+                    "full",
+                ],
+                "requires --approve-workers2-full",
+            ),
+        )
+        for argv, message in invalid:
+            args = M.build_argparser().parse_args(argv)
+            with self.subTest(argv=argv), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ), self.assertRaisesRegex(ValueError, message):
+                M._validate_cli(args, protocol, profile)
+
+        for stage_args in (
+            ["--acceleration-stage", "canary"],
+            [
+                "--acceleration-stage",
+                "full",
+                "--approve-workers2-full",
+            ],
+        ):
+            args = M.build_argparser().parse_args(
+                [
+                    "--provider",
+                    "openai",
+                    "--live",
+                    "--workers",
+                    "2",
+                    *stage_args,
+                ]
+            )
+            with mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ):
+                _seeds, _repeats, mode, adherence, reason = M._validate_cli(
+                    args, protocol, profile
+                )
+            self.assertEqual(mode, "openai_live")
+            self.assertTrue(adherence)
+            self.assertIsNone(reason)
+
+        canonical_root = (
+            ROOT / profile.canonical_live_output_relative_path
+        )
+        self.assertEqual(
+            M._resolve_output_root(
+                str(canonical_root),
+                mode="openai_live",
+                profile=profile,
+            ),
+            canonical_root,
+        )
+        with self.assertRaisesRegex(ValueError, "results_multi_event_workers2"):
+            M._resolve_output_root(
+                str(ROOT / "results_multi_event"),
+                mode="openai_live",
+                profile=profile,
+            )
+
+        head = "a" * 40
+
+        def clean_git(*arguments):
+            return "" if arguments[0] == "status" else head
+
+        with mock.patch.object(M, "_git_stdout", side_effect=clean_git):
+            snapshot = M._source_snapshot(
+                mode="openai_live",
+                protocol_path=PROTOCOL_V2,
+                profile=profile,
+            )
+        self.assertEqual(
+            snapshot["protocol_repo_relative_path"],
+            "experiments/multi_event_protocol_workers2.json",
+        )
+        with mock.patch.object(
+            M, "_git_stdout", side_effect=clean_git
+        ), self.assertRaisesRegex(ValueError, "canonical protocol path"):
+            M._source_snapshot(
+                mode="openai_live",
+                protocol_path=PROTOCOL,
+                profile=profile,
+            )
+
+    def test_v2_canary_dry_plan_records_full_grid_and_pair_identity(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw, mock.patch.dict(
+            os.environ, _clean_environment(), clear=True
+        ), mock.patch.object(
+            M, "_wait_for_endpoint", side_effect=AssertionError("socket access")
+        ) as endpoint_wait:
+            root = Path(raw)
+            M.main(
+                [
+                    "--protocol",
+                    str(PROTOCOL_V2),
+                    "--provider",
+                    "openai",
+                    "--dry-run",
+                    "--workers",
+                    "2",
+                    "--acceleration-stage",
+                    "canary",
+                    "--out",
+                    str(root),
+                    "--run-id",
+                    "workers2-dry-parent",
+                ]
+            )
+            run_dir = root / "runs" / "workers2-dry-parent"
+            plan = json.loads(
+                (run_dir / M.PLAN_NAME).read_text(encoding="utf-8")
+            )
+            manifest = json.loads(
+                (run_dir / "run_manifest.json").read_text(encoding="utf-8")
+            )
+
+        stage = plan["execution_acceleration"]
+        self.assertEqual(len(plan["jobs"]), 144)
+        self.assertEqual(stage["stage"], "canary")
+        self.assertEqual(stage["submitted_pair_limit"], 1)
+        self.assertEqual(stage["submitted_slot_limit"], 2)
+        self.assertEqual(stage["max_child_attempts_per_slot"], 1)
+        self.assertFalse(stage["full_stage_approved"])
+        policy = plan["execution_plan"]["launch_order_policy"]
+        self.assertEqual(policy["scheduler"], "paired_arm_barrier_v1")
+        self.assertTrue(policy["pair_barrier"])
+        for ordinal, job in enumerate(plan["jobs"], start=1):
+            self.assertEqual(job["pair_ordinal"], (ordinal + 1) // 2)
+            self.assertEqual(
+                job["within_pair_ordinal"], 1 if ordinal % 2 else 2
+            )
+        self.assertEqual(
+            manifest["multi_event_driver"]["execution_acceleration"],
+            stage,
+        )
+        self.assertEqual(manifest["execution"]["worker_count"], 2)
+        endpoint_wait.assert_not_called()
 
     def test_parent_live_alias_gate_rejects_noncanonical_strings(self) -> None:
         for alias in (
@@ -331,6 +524,380 @@ class MultiEventDriverTests(unittest.TestCase):
             )
             self.assertFalse(manifest["multi_event_driver"]["network_access"])
             self.assertFalse(manifest["llm"]["runtime"]["network_access"])
+
+    def test_v2_canary_defers_unsubmitted_grid_and_full_resumes_pairwise(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            protocol, protocol_hash, materials = M._load_materials(
+                PROTOCOL_V2, CATALOG
+            )
+            jobs = M._build_jobs(
+                materials,
+                seeds=list(protocol["design"]["seeds"]),
+                repeats=list(protocol["design"]["repeat_indices"]),
+                provider="mock",
+                out_root=root,
+            )
+            self.assertEqual(len(jobs), 144)
+            pairs = M._paired_jobs(jobs)
+            self.assertEqual(len(pairs), 72)
+            slot_jobs = {
+                str(job.slot["slot_id"]): (job, index // 2 + 1)
+                for index, job in enumerate(jobs)
+            }
+            command_jobs = {job.base_command: job for job in jobs}
+            expected_by_key = {}
+
+            def capture_expected(command):
+                expected = expected_run_seed_identity(command)
+                expected_by_key[command_jobs[tuple(command)].key] = expected
+                return expected
+
+            def assess(*, candidate_path, **_kwargs):
+                candidate = Path(candidate_path)
+                run_id = (
+                    candidate.parent.name
+                    if candidate.name == "run_manifest.json"
+                    else candidate.name
+                )
+                parts = run_id.split("-")
+                job, _pair_ordinal = slot_jobs[parts[1]]
+                technical_idx = int(run_id.rsplit("-ta", 1)[1])
+                reusable = not (
+                    job.key == jobs[0].key and technical_idx == 1
+                )
+                manifest_path = (
+                    candidate
+                    if candidate.name == "run_manifest.json"
+                    else candidate / "run_manifest.json"
+                )
+                return _decision(
+                    run_id, manifest_path, reusable=reusable
+                )
+
+            def candidate(current_job, decision, **kwargs):
+                return self._accepted_record(
+                    current_job,
+                    expected_by_key[current_job.key],
+                    decision,
+                    kwargs["attempt_run_ids"],
+                )
+
+            aggregate = types.ModuleType(
+                "experiments.aggregate_multi_event"
+            )
+            aggregate.build_selection_document = _fake_builder
+
+            canary_calls = []
+            canary_active = 0
+            canary_max_active = 0
+            canary_lock = threading.Lock()
+            canary_barrier = threading.Barrier(2)
+
+            def run_canary(command, *args, **kwargs):
+                nonlocal canary_active, canary_max_active
+                if not (
+                    isinstance(command, (list, tuple))
+                    and "experiments.run_seed" in command
+                ):
+                    return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+                run_id = command[command.index("--run-id") + 1]
+                canary_calls.append(run_id)
+                with canary_lock:
+                    canary_active += 1
+                    canary_max_active = max(
+                        canary_max_active, canary_active
+                    )
+                canary_barrier.wait(timeout=5)
+                attempt = root / "runs" / run_id
+                attempt.mkdir(parents=True)
+                (attempt / "run_manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "finished",
+                            "managed_context": {"state": "FINISHED"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with canary_lock:
+                    canary_active -= 1
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            common = (
+                mock.patch.object(
+                    M,
+                    "_load_materials",
+                    return_value=(
+                        protocol,
+                        protocol_hash,
+                        materials,
+                    ),
+                ),
+                mock.patch.object(M, "_build_jobs", return_value=jobs),
+                mock.patch.dict(
+                    sys.modules,
+                    {"experiments.aggregate_multi_event": aggregate},
+                ),
+                mock.patch.object(
+                    M,
+                    "_gate_reported_model",
+                    side_effect=lambda decision, **_kwargs: decision,
+                ),
+            )
+            with common[0], common[1], common[2], common[3], mock.patch.object(
+                M, "expected_run_seed_identity", side_effect=capture_expected
+            ), mock.patch.object(
+                M, "assess_run_seed_reuse", side_effect=assess
+            ), mock.patch.object(
+                M, "_candidate_record", side_effect=candidate
+            ), mock.patch.object(
+                M.subprocess, "run", side_effect=run_canary
+            ), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ), self.assertRaises(SystemExit) as raised:
+                M.main(
+                    [
+                        "--protocol",
+                        str(PROTOCOL_V2),
+                        "--provider",
+                        "mock",
+                        "--workers",
+                        "2",
+                        "--acceleration-stage",
+                        "canary",
+                        "--out",
+                        str(root),
+                        "--run-id",
+                        "workers2-canary-parent",
+                    ]
+                )
+            self.assertEqual(raised.exception.code, 1)
+            self.assertEqual(canary_max_active, 2)
+            self.assertEqual(len(canary_calls), 2)
+            self.assertEqual(
+                {slot_jobs[run_id.split("-")[1]][1] for run_id in canary_calls},
+                {1},
+            )
+            self.assertTrue(
+                all(run_id.endswith("-ta1") for run_id in canary_calls)
+            )
+
+            canary_dir = root / "runs" / "workers2-canary-parent"
+            canary_selection = json.loads(
+                (canary_dir / M.SELECTION_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            canary_summary = json.loads(
+                (canary_dir / "driver_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            canary_manifest = json.loads(
+                (canary_dir / "run_manifest.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            canary_ledger = _read_jsonl(
+                canary_dir / M.ATTEMPT_LEDGER_NAME
+            )
+            self.assertEqual(len(canary_selection["children"]), 1)
+            self.assertEqual(
+                len(canary_selection["missing_or_rejected_slots"]), 143
+            )
+            deferred = [
+                row
+                for row in canary_selection[
+                    "missing_or_rejected_slots"
+                ]
+                if row["reason_codes"] == [
+                    M.ACCELERATION_DEFERRED_REASON
+                ]
+            ]
+            self.assertEqual(len(deferred), 142)
+            self.assertTrue(
+                all(
+                    row["status"] == "missing"
+                    and row["attempt_run_ids"] == []
+                    for row in deferred
+                )
+            )
+            deferred_ledger = [
+                row
+                for row in canary_ledger
+                if row["reason_code"]
+                == M.ACCELERATION_DEFERRED_REASON
+            ]
+            self.assertEqual(len(deferred_ledger), 142)
+            self.assertTrue(
+                all(
+                    row["status"] == "not_launched"
+                    and row["run_id"] is None
+                    and row["technical_retry_idx"] is None
+                    for row in deferred_ledger
+                )
+            )
+            self.assertEqual(canary_summary["planned_runs"], 144)
+            self.assertEqual(canary_summary["started_runs"], 2)
+            self.assertEqual(canary_summary["completed_runs"], 1)
+            self.assertEqual(canary_summary["failed_runs"], 143)
+            self.assertEqual(
+                canary_summary["execution_acceleration"]["stage"],
+                "canary",
+            )
+            self.assertEqual(
+                canary_manifest["technical_attempt_ledger"][
+                    "stage_max_child_attempts_per_slot"
+                ],
+                1,
+            )
+
+            full_calls = []
+            full_active = 0
+            full_max_active = 0
+            active_pairs: dict[int, int] = {}
+            overlapping_pairs = []
+            full_lock = threading.Lock()
+            expected_launches = {1: 1, **{index: 2 for index in range(2, 73)}}
+            full_barriers = {
+                pair_ordinal: threading.Barrier(count)
+                for pair_ordinal, count in expected_launches.items()
+            }
+
+            def run_full(command, *args, **kwargs):
+                nonlocal full_active, full_max_active
+                if not (
+                    isinstance(command, (list, tuple))
+                    and "experiments.run_seed" in command
+                ):
+                    return REAL_SUBPROCESS_RUN(command, *args, **kwargs)
+                run_id = command[command.index("--run-id") + 1]
+                full_calls.append(run_id)
+                _job, pair_ordinal = slot_jobs[run_id.split("-")[1]]
+                with full_lock:
+                    active_pairs[pair_ordinal] = (
+                        active_pairs.get(pair_ordinal, 0) + 1
+                    )
+                    if len(active_pairs) > 1:
+                        overlapping_pairs.append(tuple(sorted(active_pairs)))
+                    full_active += 1
+                    full_max_active = max(full_max_active, full_active)
+                full_barriers[pair_ordinal].wait(timeout=5)
+                attempt = root / "runs" / run_id
+                attempt.mkdir(parents=True)
+                (attempt / "run_manifest.json").write_text(
+                    json.dumps(
+                        {
+                            "status": "finished",
+                            "managed_context": {"state": "FINISHED"},
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                with full_lock:
+                    full_active -= 1
+                    active_pairs[pair_ordinal] -= 1
+                    if active_pairs[pair_ordinal] == 0:
+                        del active_pairs[pair_ordinal]
+                return subprocess.CompletedProcess(command, 0, "", "")
+
+            expected_by_key.clear()
+            common = (
+                mock.patch.object(
+                    M,
+                    "_load_materials",
+                    return_value=(
+                        protocol,
+                        protocol_hash,
+                        materials,
+                    ),
+                ),
+                mock.patch.object(M, "_build_jobs", return_value=jobs),
+                mock.patch.dict(
+                    sys.modules,
+                    {"experiments.aggregate_multi_event": aggregate},
+                ),
+                mock.patch.object(
+                    M,
+                    "_gate_reported_model",
+                    side_effect=lambda decision, **_kwargs: decision,
+                ),
+            )
+            with common[0], common[1], common[2], common[3], mock.patch.object(
+                M, "expected_run_seed_identity", side_effect=capture_expected
+            ), mock.patch.object(
+                M, "assess_run_seed_reuse", side_effect=assess
+            ), mock.patch.object(
+                M, "_candidate_record", side_effect=candidate
+            ), mock.patch.object(
+                M.subprocess, "run", side_effect=run_full
+            ), mock.patch.dict(
+                os.environ, _clean_environment(), clear=True
+            ):
+                M.main(
+                    [
+                        "--protocol",
+                        str(PROTOCOL_V2),
+                        "--provider",
+                        "mock",
+                        "--workers",
+                        "2",
+                        "--acceleration-stage",
+                        "full",
+                        "--approve-workers2-full",
+                        "--out",
+                        str(root),
+                        "--run-id",
+                        "workers2-full-parent",
+                    ]
+                )
+
+            self.assertEqual(len(full_calls), 143)
+            self.assertEqual(full_max_active, 2)
+            self.assertEqual(overlapping_pairs, [])
+            first_job_calls = [
+                run_id
+                for run_id in full_calls
+                if run_id.split("-")[1] == jobs[0].slot["slot_id"]
+            ]
+            self.assertEqual(len(first_job_calls), 1)
+            self.assertTrue(first_job_calls[0].endswith("-ta2"))
+            self.assertFalse(
+                any(
+                    run_id.split("-")[1] == jobs[1].slot["slot_id"]
+                    for run_id in full_calls
+                )
+            )
+            full_dir = root / "runs" / "workers2-full-parent"
+            full_selection = json.loads(
+                (full_dir / M.SELECTION_NAME).read_text(
+                    encoding="utf-8"
+                )
+            )
+            full_summary = json.loads(
+                (full_dir / "driver_summary.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(len(full_selection["children"]), 144)
+            self.assertEqual(
+                full_selection["missing_or_rejected_slots"], []
+            )
+            self.assertEqual(full_summary["completed_runs"], 144)
+            self.assertEqual(full_summary["failed_runs"], 0)
+            self.assertEqual(full_summary["reused_runs"], 1)
+            self.assertEqual(full_summary["executed_runs"], 143)
+            self.assertEqual(
+                full_summary["execution_acceleration"]["stage"], "full"
+            )
+            self.assertTrue(
+                full_summary["execution_acceleration"][
+                    "full_stage_approved"
+                ]
+            )
 
     def test_subprocess_exception_is_durable_sanitized_and_partial_exit_is_nonzero(self) -> None:
         secret = "TOP_SECRET_SUBPROCESS_EXCEPTION"

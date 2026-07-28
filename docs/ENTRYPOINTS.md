@@ -72,14 +72,16 @@ honest_n_runs.
 | experiments.lev2x2 | leverage-on social cells × seed | child results and failures.log | Indirect | Yes |
 | experiments.phase2b | leverage/social cells × seed | child results and failures.log | Indirect | Yes |
 | experiments.critsweep | leverage level × seed | child results and failures.log | Indirect | Yes |
+| experiments.multi_event | allowlisted protocol profile × event × social arm × seed × repeat, with bounded technical attempts | immutable managed plan, public/private attempt ledgers, selection, summary, private failure detail and managed children | Indirect | Yes; one registry/command identity dispatches the exact workers=1 historical profile or paired-workers2 canary/full profile. Each profile binds its own protocol hash, root, source snapshot, workers, launch policy and stage; profiles are never pooled. |
 
-All seven build a python -m experiments.run_seed command and use
-subprocess.run. Representative evidence is experiments/grid2x2.py:54-83; the
-other command sites are drive.py:75, sweep.py:49, ablate.py:40, lev2x2.py:44,
-phase2b.py:46, and critsweep.py:44. Before Phase 1.1B only each child was
-managed. The current parent lifecycle now writes `driver_summary.json`,
-unitized per-cell/total completion, and a 0600 private failure-detail file;
-each simulation remains a separately managed child.
+All legacy seven drivers plus `experiments.multi_event` build a
+`python -m experiments.run_seed` command and launch separately managed
+children. Representative legacy evidence is experiments/grid2x2.py:54-83; the
+other legacy command sites are drive.py:75, sweep.py:49, ablate.py:40,
+lev2x2.py:44, phase2b.py:46, and critsweep.py:44. Before Phase 1.1B only each
+child was managed. The current parent lifecycle now writes
+`driver_summary.json`, unitized per-cell/total completion, and a 0600 private
+failure-detail file; each simulation remains a separately managed child.
 
 Phase 1.2A also routes every resume candidate through the centralized
 `nmsim.result_reuse` policy. A path or healthy-looking flat JSON is not
@@ -105,7 +107,7 @@ limitations, and Phase 1.1B must not alter their numerical formulas.
 | Entrypoint | Actual input → output | Phase 1.1A overwrite behavior | Formal research after 1.1B |
 |---|---|---|---|
 | experiments.aggregate_grid | per-cell result JSON → grid_summary.json and envelope_2x2.png | write/savefig replace flat paths (aggregate_grid.py:112-168) | Yes after analysis management; retain independent-sample/health-filter caveats |
-| experiments.aggregate_multi_event | finished multi-event driver manifest → registered plan/public+private ledgers/selection/summary validation + identity-validated managed children + hashed catalog/event inputs → complete-case event/cross-event estimates, multi_event_summary.json and three-panel PNG | New in Wave 1 | Yes, analysis_managed and Provider-free; live requires the canonical non-symlink root, independently rechecked current clean protocol-owning Git snapshot, exact counterbalanced ordinals, an exclusive nonblocking root lock through output hashing, an exact terminal five-attempt materialization prefix, uniform runtime environment, SDK retry=0, public-safe reason codes, exact visible-attempt sequences/safe aliases, public-decision terminal-health closure, and hashed raw/private artifacts with private mode 0600. Arbitrary selections and legacy-flat inputs are ineligible; mock subsets remain engineering-only and cannot support realism claims. |
+| experiments.aggregate_multi_event | finished multi-event driver manifest → exact protocol-profile/root/source/stage/launch-policy validation + registered plan/public+private ledgers/selection/summary validation + identity-validated managed children + hashed catalog/event inputs → complete-case event/cross-event estimates or explicitly incomplete canary description, multi_event_summary.json and three-panel PNG | New in Wave 1; extended by the paired-workers2 acquisition pilot | Yes, analysis_managed and Provider-free; live requires the selected profile's canonical non-symlink root, independently rechecked current clean protocol-owning Git snapshot, exact counterbalanced ordinals and (for workers2) one-pair-at-a-time barrier policy, an exclusive nonblocking root lock through output hashing, the stage-specific attempt cap, uniform runtime environment, SDK retry=0, public-safe reason codes, exact visible-attempt sequences/safe aliases, public-decision terminal-health closure, and hashed raw/private artifacts with private mode 0600. Workers=1 and workers=2 roots/results are never pooled. A two-child canary may be described honestly but cannot claim full-grid, realism, variance-component, or confirmatory evidence. Arbitrary selections and legacy-flat inputs are ineligible; mock subsets remain engineering-only. |
 | experiments.aggregate_seeds | gain/seed JSON → summary JSON and envelope PNG | replaces flat outputs (aggregate_seeds.py:80-118) | Yes after analysis management; historical gain semantics remain explicit |
 | experiments.aggregate_sweep | paired sweep JSON → stdout statistics and sweep_main.png | replaces plot (aggregate_sweep.py:125-126) | Yes after analysis management; do not silently change historical CI |
 | experiments.calib_n | calibration replicate JSON → calib_N.txt | replaces file (calib_n.py:54-55) | Yes; this file becomes scientific input to the next stage |

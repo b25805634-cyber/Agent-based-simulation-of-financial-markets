@@ -42,9 +42,11 @@ from nmsim.managed_cli import (
 from nmsim.multi_event import (
     ATTEMPT_SERIES_SCHEMA_VERSION,
     MultiEventMaterial,
+    ProtocolProfile,
     build_attempt_run_id,
     build_attempt_series_id,
     canonical_multi_event_basename,
+    get_protocol_profile,
     load_multi_event_material,
     load_protocol,
 )
@@ -76,6 +78,8 @@ PRIVATE_ATTEMPT_LEDGER_NAME = "multi_event_attempts.private.jsonl"
 ATTEMPT_COORDINATION_LOCK_NAME = ".multi_event_attempts.lock"
 CANONICAL_LIVE_OUT = REPO_ROOT / "results_multi_event"
 LIVE_SOURCE_SNAPSHOT_REJECTED = "live_source_snapshot_rejected"
+ACCELERATION_DEFERRED_REASON = "acceleration_canary_deferred"
+ACCELERATION_CANARY_LIMIT_REASON = "acceleration_canary_attempt_limit_reached"
 MAX_PRIVATE_CHARS = 32768
 
 
@@ -227,6 +231,12 @@ def build_argparser() -> RaisingArgumentParser:
     parser.add_argument("--out", default="results_multi_event")
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--live", action="store_true")
+    parser.add_argument(
+        "--acceleration-stage",
+        choices=("canary", "full"),
+        default=None,
+    )
+    parser.add_argument("--approve-workers2-full", action="store_true")
     parser.add_argument("--run-id", default=None)
     return parser
 
@@ -255,10 +265,32 @@ def _load_materials(protocol_path: Path, catalog_path: Path) -> tuple[Mapping[st
     return protocol, protocol_hash, materials
 
 
-def _validate_cli(args, protocol: Mapping[str, Any]) -> tuple[list[int], list[int], str, bool, str | None]:
+def _profile_acceleration(
+    protocol: Mapping[str, Any],
+    profile: ProtocolProfile | None,
+) -> Mapping[str, Any] | None:
+    acceleration = (
+        profile.execution_acceleration
+        if profile is not None
+        else protocol.get("execution_acceleration")
+    )
+    return acceleration if isinstance(acceleration, Mapping) else None
+
+
+def _validate_cli(
+    args,
+    protocol: Mapping[str, Any],
+    profile: ProtocolProfile | None = None,
+) -> tuple[list[int], list[int], str, bool, str | None]:
     design = protocol["design"]
     frozen_seeds = list(design["seeds"])
     frozen_repeats = list(design["repeat_indices"])
+    acceleration = _profile_acceleration(protocol, profile)
+    frozen_workers = (
+        int(profile.workers)
+        if profile is not None
+        else int(protocol["acceptance_and_execution"]["workers"])
+    )
     if args.workers < 1:
         raise ValueError("--workers must be >= 1")
     n = len(frozen_seeds) if args.n is None else args.n
@@ -275,8 +307,42 @@ def _validate_cli(args, protocol: Mapping[str, Any]) -> tuple[list[int], list[in
         raise ValueError("--live and --dry-run are mutually exclusive")
     if args.provider == "openai" and (args.n is not None or args.k is not None):
         raise ValueError("live execution cannot override frozen N/K")
-    if args.live and args.workers != protocol["acceptance_and_execution"]["workers"]:
-        raise ValueError("live execution requires the frozen --workers 1")
+    if args.live and args.workers != frozen_workers:
+        raise ValueError(
+            "live execution requires the frozen --workers {}".format(
+                frozen_workers
+            )
+        )
+    if acceleration is None:
+        if args.acceleration_stage is not None or args.approve_workers2_full:
+            raise ValueError(
+                "the v1 protocol rejects workers2 acceleration-stage options"
+            )
+    else:
+        if args.workers != frozen_workers:
+            raise ValueError(
+                "the workers2 protocol requires the frozen --workers {}".format(
+                    frozen_workers
+                )
+            )
+        if args.acceleration_stage is None:
+            raise ValueError(
+                "the workers2 protocol requires --acceleration-stage"
+            )
+        if (
+            args.approve_workers2_full
+            and args.acceleration_stage != "full"
+        ):
+            raise ValueError(
+                "--approve-workers2-full requires --acceleration-stage full"
+            )
+        if (
+            args.acceleration_stage == "full"
+            and not args.approve_workers2_full
+        ):
+            raise ValueError(
+                "the workers2 full stage requires --approve-workers2-full"
+            )
 
     frozen_model = protocol["effective_config_freeze"]["model_request"]["model"]
     if args.model is not None and args.model != frozen_model:
@@ -307,7 +373,7 @@ def _validate_cli(args, protocol: Mapping[str, Any]) -> tuple[list[int], list[in
             and args.n is None
             and args.k is None
             and args.workers
-            == protocol["acceptance_and_execution"]["workers"]
+            == frozen_workers
         )
         reason = None if adherence else "dry_run_or_execution_override"
     elif args.provider == "mock":
@@ -316,22 +382,35 @@ def _validate_cli(args, protocol: Mapping[str, Any]) -> tuple[list[int], list[in
         reason = "offline_engineering_acceptance_not_preregistered_realism"
     else:
         mode = "openai_live"
-        adherence = args.workers == protocol["acceptance_and_execution"]["workers"]
+        adherence = args.workers == frozen_workers
         reason = None if adherence else "execution_worker_override"
     return selected_seeds, selected_repeats, mode, adherence, reason
 
 
-def _resolve_output_root(raw: str, *, mode: str) -> Path:
+def _canonical_live_out(profile: ProtocolProfile | None) -> Path:
+    if profile is None:
+        return CANONICAL_LIVE_OUT
+    return REPO_ROOT / profile.canonical_live_output_relative_path
+
+
+def _resolve_output_root(
+    raw: str,
+    *,
+    mode: str,
+    profile: ProtocolProfile | None = None,
+) -> Path:
     """Resolve a driver root; live has exactly one non-rebindable location."""
 
     expanded = os.path.expanduser(str(raw))
     lexical = Path(os.path.abspath(expanded))
     if mode != "openai_live":
         return lexical.resolve()
-    canonical = CANONICAL_LIVE_OUT
+    canonical = _canonical_live_out(profile)
     if lexical != canonical:
         raise ValueError(
-            "live execution requires the canonical repository results_multi_event root"
+            "live execution requires the canonical repository {} root".format(
+                canonical.name
+            )
         )
     if os.path.lexists(canonical):
         if canonical.is_symlink():
@@ -343,12 +422,22 @@ def _resolve_output_root(raw: str, *, mode: str) -> Path:
     return canonical
 
 
-def _output_root_policy(mode: str, out_root: Path) -> Mapping[str, Any]:
+def _output_root_policy(
+    mode: str,
+    out_root: Path,
+    *,
+    profile: ProtocolProfile | None = None,
+) -> Mapping[str, Any]:
     live = mode == "openai_live"
+    relative_root = (
+        "results_multi_event"
+        if profile is None
+        else profile.canonical_live_output_relative_path
+    )
     return {
         "schema_version": "multi_event_output_root_v1",
         "effective_root": str(out_root),
-        "canonical_repo_relative_root": "results_multi_event",
+        "canonical_repo_relative_root": relative_root,
         "live_canonical_root_enforced": live,
         "alternate_root_allowed": not live,
         "symlink_or_rebinding_allowed": False if live else None,
@@ -370,7 +459,12 @@ def _git_stdout(*arguments: str) -> str:
     return process.stdout.strip()
 
 
-def _source_snapshot(*, mode: str, protocol_path: Path) -> Mapping[str, Any]:
+def _source_snapshot(
+    *,
+    mode: str,
+    protocol_path: Path,
+    profile: ProtocolProfile | None = None,
+) -> Mapping[str, Any]:
     """Bind live to the clean Git snapshot that owns the frozen protocol."""
 
     if mode != "openai_live":
@@ -384,7 +478,11 @@ def _source_snapshot(*, mode: str, protocol_path: Path) -> Mapping[str, Any]:
             "protocol_last_change_commit": None,
             "scientific_component_fingerprint": None,
         }
-    canonical_protocol = PROTOCOL_PATH.resolve(strict=True)
+    canonical_protocol = (
+        PROTOCOL_PATH
+        if profile is None
+        else REPO_ROOT / profile.canonical_protocol_relative_path
+    ).resolve(strict=True)
     if protocol_path.resolve(strict=True) != canonical_protocol:
         raise ValueError("live execution requires the canonical protocol path")
     head = _git_stdout("rev-parse", "HEAD")
@@ -886,8 +984,10 @@ def _input_paths(materials: Sequence[MultiEventMaterial]) -> Mapping[str, str]:
     return paths
 
 
-def _launch_order_policy() -> Mapping[str, Any]:
-    return {
+def _launch_order_policy(
+    profile: ProtocolProfile | None = None,
+) -> Mapping[str, Any]:
+    base = {
         "schema_version": "multi_event_launch_order_v1",
         "block_order": "repeat_position_then_seed_position",
         "event_rotation": "(repeat_position+seed_position)%3",
@@ -902,6 +1002,88 @@ def _launch_order_policy() -> Mapping[str, Any]:
             "filter_ineligible_slots_without_reordering_remaining_jobs"
         ),
     }
+    acceleration = (
+        None if profile is None else profile.execution_acceleration
+    )
+    if not isinstance(acceleration, Mapping):
+        return base
+    return {
+        **base,
+        "schema_version": "multi_event_paired_workers2_launch_order_v1",
+        "scheduler": acceleration["scheduler"],
+        "pair_barrier": bool(acceleration["pair_barrier"]),
+        "submission_unit": acceleration["submission_unit"],
+        "between_pair_policy": acceleration["between_pair_policy"],
+    }
+
+
+def _acceleration_stage_document(
+    profile: ProtocolProfile,
+    args: Any,
+    *,
+    planned_jobs: int,
+) -> Mapping[str, Any] | None:
+    acceleration = profile.execution_acceleration
+    stage = args.acceleration_stage
+    if not isinstance(acceleration, Mapping) or stage is None:
+        return None
+    if planned_jobs < 2 or planned_jobs % 2:
+        raise ValueError("paired workers2 execution requires complete two-arm pairs")
+    if stage == "canary":
+        pair_limit = int(acceleration["canary_pair_count"])
+        slot_limit = int(acceleration["canary_slot_count"])
+        attempt_limit = int(
+            acceleration["canary_max_child_attempts_per_slot"]
+        )
+        deferred_reason: str | None = ACCELERATION_DEFERRED_REASON
+    else:
+        pair_limit = planned_jobs // 2
+        slot_limit = planned_jobs
+        attempt_limit = int(
+            acceleration["full_stage_max_child_attempts_per_slot"]
+        )
+        deferred_reason = None
+    if slot_limit != pair_limit * 2 or slot_limit > planned_jobs:
+        raise ValueError("workers2 acceleration stage limits are inconsistent")
+    return {
+        "schema_version": "multi_event_acceleration_stage_v1",
+        "profile_id": acceleration["profile_id"],
+        "stage": stage,
+        "scheduler": acceleration["scheduler"],
+        "workers": int(profile.workers),
+        "max_in_flight_children": int(
+            acceleration["max_in_flight_children"]
+        ),
+        "submitted_pair_limit": pair_limit,
+        "submitted_slot_limit": slot_limit,
+        "max_child_attempts_per_slot": attempt_limit,
+        "full_stage_approved": bool(args.approve_workers2_full),
+        "deferred_reason_code": deferred_reason,
+    }
+
+
+def _paired_jobs(
+    jobs: Sequence[MultiEventJob],
+) -> list[tuple[MultiEventJob, MultiEventJob]]:
+    if not jobs or len(jobs) % 2:
+        raise ValueError("paired workers2 schedule requires a non-empty even grid")
+    pairs: list[tuple[MultiEventJob, MultiEventJob]] = []
+    for index in range(0, len(jobs), 2):
+        first, second = jobs[index : index + 2]
+        if (
+            first.event_id,
+            first.seed,
+            first.repeat_idx,
+        ) != (
+            second.event_id,
+            second.seed,
+            second.repeat_idx,
+        ) or {first.arm, second.arm} != {"social_on", "social_off"}:
+            raise ValueError(
+                "paired workers2 schedule lost adjacent two-arm identity"
+            )
+        pairs.append((first, second))
+    return pairs
 
 
 def _plan_document(
@@ -921,8 +1103,67 @@ def _plan_document(
     dry_run: bool,
     output_root_policy: Mapping[str, Any],
     source_snapshot: Mapping[str, Any],
+    profile: ProtocolProfile | None = None,
+    acceleration_stage: Mapping[str, Any] | None = None,
 ) -> Mapping[str, Any]:
-    return {
+    launch_policy = _launch_order_policy(profile)
+    plan_jobs = []
+    for launch_ordinal, job in enumerate(jobs, start=1):
+        item = {
+            "launch_ordinal": launch_ordinal,
+            "event_id": job.event_id,
+            "arm": job.arm,
+            "seed": job.seed,
+            "repeat_idx": job.repeat_idx,
+            "slot": dict(job.slot),
+            "basename": job.basename,
+            "attempt_series_id": _attempt_series_id(
+                job, expected_identities[job.key]
+            ),
+            "allowed_attempt_run_ids": [
+                _attempt_run_id(
+                    job,
+                    index,
+                    _attempt_series_id(job, expected_identities[job.key]),
+                )
+                for index in range(
+                    1,
+                    int(
+                        protocol["acceptance_and_execution"][
+                            "max_child_attempts"
+                        ]
+                    )
+                    + 1,
+                )
+            ],
+            "child_command": list(job.base_command),
+            "scientific_config_hash": expected_identities[
+                job.key
+            ].scientific_config_hash,
+            "model_request_config_hash": expected_identities[
+                job.key
+            ].model_request_config_hash,
+            "scientific_input_identity": expected_identities[
+                job.key
+            ].scientific_input_identity,
+            "scenario_definition_hash": expected_identities[
+                job.key
+            ].scenario_definition_hash,
+            "scientific_runtime_environment": expected_identities[
+                job.key
+            ].scientific_runtime_environment,
+            "scientific_runtime_environment_identity": expected_identities[
+                job.key
+            ].scientific_runtime_environment_identity,
+        }
+        if acceleration_stage is not None:
+            item["pair_ordinal"] = (launch_ordinal + 1) // 2
+            item["within_pair_ordinal"] = (
+                1 if launch_ordinal % 2 else 2
+            )
+        plan_jobs.append(item)
+
+    plan = {
         "schema_version": "multi_event_plan_v1",
         "protocol_id": protocol["protocol_id"],
         "protocol_sha256": protocol_hash,
@@ -935,7 +1176,7 @@ def _plan_document(
             "repeat_indices": list(repeats),
             "planned_runs": len(jobs),
             "override_reason": override_reason,
-            "launch_order_policy": dict(_launch_order_policy()),
+            "launch_order_policy": dict(launch_policy),
         },
         "provider_request": {
             "provider": provider,
@@ -995,51 +1236,11 @@ def _plan_document(
         ],
         "planned_complete_seed_pairs": len(materials) * len(seeds),
         "honest_n_complete_seed_pairs": 0,
-        "jobs": [
-            {
-                "launch_ordinal": launch_ordinal,
-                "event_id": job.event_id,
-                "arm": job.arm,
-                "seed": job.seed,
-                "repeat_idx": job.repeat_idx,
-                "slot": dict(job.slot),
-                "basename": job.basename,
-                "attempt_series_id": _attempt_series_id(
-                    job, expected_identities[job.key]
-                ),
-                "allowed_attempt_run_ids": [
-                    _attempt_run_id(
-                        job,
-                        index,
-                        _attempt_series_id(job, expected_identities[job.key]),
-                    )
-                    for index in range(
-                        1,
-                        int(
-                            protocol["acceptance_and_execution"][
-                                "max_child_attempts"
-                            ]
-                        )
-                        + 1,
-                    )
-                ],
-                "child_command": list(job.base_command),
-                "scientific_config_hash": expected_identities[job.key].scientific_config_hash,
-                "model_request_config_hash": expected_identities[job.key].model_request_config_hash,
-                "scientific_input_identity": expected_identities[job.key].scientific_input_identity,
-                "scenario_definition_hash": expected_identities[job.key].scenario_definition_hash,
-                "scientific_runtime_environment": (
-                    expected_identities[job.key].scientific_runtime_environment
-                ),
-                "scientific_runtime_environment_identity": (
-                    expected_identities[
-                        job.key
-                    ].scientific_runtime_environment_identity
-                ),
-            }
-            for launch_ordinal, job in enumerate(jobs, start=1)
-        ],
+        "jobs": plan_jobs,
     }
+    if acceleration_stage is not None:
+        plan["execution_acceleration"] = dict(acceleration_stage)
+    return plan
 
 
 def _complete_seed_pairs(
@@ -1083,13 +1284,16 @@ def main(argv=None) -> None:
         protocol, protocol_hash, materials = _load_materials(
             protocol_path, catalog_path
         )
+        profile = get_protocol_profile(protocol, protocol_hash)
         seeds, repeats, mode, adherence, override_reason = _validate_cli(
-            args, protocol
+            args, protocol, profile
         )
-        out_root = _resolve_output_root(args.out, mode=mode)
-        output_root_policy = _output_root_policy(mode, out_root)
+        out_root = _resolve_output_root(args.out, mode=mode, profile=profile)
+        output_root_policy = _output_root_policy(
+            mode, out_root, profile=profile
+        )
         source_snapshot = _source_snapshot(
-            mode=mode, protocol_path=protocol_path
+            mode=mode, protocol_path=protocol_path, profile=profile
         )
         jobs = _build_jobs(
             materials,
@@ -1097,6 +1301,11 @@ def main(argv=None) -> None:
             repeats=repeats,
             provider=args.provider,
             out_root=out_root,
+        )
+        if profile.execution_acceleration is not None:
+            _paired_jobs(jobs)
+        acceleration_stage = _acceleration_stage_document(
+            profile, args, planned_jobs=len(jobs)
         )
         expected = {
             job.key: expected_run_seed_identity(job.base_command) for job in jobs
@@ -1126,6 +1335,8 @@ def main(argv=None) -> None:
         dry_run=args.dry_run,
         output_root_policy=output_root_policy,
         source_snapshot=source_snapshot,
+        profile=profile,
+        acceleration_stage=acceleration_stage,
     )
     inputs = _input_paths(materials)
 
@@ -1139,7 +1350,7 @@ def main(argv=None) -> None:
             input_paths=inputs,
         )
         with context:
-            context.manifest["multi_event_driver"] = {
+            driver_identity = {
                 "schema_version": "1.0",
                 "attempt_series_schema_version": ATTEMPT_SERIES_SCHEMA_VERSION,
                 "protocol_id": protocol["protocol_id"],
@@ -1154,6 +1365,11 @@ def main(argv=None) -> None:
                 "output_root_policy": dict(output_root_policy),
                 "source_snapshot": dict(source_snapshot),
             }
+            if acceleration_stage is not None:
+                driver_identity["execution_acceleration"] = dict(
+                    acceleration_stage
+                )
+            context.manifest["multi_event_driver"] = driver_identity
             plan_path = Path(context.run_dir) / PLAN_NAME
             with plan_path.open("x", encoding="utf-8") as handle:
                 json.dump(plan, handle, indent=2, sort_keys=True)
@@ -1189,7 +1405,7 @@ def main(argv=None) -> None:
         out_root, parent_run_id=managed.run_dir.name
     )
     with managed, attempt_lock:
-        managed.context.manifest["multi_event_driver"] = {
+        driver_identity = {
             "schema_version": "1.0",
             "attempt_series_schema_version": ATTEMPT_SERIES_SCHEMA_VERSION,
             "protocol_id": protocol["protocol_id"],
@@ -1216,6 +1432,11 @@ def main(argv=None) -> None:
                 ),
             },
         }
+        if acceleration_stage is not None:
+            driver_identity["execution_acceleration"] = dict(
+                acceleration_stage
+            )
+        managed.context.manifest["multi_event_driver"] = driver_identity
         managed.context.register_llm_runtime(
             provider="none",
             model="none",
@@ -1251,6 +1472,10 @@ def main(argv=None) -> None:
                 protocol["acceptance_and_execution"]["max_child_attempts"]
             ),
         }
+        if acceleration_stage is not None:
+            managed.context.manifest["technical_attempt_ledger"][
+                "stage_max_child_attempts_per_slot"
+            ] = int(acceleration_stage["max_child_attempts_per_slot"])
         managed.context.manifest.write_atomic()
 
         health_threshold = float(
@@ -1259,6 +1484,15 @@ def main(argv=None) -> None:
         max_attempts = int(
             protocol["acceptance_and_execution"]["max_child_attempts"]
         )
+        stage_attempt_limit = (
+            max_attempts
+            if acceleration_stage is None
+            else int(acceleration_stage["max_child_attempts_per_slot"])
+        )
+        if not 1 <= stage_attempt_limit <= max_attempts:
+            raise ValueError(
+                "acceleration stage attempt limit exceeds the protocol cap"
+            )
         endpoint = _effective_endpoint(protocol) if mode == "openai_live" else None
         decisions: dict[tuple[str, str, int, int], ReuseDecision] = {}
         attempt_run_ids: dict[tuple[str, str, int, int], list[str]] = {
@@ -1422,13 +1656,65 @@ def main(argv=None) -> None:
                 preflight_block_reason[job.key] = "attempt_budget_exhausted"
                 final_reasons[job.key].append("attempt_budget_exhausted")
 
-        todo = [job for job in jobs if not decisions.get(job.key, None) or not decisions[job.key].reusable]
-        print(
-            "multi-event: {} planned, {} reusable, {} to execute (workers={})".format(
-                len(jobs), len(jobs) - len(todo), len(todo), args.workers
-            ),
-            flush=True,
-        )
+        all_todo = [
+            job
+            for job in jobs
+            if not decisions.get(job.key, None)
+            or not decisions[job.key].reusable
+        ]
+        deferred_jobs: list[MultiEventJob] = []
+        if (
+            acceleration_stage is not None
+            and acceleration_stage["stage"] == "canary"
+        ):
+            submitted_limit = int(
+                acceleration_stage["submitted_slot_limit"]
+            )
+            canary_jobs = jobs[:submitted_limit]
+            canary_keys = {job.key for job in canary_jobs}
+            deferred_jobs = [job for job in jobs if job.key not in canary_keys]
+            if any(attempt_run_ids[job.key] for job in deferred_jobs):
+                raise AttemptCoordinationError(
+                    "canary stage found a materialized attempt outside its "
+                    "canonical first pair"
+                )
+            for job in deferred_jobs:
+                final_reasons[job.key].append(
+                    ACCELERATION_DEFERRED_REASON
+                )
+                record_attempt(
+                    job,
+                    source="acceleration_stage",
+                    technical_retry_idx=None,
+                    run_id=None,
+                    status="not_launched",
+                    reason_code=ACCELERATION_DEFERRED_REASON,
+                )
+            todo = [job for job in all_todo if job.key in canary_keys]
+        else:
+            todo = all_todo
+        if profile.execution_acceleration is None:
+            message = (
+                "multi-event: {} planned, {} reusable, {} to execute "
+                "(workers={})"
+            ).format(
+                len(jobs),
+                len(jobs) - len(all_todo),
+                len(todo),
+                args.workers,
+            )
+        else:
+            message = (
+                "multi-event: {} planned, {} reusable, {} to execute, "
+                "{} deferred (workers={})"
+            ).format(
+                len(jobs),
+                len(jobs) - len(all_todo),
+                len(todo),
+                len(deferred_jobs),
+                args.workers,
+            )
+        print(message, flush=True)
 
         def execute(job: MultiEventJob) -> DriverJobResult:
             managed.record_started(job.cell)
@@ -1447,7 +1733,7 @@ def main(argv=None) -> None:
                 )
 
             for technical_idx in range(
-                next_attempt_idx[job.key], max_attempts + 1
+                next_attempt_idx[job.key], stage_attempt_limit + 1
             ):
                 if endpoint is not None and not _wait_for_endpoint(endpoint):
                     last_reason = "endpoint_unreachable"
@@ -1682,6 +1968,12 @@ def main(argv=None) -> None:
                     },
                 )
 
+            if (
+                acceleration_stage is not None
+                and acceleration_stage["stage"] == "canary"
+                and stage_attempt_limit < max_attempts
+            ):
+                last_reason = ACCELERATION_CANARY_LIMIT_REASON
             with lock:
                 final_reasons[job.key].append(last_reason)
             return DriverJobResult(
@@ -1741,7 +2033,33 @@ def main(argv=None) -> None:
             if decision is not None and decision.reusable:
                 managed.record_reused(job.cell)
 
-        if args.workers == 1:
+        if profile.execution_acceleration is not None:
+            results = []
+            todo_keys = {job.key for job in todo}
+            max_pair_workers = min(
+                args.workers,
+                int(
+                    profile.execution_acceleration[
+                        "max_in_flight_children"
+                    ]
+                ),
+            )
+            with ThreadPoolExecutor(
+                max_workers=max_pair_workers
+            ) as executor:
+                for pair in _paired_jobs(jobs):
+                    pair_todo = [
+                        job for job in pair if job.key in todo_keys
+                    ]
+                    futures = [
+                        executor.submit(execute_guarded, job)
+                        for job in pair_todo
+                    ]
+                    results.extend(
+                        future.result()
+                        for future in as_completed(futures)
+                    )
+        elif args.workers == 1:
             results = [execute_guarded(job) for job in todo]
         else:
             with ThreadPoolExecutor(max_workers=args.workers) as executor:
@@ -1758,6 +2076,25 @@ def main(argv=None) -> None:
             print(
                 "[{}/{}] {} {}".format(
                     index, len(todo), "OK" if result.ok else "FAIL", result.tag
+                ),
+                flush=True,
+            )
+        if deferred_jobs:
+            for job in deferred_jobs:
+                result = DriverJobResult(
+                    cell=job.cell,
+                    tag=job.tag,
+                    seed=job.seed,
+                    ok=False,
+                    source="deferred",
+                    attempts=0,
+                    reason_code=ACCELERATION_DEFERRED_REASON,
+                )
+                managed.record_failed(result)
+                failures.append(result)
+            print(
+                "acceleration canary deferred {} unsubmitted slots".format(
+                    len(deferred_jobs)
                 ),
                 flush=True,
             )
@@ -1888,7 +2225,7 @@ def main(argv=None) -> None:
             "repeat_indices": list(repeats),
             "planned_runs": len(jobs),
             "override_reason": override_reason,
-            "launch_order_policy": dict(_launch_order_policy()),
+            "launch_order_policy": dict(_launch_order_policy(profile)),
         }
         planned_slots = [
             {
@@ -1914,6 +2251,7 @@ def main(argv=None) -> None:
             planned_slots=planned_slots,
             accepted_children=accepted_records,
             rejected_slots=rejected_records,
+            execution_acceleration=acceleration_stage,
         )
         selection_path = managed.run_dir / SELECTION_NAME
         with selection_path.open("x", encoding="utf-8") as handle:
@@ -1927,34 +2265,37 @@ def main(argv=None) -> None:
         complete_pairs, per_event_pairs = _complete_seed_pairs(
             accepted_keys, materials, seeds, repeats
         )
-        summary = managed.finish(
-            summary_extra={
-                "multi_event_protocol_sha256": protocol_hash,
-                "attempt_series_schema_version": (
-                    ATTEMPT_SERIES_SCHEMA_VERSION
-                ),
-                "multi_event_plan": PLAN_NAME,
-                "multi_event_selection": SELECTION_NAME,
-                "multi_event_public_attempt_ledger": ATTEMPT_LEDGER_NAME,
-                "selection_accepted_children": len(accepted_records),
-                "selection_rejected_or_missing_slots": len(rejected_records),
-                "honest_n_complete_seed_pairs": complete_pairs,
-                "honest_n_complete_seed_pairs_by_event": per_event_pairs,
-                "reported_model_aliases": aliases,
-                "invalid_reported_model_alias_count": 0,
-                "underlying_model_identity_verified": False,
-                "model_specific_inference_allowed": False,
-                "reported_alias_homogeneous_pooling_allowed": bool(
-                    mode == "openai_live" and len(aliases) == 1
-                ),
-                "pooling_scope": (
-                    "single_endpoint_reported_alias_not_underlying_model_proof"
-                    if mode == "openai_live" and len(aliases) == 1
-                    else "endpoint_mixture_or_mock_not_model_specific"
-                ),
-                "incomplete": bool(rejected_records),
-            }
-        )
+        summary_extra = {
+            "multi_event_protocol_sha256": protocol_hash,
+            "attempt_series_schema_version": (
+                ATTEMPT_SERIES_SCHEMA_VERSION
+            ),
+            "multi_event_plan": PLAN_NAME,
+            "multi_event_selection": SELECTION_NAME,
+            "multi_event_public_attempt_ledger": ATTEMPT_LEDGER_NAME,
+            "selection_accepted_children": len(accepted_records),
+            "selection_rejected_or_missing_slots": len(rejected_records),
+            "honest_n_complete_seed_pairs": complete_pairs,
+            "honest_n_complete_seed_pairs_by_event": per_event_pairs,
+            "reported_model_aliases": aliases,
+            "invalid_reported_model_alias_count": 0,
+            "underlying_model_identity_verified": False,
+            "model_specific_inference_allowed": False,
+            "reported_alias_homogeneous_pooling_allowed": bool(
+                mode == "openai_live" and len(aliases) == 1
+            ),
+            "pooling_scope": (
+                "single_endpoint_reported_alias_not_underlying_model_proof"
+                if mode == "openai_live" and len(aliases) == 1
+                else "endpoint_mixture_or_mock_not_model_specific"
+            ),
+            "incomplete": bool(rejected_records),
+        }
+        if acceleration_stage is not None:
+            summary_extra["execution_acceleration"] = dict(
+                acceleration_stage
+            )
+        summary = managed.finish(summary_extra=summary_extra)
     print(
         "completed={} failed={} selection={} summary={}".format(
             len(accepted_records), len(rejected_records), selection_path, summary

@@ -55,14 +55,16 @@ from nmsim.provenance import (
 from nmsim.provider_attempts import PROVIDER_ATTEMPT_SCHEMA, safe_reported_model
 from nmsim.multi_event import (
     ATTEMPT_SERIES_SCHEMA_VERSION,
-    FROZEN_PROTOCOL_SHA256,
     MultiEventMaterial,
     MultiEventProtocolError,
     PROTOCOL_SCHEMA_VERSION,
+    PROTOCOL_SCHEMA_VERSION_V2,
+    ProtocolProfile,
     build_attempt_run_id,
     build_attempt_series_id,
     build_experiment_slot,
     canonical_multi_event_basename,
+    get_protocol_profile,
     load_multi_event_material,
     load_protocol as load_frozen_protocol,
     reference_transform_identity,
@@ -85,6 +87,9 @@ from experiments.run_seed import build_population
 
 
 PROTOCOL_PATH = Path(__file__).with_name("multi_event_protocol.json")
+WORKERS2_PROTOCOL_PATH = Path(__file__).with_name(
+    "multi_event_protocol_workers2.json"
+)
 REPO_ROOT = Path(__file__).resolve().parents[1]
 CANONICAL_LIVE_OUT = REPO_ROOT / "results_multi_event"
 SELECTION_SCHEMA_VERSION = "1.0"
@@ -123,6 +128,8 @@ DRIVER_PUBLIC_REASON_CODES = frozenset(
         "child_run_not_started",
         "child_result_missing",
         "live_source_snapshot_rejected",
+        "acceleration_canary_deferred",
+        "acceleration_canary_attempt_limit_reached",
     }
 )
 ANALYZER_PUBLIC_REASON_CODES = (
@@ -360,6 +367,8 @@ class PreparedSelection:
     driver_run_id: Optional[str] = None
     output_root_policy: Optional[Mapping[str, Any]] = None
     source_snapshot: Optional[Mapping[str, Any]] = None
+    protocol_profile: Optional[ProtocolProfile] = None
+    execution_acceleration: Optional[Mapping[str, Any]] = None
 
 
 @dataclass(frozen=True)
@@ -502,10 +511,12 @@ def _validated_reported_aliases(raw: Any, field: str) -> list[str]:
     return aliases
 
 
-def launch_order_policy() -> Mapping[str, Any]:
-    """Return the frozen acquisition-order declaration independently."""
+def launch_order_policy(
+    profile: Optional[ProtocolProfile] = None,
+) -> Mapping[str, Any]:
+    """Return the selected profile's acquisition-order declaration."""
 
-    return {
+    base = {
         "schema_version": "multi_event_launch_order_v1",
         "block_order": "repeat_position_then_seed_position",
         "event_rotation": "(repeat_position+seed_position)%3",
@@ -522,6 +533,19 @@ def launch_order_policy() -> Mapping[str, Any]:
             "filter_ineligible_slots_without_reordering_remaining_jobs"
         ),
     }
+    acceleration = (
+        None if profile is None else profile.execution_acceleration
+    )
+    if not isinstance(acceleration, Mapping):
+        return base
+    return {
+        **base,
+        "schema_version": "multi_event_paired_workers2_launch_order_v1",
+        "scheduler": acceleration["scheduler"],
+        "pair_barrier": bool(acceleration["pair_barrier"]),
+        "submission_unit": acceleration["submission_unit"],
+        "between_pair_policy": acceleration["between_pair_policy"],
+    }
 
 
 def _read_json(path: Path, field: str) -> Mapping[str, Any]:
@@ -537,12 +561,169 @@ def protocol_sha256(path: Path = PROTOCOL_PATH) -> str:
 
 
 def load_protocol(path: Path = PROTOCOL_PATH) -> Mapping[str, Any]:
-    """Load the one shared, exact-byte frozen protocol contract."""
+    """Load one exact-byte allowlisted protocol contract."""
 
     protocol, digest = load_frozen_protocol(Path(path))
-    if digest != FROZEN_PROTOCOL_SHA256:
-        raise MultiEventProtocolError("frozen protocol digest changed")
+    profile = get_protocol_profile(protocol, digest)
+    canonical = (
+        REPO_ROOT / profile.canonical_protocol_relative_path
+    ).resolve(strict=True)
+    if Path(path).resolve(strict=True) != canonical:
+        raise MultiEventProtocolError(
+            "frozen protocol must use its canonical repository path"
+        )
     return protocol
+
+
+def _protocol_profile(
+    protocol: Mapping[str, Any], protocol_path: Path
+) -> ProtocolProfile:
+    """Resolve and path-bind an exact frozen protocol profile."""
+
+    path = Path(protocol_path).resolve(strict=True)
+    digest = protocol_sha256(path)
+    profile = get_protocol_profile(protocol, digest)
+    expected = (
+        REPO_ROOT / profile.canonical_protocol_relative_path
+    ).resolve(strict=True)
+    if path != expected:
+        raise MultiEventInputError(
+            "protocol path does not match its exact frozen profile"
+        )
+    return profile
+
+
+def _validated_acceleration_stage(
+    raw: Any,
+    profile: ProtocolProfile,
+    *,
+    required: bool,
+) -> Optional[Mapping[str, Any]]:
+    """Validate the exact v2 canary/full stage identity; v1 has none."""
+
+    acceleration = profile.execution_acceleration
+    if acceleration is None:
+        if raw is not None:
+            raise MultiEventInputError(
+                "workers=1 artifacts cannot declare execution_acceleration"
+            )
+        return None
+    if raw is None:
+        if required:
+            raise MultiEventInputError(
+                "workers=2 artifacts require execution_acceleration"
+            )
+        return None
+    stage = _mapping(raw, "execution_acceleration")
+    expected_keys = {
+        "schema_version",
+        "profile_id",
+        "stage",
+        "scheduler",
+        "workers",
+        "max_in_flight_children",
+        "submitted_pair_limit",
+        "submitted_slot_limit",
+        "max_child_attempts_per_slot",
+        "full_stage_approved",
+        "deferred_reason_code",
+    }
+    if set(stage) != expected_keys:
+        raise MultiEventInputError(
+            "execution_acceleration does not have the exact stage fields"
+        )
+    stage_name = stage.get("stage")
+    if stage_name == "canary":
+        expected = {
+            "schema_version": "multi_event_acceleration_stage_v1",
+            "profile_id": acceleration["profile_id"],
+            "stage": "canary",
+            "scheduler": acceleration["scheduler"],
+            "workers": profile.workers,
+            "max_in_flight_children": acceleration[
+                "max_in_flight_children"
+            ],
+            "submitted_pair_limit": acceleration["canary_pair_count"],
+            "submitted_slot_limit": acceleration["canary_slot_count"],
+            "max_child_attempts_per_slot": acceleration[
+                "canary_max_child_attempts_per_slot"
+            ],
+            "full_stage_approved": False,
+            "deferred_reason_code": "acceleration_canary_deferred",
+        }
+    elif stage_name == "full":
+        full_slots = int(acceleration["full_stage_slot_count"])
+        submitted_slots = stage.get("submitted_slot_limit")
+        if (
+            isinstance(submitted_slots, bool)
+            or not isinstance(submitted_slots, int)
+            or submitted_slots < 2
+            or submitted_slots > full_slots
+            or submitted_slots % 2
+        ):
+            raise MultiEventInputError(
+                "full execution_acceleration submitted slots must be a "
+                "positive complete-pair prefix within the frozen full grid"
+            )
+        expected = {
+            "schema_version": "multi_event_acceleration_stage_v1",
+            "profile_id": acceleration["profile_id"],
+            "stage": "full",
+            "scheduler": acceleration["scheduler"],
+            "workers": profile.workers,
+            "max_in_flight_children": acceleration[
+                "max_in_flight_children"
+            ],
+            "submitted_pair_limit": submitted_slots // 2,
+            "submitted_slot_limit": submitted_slots,
+            "max_child_attempts_per_slot": acceleration[
+                "full_stage_max_child_attempts_per_slot"
+            ],
+            "full_stage_approved": True,
+            "deferred_reason_code": None,
+        }
+    else:
+        raise MultiEventInputError(
+            "execution_acceleration.stage must be canary or full"
+        )
+    if dict(stage) != expected:
+        raise MultiEventInputError(
+            "execution_acceleration differs from the frozen stage profile"
+        )
+    return dict(expected)
+
+
+def _validate_acceleration_stage_extent(
+    execution_acceleration: Optional[Mapping[str, Any]],
+    execution_plan: Mapping[str, Any],
+) -> None:
+    """Bind a stage's submitted prefix to the selected live/mock grid."""
+
+    if execution_acceleration is None:
+        return
+    planned_runs = execution_plan.get("planned_runs")
+    if (
+        isinstance(planned_runs, bool)
+        or not isinstance(planned_runs, int)
+        or planned_runs < 2
+        or planned_runs % 2
+    ):
+        raise MultiEventInputError(
+            "workers2 execution plan must contain complete arm pairs"
+        )
+    submitted_slots = int(execution_acceleration["submitted_slot_limit"])
+    submitted_pairs = int(execution_acceleration["submitted_pair_limit"])
+    if (
+        submitted_slots > planned_runs
+        or submitted_pairs * 2 != submitted_slots
+        or (
+            execution_acceleration["stage"] == "full"
+            and submitted_slots != planned_runs
+        )
+    ):
+        raise MultiEventInputError(
+            "execution_acceleration extent differs from the selected grid"
+        )
 
 
 def _resolve_explicit(root: Path, value: Any, field: str) -> Path:
@@ -567,7 +748,9 @@ def _planned_values(protocol: Mapping[str, Any]) -> tuple[tuple[str, ...], tuple
 
 
 def _validated_execution_plan(
-    raw: Any, protocol: Mapping[str, Any]
+    raw: Any,
+    protocol: Mapping[str, Any],
+    profile: Optional[ProtocolProfile] = None,
 ) -> Mapping[str, Any]:
     plan = _mapping(raw, "execution_plan")
     if set(plan) != {
@@ -621,7 +804,8 @@ def _validated_execution_plan(
     planned_runs = len(_events) * len(ARMS) * len(seeds) * len(repeats)
     if plan.get("planned_runs") != planned_runs:
         raise MultiEventInputError("execution_plan.planned_runs is inconsistent")
-    if plan.get("launch_order_policy") != launch_order_policy():
+    expected_launch_policy = launch_order_policy(profile)
+    if plan.get("launch_order_policy") != expected_launch_policy:
         raise MultiEventInputError(
             "execution_plan.launch_order_policy differs from the frozen policy"
         )
@@ -632,7 +816,7 @@ def _validated_execution_plan(
         "repeat_indices": repeats,
         "planned_runs": planned_runs,
         "override_reason": plan.get("override_reason"),
-        "launch_order_policy": dict(launch_order_policy()),
+        "launch_order_policy": dict(expected_launch_policy),
     }
 
 
@@ -789,6 +973,74 @@ def _validate_selection_partition(
         )
 
 
+def _validate_acceleration_selection_partition(
+    accepted_children: Sequence[Any],
+    missing_or_rejected: Sequence[Any],
+    *,
+    protocol: Mapping[str, Any],
+    execution_plan: Mapping[str, Any],
+    execution_acceleration: Optional[Mapping[str, Any]],
+) -> None:
+    """Bind canary/full selection cells to the exact submitted pair prefix."""
+
+    if execution_acceleration is None:
+        return
+    _validate_acceleration_stage_extent(
+        execution_acceleration, execution_plan
+    )
+    ordered = _counterbalanced_cells(protocol, execution_plan)
+    submitted_limit = int(
+        execution_acceleration["submitted_slot_limit"]
+    )
+    submitted = set(ordered[:submitted_limit])
+    deferred = set(ordered[submitted_limit:])
+    accepted_by_cell = {
+        _selection_slot(item, "children[]"): _mapping(item, "children[]")
+        for item in accepted_children
+    }
+    absent_by_cell = {
+        _selection_slot(item, "missing_or_rejected_slots[]"): _mapping(
+            item, "missing_or_rejected_slots[]"
+        )
+        for item in missing_or_rejected
+    }
+    if execution_acceleration["stage"] == "canary":
+        if set(accepted_by_cell) & deferred:
+            raise MultiEventInputError(
+                "canary selection accepted a slot outside its first pair"
+            )
+        for cell in deferred:
+            item = absent_by_cell.get(cell)
+            if (
+                item is None
+                or item.get("status") != "missing"
+                or item.get("reason_codes")
+                != ["acceleration_canary_deferred"]
+                or item.get("attempt_run_ids", []) != []
+            ):
+                raise MultiEventInputError(
+                    "canary deferred selection slot differs from the frozen policy"
+                )
+        for cell in submitted:
+            item = accepted_by_cell.get(cell) or absent_by_cell.get(cell)
+            if (
+                item is None
+                or item.get("reason_codes")
+                == ["acceleration_canary_deferred"]
+            ):
+                raise MultiEventInputError(
+                    "canary must account for both submitted first-pair slots"
+                )
+    elif any(
+        _mapping(item, "missing_or_rejected_slots[]").get("reason_codes")
+        == ["acceleration_canary_deferred"]
+        for item in missing_or_rejected
+    ):
+        raise MultiEventInputError(
+            "full workers2 selection cannot defer canary-only slots"
+        )
+
+
 def build_selection_document(
     *,
     protocol: Mapping[str, Any],
@@ -800,6 +1052,7 @@ def build_selection_document(
     planned_slots: Sequence[Mapping[str, Any]],
     accepted_children: Sequence[Mapping[str, Any]],
     rejected_slots: Sequence[Mapping[str, Any]],
+    execution_acceleration: Optional[Mapping[str, Any]] = None,
 ) -> Mapping[str, Any]:
     """Pure builder for the driver's immutable post-run selection artifact.
 
@@ -811,7 +1064,32 @@ def build_selection_document(
     """
 
     _sha256(protocol_sha256, "protocol_sha256")
-    validated_plan = _validated_execution_plan(execution_plan, protocol)
+    profile: Optional[ProtocolProfile]
+    try:
+        profile = get_protocol_profile(protocol, protocol_sha256)
+    except MultiEventProtocolError:
+        # Preserve the historical pure-builder tests that use a placeholder
+        # digest. Production callers are revalidated against the source bytes
+        # in prepare_selection/prepare_driver_selection.
+        if (
+            protocol.get("schema_version") == PROTOCOL_SCHEMA_VERSION
+            and execution_acceleration is None
+        ):
+            profile = None
+        else:
+            raise
+    validated_stage = (
+        None
+        if profile is None
+        else _validated_acceleration_stage(
+            execution_acceleration,
+            profile,
+            required=profile.execution_acceleration is not None,
+        )
+    )
+    validated_plan = _validated_execution_plan(
+        execution_plan, protocol, profile
+    )
     planned_cells = [_selection_slot(item, "planned_slots[]") for item in planned_slots]
     expected_cells = _planned_cells(protocol, validated_plan)
     if len(planned_cells) != len(set(planned_cells)) or set(planned_cells) != expected_cells:
@@ -821,7 +1099,14 @@ def build_selection_document(
     _validate_selection_partition(
         accepted_children, rejected_slots, protocol, validated_plan
     )
-    return {
+    _validate_acceleration_selection_partition(
+        accepted_children,
+        rejected_slots,
+        protocol=protocol,
+        execution_plan=validated_plan,
+        execution_acceleration=validated_stage,
+    )
+    document = {
         "schema_version": SELECTION_SCHEMA_VERSION,
         "protocol_sha256": protocol_sha256,
         "execution_plan": dict(validated_plan),
@@ -833,6 +1118,9 @@ def build_selection_document(
             dict(item) for item in rejected_slots
         ],
     }
+    if validated_stage is not None:
+        document["execution_acceleration"] = dict(validated_stage)
+    return document
 
 
 def prepare_selection(
@@ -850,6 +1138,23 @@ def prepare_selection(
     child_root = Path(child_root).resolve(strict=True)
     reference_root = Path(reference_root).resolve(strict=True)
     selection = _read_json(selection_path, "analysis selection")
+    profile = _protocol_profile(protocol, protocol_path)
+    expected_selection_fields = {
+        "schema_version",
+        "protocol_sha256",
+        "execution_plan",
+        "events",
+        "catalog_inputs",
+        "study_model_identity",
+        "children",
+        "missing_or_rejected_slots",
+    }
+    if profile.execution_acceleration is not None:
+        expected_selection_fields.add("execution_acceleration")
+    if set(selection) != expected_selection_fields:
+        raise MultiEventInputError(
+            "analysis selection does not have the exact profile fields"
+        )
     if selection.get("schema_version") != SELECTION_SCHEMA_VERSION:
         raise MultiEventInputError("unsupported analysis selection schema_version")
     expected_protocol_hash = protocol_sha256(protocol_path)
@@ -859,8 +1164,13 @@ def prepare_selection(
     ):
         raise MultiEventInputError("analysis selection protocol_sha256 mismatch")
 
+    execution_acceleration = _validated_acceleration_stage(
+        selection.get("execution_acceleration"),
+        profile,
+        required=profile.execution_acceleration is not None,
+    )
     execution_plan = _validated_execution_plan(
-        selection.get("execution_plan"), protocol
+        selection.get("execution_plan"), protocol, profile
     )
     planned_events, _frozen_seeds, _frozen_repeats = _planned_values(protocol)
     planned_seeds = tuple(execution_plan["seeds"])
@@ -1098,6 +1408,13 @@ def prepare_selection(
     _validate_selection_partition(
         raw_children, raw_missing, protocol, execution_plan
     )
+    _validate_acceleration_selection_partition(
+        raw_children,
+        raw_missing,
+        protocol=protocol,
+        execution_plan=execution_plan,
+        execution_acceleration=execution_acceleration,
+    )
     declared_missing: list[Mapping[str, Any]] = []
     for raw in raw_missing:
         item = _mapping(raw, "missing_or_rejected_slots[]")
@@ -1292,6 +1609,7 @@ def prepare_selection(
             "study reported_model_aliases must equal the accepted-child union"
         )
     return PreparedSelection(
+        protocol_profile=profile,
         protocol_sha256=expected_protocol_hash,
         selection_path=selection_path,
         child_root=child_root,
@@ -1303,6 +1621,7 @@ def prepare_selection(
         declared_missing_or_rejected=tuple(declared_missing),
         catalog_inputs=(catalog_path,),
         input_paths=input_paths,
+        execution_acceleration=execution_acceleration,
     )
 
 
@@ -1407,13 +1726,20 @@ def _provider_for_execution_mode(mode: str) -> str:
 
 
 def _expected_output_root_policy(
-    mode: str, child_root: Path
+    mode: str,
+    child_root: Path,
+    profile: Optional[ProtocolProfile] = None,
 ) -> Mapping[str, Any]:
     live = mode == "openai_live"
+    canonical_relative_root = (
+        "results_multi_event"
+        if profile is None
+        else profile.canonical_live_output_relative_path
+    )
     return {
         "schema_version": "multi_event_output_root_v1",
         "effective_root": str(child_root),
-        "canonical_repo_relative_root": "results_multi_event",
+        "canonical_repo_relative_root": canonical_relative_root,
         "live_canonical_root_enforced": live,
         "alternate_root_allowed": not live,
         "symlink_or_rebinding_allowed": False if live else None,
@@ -1426,17 +1752,28 @@ def _expected_output_root_policy(
 
 
 def _validated_output_root_policy(
-    raw: Any, *, mode: str, child_root: Path
+    raw: Any,
+    *,
+    mode: str,
+    child_root: Path,
+    profile: Optional[ProtocolProfile] = None,
 ) -> Mapping[str, Any]:
     policy = _mapping(raw, "output_root_policy")
-    expected = _expected_output_root_policy(mode, child_root)
+    expected = _expected_output_root_policy(
+        mode, child_root, profile
+    )
     if dict(policy) != expected:
         raise MultiEventInputError(
             "driver output_root_policy differs from the canonical policy"
         )
-    if mode == "openai_live" and child_root != CANONICAL_LIVE_OUT:
+    canonical_live_root = (
+        CANONICAL_LIVE_OUT
+        if profile is None
+        else REPO_ROOT / profile.canonical_live_output_relative_path
+    )
+    if mode == "openai_live" and child_root != canonical_live_root:
         raise MultiEventInputError(
-            "openai_live analysis requires the canonical results_multi_event root"
+            "openai_live analysis requires the selected profile's canonical root"
         )
     return dict(expected)
 
@@ -1446,6 +1783,7 @@ def _validated_source_snapshot(
     *,
     mode: str,
     protocol_path: Path,
+    profile: Optional[ProtocolProfile] = None,
     expected_identities: Optional[Iterable[Any]] = None,
 ) -> Mapping[str, Any]:
     snapshot = _mapping(raw, "source_snapshot")
@@ -1491,6 +1829,16 @@ def _validated_source_snapshot(
         snapshot.get("scientific_component_fingerprint"),
         "source_snapshot.scientific_component_fingerprint",
     )
+    canonical_relative_path = (
+        "experiments/multi_event_protocol.json"
+        if profile is None
+        else profile.canonical_protocol_relative_path
+    )
+    canonical_protocol_path = (
+        PROTOCOL_PATH
+        if profile is None
+        else REPO_ROOT / canonical_relative_path
+    )
     if (
         snapshot.get("schema_version") != "multi_event_source_snapshot_v1"
         or snapshot.get("execution_mode") != "openai_live"
@@ -1500,9 +1848,10 @@ def _validated_source_snapshot(
         or snapshot.get("policy")
         != "clean_head_equals_canonical_protocol_last_change_commit"
         or head != protocol_commit
-        or protocol_path.resolve(strict=True) != PROTOCOL_PATH.resolve(strict=True)
+        or protocol_path.resolve(strict=True)
+        != canonical_protocol_path.resolve(strict=True)
         or snapshot.get("protocol_repo_relative_path")
-        != "experiments/multi_event_protocol.json"
+        != canonical_relative_path
     ):
         raise MultiEventInputError(
             "live source_snapshot is not the clean protocol-owning snapshot"
@@ -1517,7 +1866,7 @@ def _validated_source_snapshot(
             "-1",
             "--format=%H",
             "--",
-            "experiments/multi_event_protocol.json",
+            canonical_relative_path,
         ),
         ("status", "--porcelain=v1", "--untracked-files=all"),
     ):
@@ -1581,6 +1930,8 @@ def _driver_plan_cells(
     execution_plan: Mapping[str, Any],
     events: Mapping[str, EventInput],
     child_root: Path,
+    profile: Optional[ProtocolProfile] = None,
+    execution_acceleration: Optional[Mapping[str, Any]] = None,
 ) -> tuple[
     Mapping[tuple[str, str, int, int], Mapping[str, Any]],
     set[tuple[str, str, int, int]],
@@ -1589,7 +1940,7 @@ def _driver_plan_cells(
     """Independently reconstruct every frozen plan slot and child identity."""
 
     expected_protocol_hash = protocol_sha256(protocol_path)
-    if set(plan) != {
+    expected_plan_fields = {
         "schema_version",
         "protocol_id",
         "protocol_sha256",
@@ -1606,8 +1957,24 @@ def _driver_plan_cells(
         "planned_complete_seed_pairs",
         "honest_n_complete_seed_pairs",
         "jobs",
-    }:
+    }
+    if profile is not None and profile.execution_acceleration is not None:
+        expected_plan_fields.add("execution_acceleration")
+    if set(plan) != expected_plan_fields:
         raise MultiEventInputError("driver plan has unexpected top-level fields")
+    listed_stage = (
+        None
+        if profile is None
+        else _validated_acceleration_stage(
+            plan.get("execution_acceleration"),
+            profile,
+            required=profile.execution_acceleration is not None,
+        )
+    )
+    if listed_stage != execution_acceleration:
+        raise MultiEventInputError(
+            "driver plan execution_acceleration differs from selection"
+        )
     if (
         plan.get("schema_version") != "multi_event_plan_v1"
         or plan.get("protocol_id") != protocol["protocol_id"]
@@ -1619,7 +1986,7 @@ def _driver_plan_cells(
             "analysis requires a non-dry-run precommitted plan"
         )
     listed_plan = _validated_execution_plan(
-        plan.get("execution_plan"), protocol
+        plan.get("execution_plan"), protocol, profile
     )
     if dict(listed_plan) != dict(execution_plan):
         raise MultiEventInputError(
@@ -1653,7 +2020,12 @@ def _driver_plan_cells(
     )
     if workers < 1 or (
         execution_plan["protocol_adherence"]
-        and workers != protocol["acceptance_and_execution"]["workers"]
+        and workers
+        != (
+            profile.workers
+            if profile is not None
+            else protocol["acceptance_and_execution"]["workers"]
+        )
     ):
         raise MultiEventInputError("driver plan worker count is invalid")
     if (
@@ -1682,6 +2054,7 @@ def _driver_plan_cells(
         plan.get("output_root_policy"),
         mode=execution_plan["execution_mode"],
         child_root=child_root,
+        profile=profile,
     )
     health_retry = _mapping(
         plan.get("health_and_retry"), "driver plan health_and_retry"
@@ -1759,7 +2132,7 @@ def _driver_plan_cells(
         zip(raw_jobs, expected_order), start=1
     ):
         job = _mapping(raw, "driver plan jobs[]")
-        if set(job) != {
+        expected_job_fields = {
             "launch_ordinal",
             "event_id",
             "arm",
@@ -1776,7 +2149,12 @@ def _driver_plan_cells(
             "scenario_definition_hash",
             "scientific_runtime_environment",
             "scientific_runtime_environment_identity",
-        }:
+        }
+        if execution_acceleration is not None:
+            expected_job_fields.update(
+                {"pair_ordinal", "within_pair_ordinal"}
+            )
+        if set(job) != expected_job_fields:
             raise MultiEventInputError(
                 "driver plan job does not have the exact frozen fields"
             )
@@ -1785,6 +2163,15 @@ def _driver_plan_cells(
             cell != expected_cell
             or cell in jobs
             or job.get("launch_ordinal") != launch_ordinal
+            or (
+                execution_acceleration is not None
+                and (
+                    job.get("pair_ordinal")
+                    != (launch_ordinal + 1) // 2
+                    or job.get("within_pair_ordinal")
+                    != (1 if launch_ordinal % 2 else 2)
+                )
+            )
         ):
             raise MultiEventInputError(
                 "driver plan launch ordinal/order differs from the counterbalanced grid"
@@ -1869,6 +2256,7 @@ def _driver_plan_cells(
         plan.get("source_snapshot"),
         mode=execution_plan["execution_mode"],
         protocol_path=protocol_path,
+        profile=profile,
         expected_identities=expected_identities.values(),
     )
     return jobs, planned, expected_identities
@@ -1879,6 +2267,7 @@ def _validate_driver_attempt_ledger(
     *,
     jobs: Mapping[tuple[str, str, int, int], Mapping[str, Any]],
     selection: Mapping[str, Any],
+    execution_acceleration: Optional[Mapping[str, Any]] = None,
 ) -> None:
     """Bind every durable launch/terminal transition to the selected prefix."""
 
@@ -1936,7 +2325,12 @@ def _validate_driver_attempt_ledger(
         reason = _validated_public_reason_code(
             record.get("reason_code"), "attempt ledger reason_code"
         )
-        if source not in {"executed", "resumed_attempt", "driver"}:
+        if source not in {
+            "executed",
+            "resumed_attempt",
+            "driver",
+            "acceleration_stage",
+        }:
             raise MultiEventInputError("attempt ledger source is unsupported")
         if status not in {
             "launched",
@@ -1965,6 +2359,11 @@ def _validate_driver_attempt_ledger(
             ) or (
                 status == "rejected"
                 and source == "driver"
+            ) or (
+                status == "not_launched"
+                and source == "acceleration_stage"
+                and retry_idx is None
+                and reason == "acceleration_canary_deferred"
             )
             if not valid_no_run:
                 raise MultiEventInputError(
@@ -2005,6 +2404,19 @@ def _validate_driver_attempt_ledger(
             )
         selected = selected_by_cell[cell]
         selected_attempts = list(selected.get("attempt_run_ids", []))
+        stage_attempt_limit = (
+            len(job["allowed_attempt_run_ids"])
+            if execution_acceleration is None
+            else int(
+                execution_acceleration[
+                    "max_child_attempts_per_slot"
+                ]
+            )
+        )
+        if len(selected_attempts) > stage_attempt_limit:
+            raise MultiEventInputError(
+                "selection attempt prefix exceeds the execution-stage cap"
+            )
         allowed = list(job["allowed_attempt_run_ids"])
         if selected_attempts != allowed[: len(selected_attempts)]:
             raise MultiEventInputError(
@@ -2091,6 +2503,51 @@ def _validate_driver_attempt_ledger(
                 raise MultiEventInputError(
                     "rejected selection cell has no attempts"
                 )
+
+    if execution_acceleration is not None:
+        ordered_cells = list(jobs)
+        submitted_limit = int(
+            execution_acceleration["submitted_slot_limit"]
+        )
+        submitted = set(ordered_cells[:submitted_limit])
+        deferred = set(ordered_cells[submitted_limit:])
+        if execution_acceleration["stage"] == "canary":
+            for cell in submitted:
+                if any(
+                    record.get("source") == "acceleration_stage"
+                    for record in records_by_cell[cell]
+                ):
+                    raise MultiEventInputError(
+                        "canary submitted pair cannot be marked deferred"
+                    )
+            for cell in deferred:
+                selected = selected_by_cell[cell]
+                cell_records = records_by_cell[cell]
+                if (
+                    selected.get("status") != "missing"
+                    or selected.get("attempt_run_ids") != []
+                    or selected.get("reason_codes")
+                    != ["acceleration_canary_deferred"]
+                    or len(cell_records) != 1
+                    or cell_records[0].get("source")
+                    != "acceleration_stage"
+                    or cell_records[0].get("status") != "not_launched"
+                    or cell_records[0].get("reason_code")
+                    != "acceleration_canary_deferred"
+                    or cell_records[0].get("technical_retry_idx") is not None
+                    or cell_records[0].get("run_id") is not None
+                ):
+                    raise MultiEventInputError(
+                        "canary deferred slot differs from the frozen stage policy"
+                    )
+        elif any(
+            record.get("source") == "acceleration_stage"
+            or record.get("reason_code") == "acceleration_canary_deferred"
+            for record in records
+        ):
+            raise MultiEventInputError(
+                "full workers2 stage cannot contain canary-deferred outcomes"
+            )
 
 
 def _validate_private_attempt_ledger(
@@ -2257,6 +2714,7 @@ def prepare_driver_selection(
     child_root_was_symlink = lexical_child_root.is_symlink()
     child_root = lexical_child_root.resolve(strict=True)
     protocol_path = Path(protocol_path).resolve(strict=True)
+    profile = _protocol_profile(protocol, protocol_path)
     reference_root = Path(reference_root).resolve(strict=True)
     supplied = Path(driver_manifest_path)
     supplied = supplied if supplied.is_absolute() else child_root / supplied
@@ -2296,21 +2754,24 @@ def prepare_driver_selection(
         manifest.get("multi_event_driver"), "multi_event_driver"
     )
     parent_mode = parent_identity.get("execution_mode")
+    expected_parent_fields = {
+        "schema_version",
+        "attempt_series_schema_version",
+        "protocol_id",
+        "protocol_sha256",
+        "execution_mode",
+        "protocol_adherence",
+        "network_access",
+        "network_scope",
+        "output_root_policy",
+        "source_snapshot",
+        "attempt_coordination",
+    }
+    if profile.execution_acceleration is not None:
+        expected_parent_fields.add("execution_acceleration")
     if (
         set(parent_identity)
-        != {
-            "schema_version",
-            "attempt_series_schema_version",
-            "protocol_id",
-            "protocol_sha256",
-            "execution_mode",
-            "protocol_adherence",
-            "network_access",
-            "network_scope",
-            "output_root_policy",
-            "source_snapshot",
-            "attempt_coordination",
-        }
+        != expected_parent_fields
         or parent_identity.get("schema_version") != "1.0"
         or parent_identity.get("attempt_series_schema_version")
         != ATTEMPT_SERIES_SCHEMA_VERSION
@@ -2319,11 +2780,19 @@ def prepare_driver_selection(
         or parent_mode not in {"mock", "openai_live"}
     ):
         raise MultiEventInputError("driver parent protocol identity mismatch")
+    execution_acceleration = _validated_acceleration_stage(
+        parent_identity.get("execution_acceleration"),
+        profile,
+        required=profile.execution_acceleration is not None,
+    )
     live = parent_mode == "openai_live"
+    canonical_live_root = (
+        REPO_ROOT / profile.canonical_live_output_relative_path
+    )
     if live and (
-        lexical_child_root != CANONICAL_LIVE_OUT
+        lexical_child_root != canonical_live_root
         or child_root_was_symlink
-        or child_root != CANONICAL_LIVE_OUT
+        or child_root != canonical_live_root
     ):
         raise MultiEventInputError(
             "openai_live parent must use the lexical non-symlink canonical root"
@@ -2332,11 +2801,13 @@ def prepare_driver_selection(
         parent_identity.get("output_root_policy"),
         mode=str(parent_mode),
         child_root=child_root,
+        profile=profile,
     )
     source_snapshot = _validated_source_snapshot(
         parent_identity.get("source_snapshot"),
         mode=str(parent_mode),
         protocol_path=protocol_path,
+        profile=profile,
     )
     expected_coordination = {
         "schema_version": "multi_event_attempt_lock_v1",
@@ -2490,9 +2961,7 @@ def prepare_driver_selection(
         manifest.get("technical_attempt_ledger"),
         "technical_attempt_ledger",
     )
-    if (
-        set(technical_ledger)
-        != {
+    expected_technical_ledger_fields = {
             "schema_version",
             "durability",
             "public_path",
@@ -2500,7 +2969,13 @@ def prepare_driver_selection(
             "max_child_attempts_per_series",
             "public_records",
             "private_records",
-        }
+    }
+    if execution_acceleration is not None:
+        expected_technical_ledger_fields.add(
+            "stage_max_child_attempts_per_slot"
+        )
+    if (
+        set(technical_ledger) != expected_technical_ledger_fields
         or technical_ledger.get("schema_version") != "1.0"
         or technical_ledger.get("durability")
         != "append_flush_fsync_per_record"
@@ -2516,12 +2991,21 @@ def prepare_driver_selection(
         or isinstance(technical_ledger.get("private_records"), bool)
         or not isinstance(technical_ledger.get("private_records"), int)
         or technical_ledger.get("private_records") < 0
+        or (
+            execution_acceleration is not None
+            and technical_ledger.get(
+                "stage_max_child_attempts_per_slot"
+            )
+            != execution_acceleration[
+                "max_child_attempts_per_slot"
+            ]
+        )
     ):
         raise MultiEventInputError(
             "driver parent technical-attempt ledger contract mismatch"
         )
     execution_plan = _validated_execution_plan(
-        selection.get("execution_plan"), protocol
+        selection.get("execution_plan"), protocol, profile
     )
     if (
         parent_identity.get("execution_mode") != execution_plan["execution_mode"]
@@ -2542,6 +3026,10 @@ def prepare_driver_selection(
         child_root=child_root,
         reference_root=reference_root,
     )
+    if prepared.execution_acceleration != execution_acceleration:
+        raise MultiEventInputError(
+            "parent and selection execution_acceleration disagree"
+        )
     jobs, planned, expected_identities = _driver_plan_cells(
         plan,
         protocol=protocol,
@@ -2549,6 +3037,8 @@ def prepare_driver_selection(
         execution_plan=execution_plan,
         events=prepared.events,
         child_root=child_root,
+        profile=profile,
+        execution_acceleration=execution_acceleration,
     )
     _validate_live_foreign_attempt_cap(
         child_root=child_root,
@@ -2601,7 +3091,12 @@ def prepare_driver_selection(
             "technical-attempt ledger declared counts disagree with files"
         )
     _validate_private_attempt_ledger(ledger, private_ledger)
-    _validate_driver_attempt_ledger(ledger, jobs=jobs, selection=selection)
+    _validate_driver_attempt_ledger(
+        ledger,
+        jobs=jobs,
+        selection=selection,
+        execution_acceleration=execution_acceleration,
+    )
 
     accepted_count = len(selection["children"])
     failed_count = len(selection["missing_or_rejected_slots"])
@@ -2660,6 +3155,15 @@ def prepare_driver_selection(
             if homogeneous_alias_pooling
             else "endpoint_mixture_or_mock_not_model_specific"
         )
+        or (
+            profile.execution_acceleration is None
+            and "execution_acceleration" in summary
+        )
+        or (
+            profile.execution_acceleration is not None
+            and summary.get("execution_acceleration")
+            != execution_acceleration
+        )
     ):
         raise MultiEventInputError("driver summary disagrees with registered selection")
     experiment_completion = _mapping(
@@ -2701,6 +3205,7 @@ def prepare_driver_selection(
         driver_run_id=str(manifest["run_id"]),
         output_root_policy=output_root_policy,
         source_snapshot=source_snapshot,
+        execution_acceleration=execution_acceleration,
     )
 
 
@@ -3980,13 +4485,36 @@ def analyze_observations(
     rejections: Sequence[Mapping[str, Any]] = (),
     reference_log_paths: Optional[Mapping[str, Sequence[float]]] = None,
     execution_plan: Optional[Mapping[str, Any]] = None,
+    protocol_profile: Optional[ProtocolProfile] = None,
+    execution_acceleration: Optional[Mapping[str, Any]] = None,
 ) -> Mapping[str, Any]:
     """Pure event-complete aggregation with a stricter cross-event intersection."""
+
+    if protocol_profile is None:
+        if protocol.get("schema_version") == PROTOCOL_SCHEMA_VERSION_V2:
+            raise MultiEventInputError(
+                "workers2 analysis requires its exact protocol profile"
+            )
+    else:
+        try:
+            expected_profile = get_protocol_profile(
+                protocol, protocol_profile.protocol_sha256
+            )
+        except MultiEventProtocolError as error:
+            raise MultiEventInputError(
+                "analysis protocol profile does not match the protocol"
+            ) from error
+        if protocol_profile != expected_profile:
+            raise MultiEventInputError(
+                "analysis protocol profile does not match the protocol"
+            )
 
     design = protocol["design"]
     event_ids = [row["event_id"] for row in design["events"]]
     effective_plan = (
-        _validated_execution_plan(execution_plan, protocol)
+        _validated_execution_plan(
+            execution_plan, protocol, protocol_profile
+        )
         if execution_plan is not None
         else {
             "protocol_adherence": True,
@@ -3995,9 +4523,22 @@ def analyze_observations(
             "repeat_indices": list(design["repeat_indices"]),
             "planned_runs": int(design["planned_runs"]),
             "override_reason": None,
-            "launch_order_policy": dict(launch_order_policy()),
+            "launch_order_policy": dict(
+                launch_order_policy(protocol_profile)
+            ),
         }
     )
+    if protocol_profile is not None:
+        execution_acceleration = _validated_acceleration_stage(
+            execution_acceleration,
+            protocol_profile,
+            required=(
+                protocol_profile.execution_acceleration is not None
+            ),
+        )
+        _validate_acceleration_stage_extent(
+            execution_acceleration, effective_plan
+        )
     seeds = list(effective_plan["seeds"])
     repeats = list(effective_plan["repeat_indices"])
     K = len(repeats)
@@ -4264,13 +4805,23 @@ def analyze_observations(
         1 for item in rejections if item.get("slot_status") in {"missing", "rejected"}
     )
     selected_child_rejections = len(rejections) - declared_absent
+    frozen_planned_runs = int(design["planned_runs"])
+    frozen_complete_pairs = len(event_ids) * len(seeds)
+    full_acquisition_stage = bool(
+        execution_acceleration is None
+        or execution_acceleration["stage"] == "full"
+    )
     complete_frozen_grid = bool(
-        int(effective_plan["planned_runs"]) == 144
-        and len(observations) == 144
+        int(effective_plan["planned_runs"]) == frozen_planned_runs
+        and len(observations) == frozen_planned_runs
         and not rejections
-        and complete_event_seed_pairs == 24
-        and all(len(complete_by_event[event_id]) == 8 for event_id in event_ids)
-        and len(cross_event_complete) == 8
+        and complete_event_seed_pairs == frozen_complete_pairs
+        and all(
+            len(complete_by_event[event_id]) == len(seeds)
+            for event_id in event_ids
+        )
+        and len(cross_event_complete) == len(seeds)
+        and full_acquisition_stage
     )
     protocol_adherent_realism = bool(
         effective_plan["protocol_adherence"]
@@ -4283,7 +4834,7 @@ def analyze_observations(
         and effective_plan["execution_mode"] == "openai_live"
         and not complete_frozen_grid
     )
-    return {
+    result = {
         "schema_version": SUMMARY_SCHEMA_VERSION,
         "protocol_id": protocol["protocol_id"],
         "study_status": protocol["study_status"],
@@ -4377,6 +4928,61 @@ def analyze_observations(
         },
         "scientific_semantics_change": protocol["scientific_semantics_change"],
     }
+    if execution_acceleration is not None:
+        canary = execution_acceleration["stage"] == "canary"
+        submitted_slots = int(
+            execution_acceleration["submitted_slot_limit"]
+        )
+        result["execution_acceleration"] = dict(
+            execution_acceleration
+        )
+        result["acquisition_profile"] = {
+            "schema_version": "multi_event_acquisition_profile_v1",
+            "profile_id": execution_acceleration["profile_id"],
+            "workers": execution_acceleration["workers"],
+            "stage": execution_acceleration["stage"],
+            "scheduler": execution_acceleration["scheduler"],
+            "pair_barrier": True,
+            "submitted_slots": submitted_slots,
+            "deferred_slots": (
+                int(effective_plan["planned_runs"]) - submitted_slots
+                if canary
+                else 0
+            ),
+            "complete_grid_claim_allowed": bool(
+                complete_frozen_grid and not canary
+            ),
+            "workers1_workers2_pooling_allowed": False,
+            "scientific_n_k_contribution_to_workers1": 0,
+            "interpretation": (
+                "incomplete_canary_descriptive_only"
+                if canary
+                else "full_workers2_descriptive_nonconfirmatory"
+            ),
+        }
+        result["qualitative_claims"][
+            "protocol_adherent_realism_claim_allowed"
+        ] = bool(
+            result["qualitative_claims"][
+                "protocol_adherent_realism_claim_allowed"
+            ]
+            and not canary
+        )
+        result["qualitative_claims"][
+            "preregistered_realism_claim_eligible"
+        ] = bool(
+            result["qualitative_claims"][
+                "preregistered_realism_claim_eligible"
+            ]
+            and not canary
+        )
+        if canary:
+            result["qualitative_claims"][
+                "realism_assessment_status"
+            ] = (
+                "workers2_canary_incomplete_descriptive_not_claim_eligible"
+            )
+    return result
 
 
 def create_three_panel_figure(summary: Mapping[str, Any]):
@@ -4572,6 +5178,31 @@ def _execute_managed_analysis(
             if prepared.source_snapshot is None
             else dict(prepared.source_snapshot)
         ),
+        "protocol_profile": (
+            None
+            if prepared.protocol_profile is None
+            else {
+                "schema_version": prepared.protocol_profile.schema_version,
+                "protocol_id": prepared.protocol_profile.protocol_id,
+                "protocol_sha256": (
+                    prepared.protocol_profile.protocol_sha256
+                ),
+                "canonical_protocol_relative_path": (
+                    prepared.protocol_profile
+                    .canonical_protocol_relative_path
+                ),
+                "canonical_live_output_relative_path": (
+                    prepared.protocol_profile
+                    .canonical_live_output_relative_path
+                ),
+                "workers": prepared.protocol_profile.workers,
+            }
+        ),
+        "execution_acceleration": (
+            None
+            if prepared.execution_acceleration is None
+            else dict(prepared.execution_acceleration)
+        ),
     }
     managed.manifest.write_atomic()
     with managed:
@@ -4601,6 +5232,10 @@ def _execute_managed_analysis(
                 rejections=rejections,
                 reference_log_paths=_reference_log_paths(prepared.events),
                 execution_plan=prepared.execution_plan,
+                protocol_profile=prepared.protocol_profile,
+                execution_acceleration=(
+                    prepared.execution_acceleration
+                ),
             )
             summary = dict(summary)
             summary["protocol_sha256"] = prepared.protocol_sha256

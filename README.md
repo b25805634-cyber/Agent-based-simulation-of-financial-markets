@@ -121,19 +121,24 @@ Historical flat files may still be used by an explicitly managed analysis as
 hashed `legacy_unverified_input`; that is analysis input, not child-run reuse.
 
 `experiments.aggregate_multi_event` is the Provider-free managed analyzer for
-the Wave 1 N=8/K=3 variance-components pilot. Its trust anchor is one finished
+the Wave 1 N=8/K=3 variance-components pilot and its separately versioned
+paired-workers2 acquisition pilot. Its trust anchor is one finished
 `experiments.multi_event` parent manifest; it derives and rehashes that
 parent's registered plan, public/private attempt ledgers, selection, summary,
-and private failure log. Live work is accepted only from the repository's
-non-symlink `results_multi_event` root under the clean Git snapshot that owns
-the frozen protocol; analysis re-runs current `HEAD`, protocol-last-change, and
-clean-worktree checks instead of trusting the recorded declaration. The plan
-must use the exact counterbalanced launch order
-(adjacent arm pairs, rotated event positions, balanced arm-first parity), the
-inherited output-root lock, and one five-attempt same-slot budget that foreign
-attempt-series materializations cannot reset. Analysis obtains that lock
-exclusively and nonblocking from selection preparation through final output
-hashing, so parent/child/orphan activity fails closed.
+and private failure log. The exact allowlisted protocol profile binds protocol
+path/hash, worker count, canonical live root, source-snapshot path, launch
+policy, and stage contract. Historical workers=1 live work remains under the
+non-symlink `results_multi_event` root; paired-workers2 work uses the distinct
+long-lived `results_multi_event_workers2` root. Analysis re-runs current
+`HEAD`, profile-specific protocol-last-change, and clean-worktree checks
+instead of trusting the recorded declaration. The plan must use its exact
+counterbalanced policy: workers=1 launches adjacent arms sequentially, while
+workers=2 submits only one adjacent arm pair at a time and waits for both
+children to terminate before advancing. The inherited output-root lock and
+bounded same-slot attempt budget cannot be reset by foreign attempt-series
+materializations. Analysis obtains that lock exclusively and nonblocking from
+selection preparation through final output hashing, so parent/child/orphan
+activity fails closed.
 
 Every child is rechecked against its independently reconstructed command,
 runtime environment identity (Python/platform plus exact dependency versions),
@@ -147,14 +152,21 @@ the study require an exact zero invalid-alias count. Health is derived from
 mutually exclusive statuses recomputed from unique public decision cells and
 closed against completion accounting, never from rationale substrings.
 Selection, ledger, and analyzer rejection reasons are restricted to registered
-public-safe codes; private diagnostics cannot flow into the summary. Accepted and missing/rejected
-slots exactly partition all 144 live cells or an explicitly labeled smaller
-mock-only grid. The analyzer emits event-complete and cross-event-intersection
-honest N; mock/non-adherent output is never eligible for a preregistered
-realism claim. The pilot's fixed
+public-safe codes; private diagnostics cannot flow into the summary. Accepted
+and missing/rejected slots exactly partition the stage's declared live cells
+or an explicitly labeled smaller mock-only grid. A workers2 canary is exactly
+one two-arm pair with one attempt per slot. It may produce an honest incomplete
+descriptive summary, but cannot claim a complete grid, realism result,
+variance-component result, or automatic promotion; full execution requires
+explicit approval and the frozen canary gate. Workers=1 and workers=2
+children, attempt series, and summaries are never pooled. Both result roots
+and all canary/failure artifacts are retained long term. The analyzer emits
+event-complete and cross-event-intersection honest N; mock, non-adherent, and
+canary output is never eligible for a preregistered realism claim. The pilot's fixed
 qualitative matching criterion is distinct from its paired social estimand and
 is not confirmatory significance evidence. See
-[`docs/MULTI_EVENT_PROTOCOL.md`](docs/MULTI_EVENT_PROTOCOL.md).
+[`docs/MULTI_EVENT_PROTOCOL.md`](docs/MULTI_EVENT_PROTOCOL.md) and
+[`docs/MULTI_EVENT_WORKERS2_PROTOCOL.md`](docs/MULTI_EVENT_WORKERS2_PROTOCOL.md).
 
 `experiments.model_qualification` is a managed non-market entrypoint with
 `run_kind=model_qualification`. It freezes engineering checks and relative
