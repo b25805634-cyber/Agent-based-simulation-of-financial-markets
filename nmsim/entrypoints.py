@@ -164,6 +164,31 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         True,
         "Non-market Wave 0 diagnostic: six cases x two temperatures x K=30 x three concurrency levels = 1080 planned grid samples, plus a separate two-call same-seed probe. Dry-run constructs no Provider; real OpenAI-compatible access requires --live; private endpoint records are mode 0600.",
     ),
+    _spec(
+        "experiments.persona_flip_test",
+        "experiments/persona_flip_test.py",
+        "python3 -m experiments.persona_flip_test",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT,
+        DIRECT_MANAGED,
+        (
+            "bootstrap",
+            "frozen persona-variable and standalone fixture validation",
+            "provider and explicit live-use guard",
+            "ManagedRunContext",
+            "dry-run or low/high K-repeat flip grid",
+            "bootstrap displacement analysis and public/private export",
+        ),
+        (
+            "managed persona-flip run directory",
+            "dry_run_summary.json",
+            "persona_flip_summary.json",
+            "persona_flip_samples.jsonl",
+            "private_persona_flip_records.jsonl",
+        ),
+        PROVIDER_DIRECT,
+        True,
+        "Non-market Wave-P diagnostic: 14 rendered variables x low/high x configurable K (default 30). Fake/Mock are offline null controls, dry-run constructs no Provider, real OpenAI-compatible access requires --live, and full prompt/raw/rationale records are mode 0600.",
+    ),
 
     # Experiment-level drivers.  Their run-count lifecycle is managed at the
     # driver level; every simulation remains a separate managed run_seed child.

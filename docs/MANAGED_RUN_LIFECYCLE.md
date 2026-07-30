@@ -182,6 +182,25 @@ Batch driver 的 parent `ManagedRunContext` 在启动 child 前使用
 
 完成的 Mock qualification 把 case 计入 logical request/decision 以及独立的 `qualification_cases`，但 `simulation_runs=0`、`rounds=0`、`honest_n_runs=0`。公共 case/aggregate 文件不含 private rationale；完整 Prompt、raw response 和 rationale 只进入 `0600` 私有文件。该协议不是“唯一正确动作”测试，也不代替统计验证。
 
+## Persona flip test 生命周期
+
+`experiments.persona_flip_test` 同样是 `direct_managed` 的非市场诊断，
+使用 `run_kind=persona_flip_test`，不调用 `run_sim`。它在 Provider 构造前
+验证冻结的 14 维注册表、Reference Human、low/high endpoints、方向表、
+独立 `persona_fixtures 1.0` bundle 及完整 plan hash；`--dry-run` 只封存
+计划，Provider call 和 network access 都保持为 0。OpenAI-compatible
+路径必须显式 `--live`，Fake/Mock 则只能解释为离线 null control。
+
+完整执行把 `14 × 2 × K` 个端点请求分别计入 planned、attempted、
+completed、parse-valid、transport failure、parse failure 与 skipped。
+这些 request/decision 不等于 simulation run，因此
+`simulation_runs=0`、`rounds=0`、`honest_n_runs=0`。每批 public/private
+JSONL 均 flush+fsync 后才推进 manifest honest-N；公开样本不含渲染文本、
+Prompt、raw response 或 private rationale，完整记录只进入 mode-`0600`
+私有文件，所有 artifact 都以 `O_EXCL` 创建而不覆盖历史 run。只有两个 arm
+的 parse-valid N 都达到计划 K 才有资格输出「有效/空转候选」预判；否则明确
+标记为 `not_evaluable`，不能由残缺分母产生机制结论。
+
 ## 公私边界与限制
 
 - private rationale、原始私有错误和敏感记录只进入权限为 `0600` 的私有文件；

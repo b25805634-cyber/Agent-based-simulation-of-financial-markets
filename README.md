@@ -79,6 +79,19 @@ python3 -m experiments.endpoint_stochasticity --provider fake_test_provider \
 # a real OpenAI-compatible endpoint is reachable only behind the explicit guard:
 python3 -m experiments.endpoint_stochasticity --provider openai --live \
   --out /tmp/nmsim-endpoint-stochasticity-live
+
+# Wave-P persona flip plan: 14 variables x low/high x K=30 = 840 requests;
+# dry-run validates the frozen registry/fixtures without constructing a Provider:
+python3 -m experiments.persona_flip_test --provider openai --dry-run \
+  --out /tmp/nmsim-persona-flip-dry
+
+# execute the strict offline null-control grid (not real-model behavior evidence):
+python3 -m experiments.persona_flip_test --provider fake_test_provider \
+  --out /tmp/nmsim-persona-flip-fake
+
+# real OpenAI-compatible sampling is reachable only behind the explicit guard:
+python3 -m experiments.persona_flip_test --provider openai --live \
+  --out /tmp/nmsim-persona-flip-live
 ```
 
 `provider=auto` (the default) uses Anthropic when `ANTHROPIC_API_KEY` is set and
@@ -179,6 +192,20 @@ Prompts, raw responses and private reasoning remain in the mode-`0600`
 public parsed fields, accounting, and aggregates. Temperature zero or equal
 seed-probe responses are not a determinism claim.
 
+`nmsim.persona_variables` adds the frozen Wave-P 14-variable situation
+registry, renderer, SHA-256-derived reproducible samplers, reference vector,
+and mappings of five existing personas; `quant_arb` deliberately remains not
+applicable and all six definitions in `nmsim.prompts` remain byte-for-byte
+unchanged. E1/E2 are inherited engine attributes and never enter rendered
+text. `experiments.persona_flip_test` is a managed non-market diagnostic over
+the independent `persona_fixtures 1.0` bundle. It compares each variable's
+frozen low/high endpoints with K repeats, reports displacement in sell
+probability, sentiment and signed order, and applies the preregistered
+percentile-bootstrap rule. Fake/Mock runs are orchestration null controls, not
+behavioral evidence; private prompts, raw responses and rationale remain only
+in a mode-`0600` artifact, and the diagnostic contributes zero simulation
+`honest_n_runs`.
+
 See [`docs/RUN_PROVENANCE.md`](docs/RUN_PROVENANCE.md) for schemas and replay,
 [`docs/MANAGED_RUN_LIFECYCLE.md`](docs/MANAGED_RUN_LIFECYCLE.md) for startup and
 failure handling, [`docs/ENTRYPOINTS.md`](docs/ENTRYPOINTS.md) for the supported
@@ -190,6 +217,9 @@ for units and honest-N. Phase 1.2A's exact boundaries are in
 Wave 0's frozen grid, artifact schemas, privacy boundary, sigma estimators, and
 N/K interpretation are in
 [`docs/ENDPOINT_STOCHASTICITY.md`](docs/ENDPOINT_STOCHASTICITY.md).
+Wave-P's frozen variable levels, mappings, fixtures, directions and
+classification threshold are in
+[`docs/PERSONA_VARIABLES.md`](docs/PERSONA_VARIABLES.md).
 The experimental Codex CLI boundary and future quota-guarded pilot procedure
 are documented in [`docs/CODEX_EXEC_PROVIDER.md`](docs/CODEX_EXEC_PROVIDER.md)
 and [`docs/CODEX_QUALIFICATION_RUNBOOK.md`](docs/CODEX_QUALIFICATION_RUNBOOK.md).

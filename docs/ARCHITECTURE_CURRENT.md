@@ -38,9 +38,22 @@
 | 正式派生分析入口 | 在 managed analysis attempt 中读取历史 JSON/trace，把 legacy input 路径/大小/hash 和未验证身份计数入 manifest，并计算原有表/图 | 不伪造 child manifest；不统一或静默修改历史 analyzer 的过滤、配对和 CI 公式 |
 | `experiments/model_qualification.py` | `run_kind=model_qualification` 的 managed 入口；加载冻结 protocol/fixtures/rubric，构造 6×8=48 cases，执行 Mock/Fake，支持 CodexExec 安全 dry-run，并以确认参数和 case 上限保护未来小规模真实试跑 | 不调用市场、不产生价格路径；Phase 1.2B-CX1 未执行真实 Codex case；低层函数不是绕过 CLI 确认的正式入口 |
 | `experiments/endpoint_stochasticity.py` | `run_kind=endpoint_stochasticity` 的 managed Wave 0 入口；验证 qualification 48-case universe 和冻结 6-case 子集，执行 temp×K×concurrency 网格、独立 same-seed probe、pairwise byte agreement 与 within-case pooled sigma | 不调用 `run_sim`、不生成价格路径或市场 replicate；dry-run 不构造 Provider；真实 OpenAI-compatible 路径必须显式 `--live` |
+| `nmsim/persona_variables.py` / `experiments/persona_flip_test.py` | 冻结 14 维处境变量的注册、渲染、可复现采样与既有人设映射；managed Wave-P 入口在独立 fixture bundle 上执行 low/high×K 翻转和预注册 bootstrap 判定 | E1/E2 只继承、不进入 render；不改既有 6 persona/Prompt/市场语义；Fake/Mock 仅为 null control，真实 OpenAI-compatible 路径必须显式 `--live` |
 | `experiments/multi_event.py` | 冻结三事件×双臂×N=8×K=3 网格、counterbalanced acquisition、五次技术尝试上限、canonical live root 与受管 child selection | 不聚合结果、不把 ACTIVE/foreign-series materialization 当作可跳过失败、不声称真实 Provider 确定性 |
 | `experiments/aggregate_multi_event.py` | 从一个完成的父 manifest 重验 plan/ledger/selection、源码/runtime/alias/health/private artifact，并输出 complete-case seed-cluster 统计 | 不按 glob 或 legacy flat 文件选择样本；不构造 Provider；该 pilot 不升级为 confirmatory claim |
-| `qualification/*.json` | protocol 1.1、字节不变的 8 个 Observation fixtures、rubric 1.1 和 field-level visibility contract 1.0 | 不包含未来价格、private rationale、评价答案或 rubric 泄漏到 Observation；真实 Prompt 不可见的 fundamental anchor 明确 not-scored |
+| `qualification/*.json` | protocol 1.1、字节不变的 8 个 Observation fixtures、rubric 1.1、field-level visibility contract 1.0，以及独立 versioned `persona_fixtures 1.0` bundle | 既有 8-fixture/48-case universe 与 Wave0-T1 hashes 不变；新增 bundle 不包含 private rationale、评价答案或 rubric 泄漏 |
+
+Persona renderer 的 `120–300 字` 工程计数口径是 CJK Unified
+Ideographs 数量，不把 ASCII 数字、百分号或标点计为“字”；所有冻结片段逐字
+保留，合法 theta 空间为 188–286 个汉字。E1 从现有 persona 的
+`social_susceptibility` 只读派生，E2 仅对 `influencer_amplifier` 派生为
+high、其余为 low，二者都不进入 render。
+
+冻结 v1.0 同时要求同一 fixture 与低/高 theta，因而 A3-low 与 F2、
+C3-low 与 F3，以及 B2 的 Reference B1 与 research concrete fixture 会在
+同一 Prompt 中出现叙事张力。Runner 不私自改写冻结片段或 Observation，而在
+public study plan 以稳定 tension code 明示；任何 arm-specific fixture 修正都需
+后续协议 bump，当前 Fake 结果不能验证这些语义。
 
 ## Scientific Component Fingerprint
 
@@ -442,6 +455,7 @@ Reparse audit 不构造或调用 Provider，不访问网络，不调用 `run_sim
 | child-result reuse audit | `nmsim.result_reuse` + experiment driver parent | 是；`driver_summary.json` 保存 policy version、候选数、拒绝 reason 和脱敏 audit，不保存私有 Prompt/response |
 | qualification cases | `experiments.model_qualification` | 是；公共 case/aggregate 文件和 0600 private case records；不存在 price/fill/market state |
 | endpoint stochasticity samples | `experiments.endpoint_stochasticity` | 是；公共 response hash/显式公开 parsed fields/聚合噪底与 0600 Prompt/raw/private records；不存在 price/fill/market state |
+| persona-variable flip samples | `experiments.persona_flip_test` | 是；公共 response hash/parsed decision/位移与 bootstrap CI，以及 0600 render/Prompt/raw/rationale；不存在 price/fill/market state |
 | tracker cost | provider/tracker | 只打印；experiment JSON 写部分 |
 | liquidation events | `sim.run_sim` | 主 CLI 否；`run_seed` 是 |
 
@@ -490,6 +504,14 @@ Endpoint stochasticity 在自身的不可覆盖 managed run directory 中，dry-
 脱敏错误/计数和聚合量。Dry-run 不构造 Provider、不伪造 sample row 或
 sigma。该 run 不创建
 `price_path.csv`、market chart 或 simulation replicate，且 `honest_n_runs=0`。
+
+Persona flip test 使用另一不可覆盖 managed run directory。Dry-run 只写
+`dry_run_summary.json`；完整执行写 `persona_flip_summary.json`、
+`persona_flip_samples.jsonl` 和 mode-0600
+`private_persona_flip_records.jsonl`。公开层只保存 prompt/render/raw hashes、
+显式公开 parsed fields、honest-N、位移与 bootstrap CI；完整中文处境文本、
+Prompt、raw response、private rationale 和详细错误只进入私有层。该入口不运行
+market，不产生 simulation replicate，Fake/Mock 结果只能作为 null control。
 
 Phase 1.2B-CX1 的 `CodexExecLLM` 位于 scientific allowlist 之外的独立
 `nmsim/codex_exec.py`，避免修改已冻结的 `nmsim/llm.py`。`ManagedRunContext`

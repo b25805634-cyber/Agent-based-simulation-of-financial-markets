@@ -1,0 +1,205 @@
+{
+  "bundle_schema_version": "1.0",
+  "bundle_id": "persona_fixtures",
+  "bundle_version": "1.0",
+  "observation_protocol_version": "1.0",
+  "hash_contract": {
+    "canonical_json": "json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')",
+    "digest": "sha256",
+    "encoding": "lowercase hexadecimal",
+    "input_hash_payload": "the complete concrete fixture object after removing only its input_hash field",
+    "bundle_hash_payload": "the complete bundle object after removing only its bundle_hash field"
+  },
+  "logical_fixtures": [
+    {
+      "logical_fixture_id": "sideways_2y_hot_peers",
+      "member_fixture_ids": ["sideways_2y_hot_peers"],
+      "primary_variable_ids": ["D2"],
+      "compatible_variable_ids": ["C4"]
+    },
+    {
+      "logical_fixture_id": "deep_loss_bad_news",
+      "member_fixture_ids": ["deep_loss_bad_news"],
+      "primary_variable_ids": ["A3", "C1"],
+      "compatible_variable_ids": []
+    },
+    {
+      "logical_fixture_id": "public_holding_friends_ask",
+      "member_fixture_ids": ["public_holding_friends_ask"],
+      "primary_variable_ids": ["C2", "C3"],
+      "compatible_variable_ids": []
+    },
+    {
+      "logical_fixture_id": "belief_source_pair",
+      "member_fixture_ids": [
+        "belief_source_research",
+        "belief_source_peers"
+      ],
+      "primary_variable_ids": ["B1", "B2"],
+      "compatible_variable_ids": []
+    }
+  ],
+  "fixture_references": [
+    {
+      "reference_id": "generic_negative_news",
+      "source_path": "qualification/observations.json",
+      "fixture_id": "negative_news_price_unchanged",
+      "input_hash": "f765217c4362a3890dd22f00ba94a306a2d86499f58f7da44b56fbbfdf69aa4f",
+      "access": "read_only",
+      "applicable_variable_ids": ["A1", "A2", "A4", "B3", "D1", "D3"]
+    }
+  ],
+  "fixtures": [
+    {
+      "fixture_id": "sideways_2y_hot_peers",
+      "protocol_version": "1.0",
+      "round": 24,
+      "market_state": {
+        "latest_price": 100.0,
+        "recent_prices": [98.0, 101.0, 103.0, 99.0, 100.0]
+      },
+      "visible_news": "同期科技板块在过去 18 个月上涨约 45%，新闻持续讨论多只热门股票大涨；你持有的这只股票没有任何利空。",
+      "visible_social_feed": [
+        {
+          "sentiment": 0.8,
+          "public_take": "最近热门股票一直大涨，身边很多人都在讨论这些机会。"
+        }
+      ],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": [
+        "你已持有这只股票 24 个月，期间价格始终在 98 元至 103 元之间横盘。"
+      ],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "4c8ca3b91b2d1e01b519bf14ae5bd8be00ca2fbddbf4d105611ce5195c886ee5"
+    },
+    {
+      "fixture_id": "deep_loss_bad_news",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 50.0,
+        "recent_prices": [50.0, 50.0, 50.0, 50.0]
+      },
+      "visible_news": "突发利空：公司将全年业绩指引下修 20%。",
+      "visible_social_feed": [
+        {
+          "sentiment": -0.6,
+          "public_take": "这次业绩指引下修让我明显担忧。"
+        }
+      ],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": [
+        "你的买入成本是每股 100 元，现价 50 元，当前浮亏 50%。"
+      ],
+      "fundamental_value": 50.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "e085fdda3b563a46f7fa3510284ac9820044b42ff693b1c1ca737c918328fc73"
+    },
+    {
+      "fixture_id": "public_holding_friends_ask",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 75.0,
+        "recent_prices": [75.0, 75.0, 75.0, 75.0]
+      },
+      "visible_news": null,
+      "visible_social_feed": [
+        {
+          "sentiment": 0.0,
+          "public_take": "朋友甲问：还拿着吗？"
+        },
+        {
+          "sentiment": 0.0,
+          "public_take": "朋友乙问：还拿着吗？"
+        }
+      ],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": [
+        "你的买入成本是每股 100 元，现价 75 元。",
+        "你曾在聚会中多次向朋友推荐这只股票；本周先后有两位朋友问你是否还拿着。"
+      ],
+      "fundamental_value": 75.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "20fd3041e303168653474270af4846939a52b2d369b8e0be3105b503f8cede41"
+    },
+    {
+      "fixture_id": "belief_source_research",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 100.0,
+        "recent_prices": [100.0, 100.0, 100.0, 100.0]
+      },
+      "visible_news": "中度利空：公司核心产品的销量增速正在放缓。",
+      "visible_social_feed": [],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": [
+        "你花了三周研究这家公司的财报后买入了这只股票。"
+      ],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "1c9a4089ad8ec21a7d642eadb747c214635b962932d9a8c7801b07e72372d53d"
+    },
+    {
+      "fixture_id": "belief_source_peers",
+      "protocol_version": "1.0",
+      "round": 12,
+      "market_state": {
+        "latest_price": 100.0,
+        "recent_prices": [100.0, 100.0, 100.0, 100.0]
+      },
+      "visible_news": "中度利空：公司核心产品的销量增速正在放缓。",
+      "visible_social_feed": [],
+      "cash": 10000.0,
+      "shares": 50,
+      "memory": [
+        "你在饭局上听朋友极力推荐后买入了这只股票。"
+      ],
+      "fundamental_value": 100.0,
+      "invisible_fields": [
+        "future_prices",
+        "market_clearing_formula",
+        "other_agent_private_rationale",
+        "private_margin_reference_book",
+        "expected_answer",
+        "evaluation_rubric"
+      ],
+      "input_hash": "254dba5d024a86d6afb8620dee191743b2a49eaa3c7b386af6206eaab8dfc955"
+    }
+  ],
+  "bundle_hash": "d6feb6459b7cc38bd7e8d9b1957ef5c1d693923b82ad124929f708356147e14b"
+}
