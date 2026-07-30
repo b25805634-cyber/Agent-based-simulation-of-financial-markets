@@ -44,6 +44,7 @@ Management policies are more precise than a managed/unmanaged boolean:
 | python3 -m experiments.capture_traces | argparse → Config → build_llm → bare run_sim → JSON | Unmanaged | Ordinary trace JSON containing private reasoning | Direct | Yes only after direct_managed; rationale must be a 0600 private artifact |
 | python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Provider/real-use guard → ManagedRunContext → selected cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Mock/Fake; experimental CodexExec only behind explicit future-use confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
 | python3 -m experiments.endpoint_stochasticity | bootstrap → validate frozen qualification universe and 48-to-6 selection → Provider/live guard → ManagedRunContext → dry-run or 1080-sample grid plus separate two-call seed probe → public/private export | New in Wave 0 | Dry-run `dry_run_summary.json`, or full `endpoint_stochasticity_summary.json`, `endpoint_samples.jsonl`, and mode-0600 `private_endpoint_records.jsonl`, in a managed run | Fake offline; real OpenAI-compatible only with `--live`; dry-run constructs none | Yes, direct_managed with `run_kind=endpoint_stochasticity`; non-market noise diagnostic with zero simulation honest-N |
+| python3 -m experiments.persona_flip_test | bootstrap → validate frozen 14-variable registry and standalone fixture bundle → Provider/live guard → ManagedRunContext → dry-run or low/high×K grid → bootstrap displacement report and public/private export | New in Wave-P | Dry-run `dry_run_summary.json`, or full `persona_flip_summary.json`, `persona_flip_samples.jsonl`, and mode-0600 `private_persona_flip_records.jsonl`, in a managed run | Fake/Mock offline null controls; real OpenAI-compatible only with `--live`; dry-run constructs none | Yes, direct_managed with `run_kind=persona_flip_test`; non-market mechanism diagnostic with zero simulation honest-N |
 
 Evidence in the Phase 1.1A source:
 
@@ -179,6 +180,36 @@ See [ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md) for exact commands,
 artifact schemas, estimators, N/K power interpretation, limitations, and the
 no-scientific-semantics-change statement.
 
+## Persona-variable flip-test entrypoint
+
+`python3 -m experiments.persona_flip_test` is an official managed research
+entrypoint with `run_kind=persona_flip_test`. It validates the frozen
+14-variable registry and the separate `persona_fixtures 1.0` bundle without
+altering the qualification 8-fixture/48-case universe. E1/E2 remain inherited
+engine attributes outside rendered text, the five applicable legacy personas
+are represented only by derived coordinates, and `quant_arb` continues to use
+its existing definition.
+
+The frozen plan compares each variable's low and high endpoint while holding
+the remaining coordinates at the Reference Human vector, with `K=30` per arm
+by default. Public aggregation reports high-minus-low displacement for
+`P(sell)`, mean sentiment and mean signed order, together with deterministic
+95% percentile-bootstrap intervals; classification uses the preregistered
+sell-probability threshold and direction table in
+[PERSONA_VARIABLES.md](PERSONA_VARIABLES.md). Fake and Mock results are
+strictly orchestration/schema null controls and cannot support a behavioral
+claim. A preclassification is eligible only when both arms reach the planned
+parse-valid K; an incomplete honest-N is reported as `not_evaluable`.
+
+`--dry-run` validates and writes the plan without constructing a Provider.
+OpenAI-compatible execution is rejected before Provider construction unless
+`--live` is explicit. Public samples contain hashes and explicitly public
+parsed decision fields; rendered situations, complete prompts, raw responses,
+private rationale and detailed failures are restricted to the mode-`0600`
+private artifact. Endpoint responses, parse-valid decisions, failures and
+skips retain separate honest-N counts, and `honest_n_runs=0` because this
+diagnostic never clears a market.
+
 ## Test and diagnostic entrypoints
 
 | Entrypoint | Actual purpose | Writes files | Provider | Formal research allowed |
@@ -195,7 +226,7 @@ no-scientific-semantics-change statement.
 | experiments.additive_test | load result JSON → print regressions and CI | No | No | No |
 | python3 -m unittest discover -s tests -v | test discovery and helpers/low-level APIs | Temporary files only | No real Provider | No |
 
-The eighteen test files that also have standalone unittest.main guards are:
+The test files that also have standalone unittest.main guards are:
 
 - tests/test_phase1_integration.py
 - tests/test_privacy_invariant.py
@@ -215,6 +246,13 @@ The eighteen test files that also have standalone unittest.main guards are:
 - tests/test_codex_exec_provider.py
 - tests/test_endpoint_stochasticity.py
 - tests/test_aggregate_multi_event.py
+- tests/test_multi_event_core.py
+- tests/test_multi_event_driver.py
+- tests/test_provider_attempt_provenance.py
+- tests/test_reference_data.py
+- tests/test_persona_variables.py
+- tests/test_persona_fixtures.py
+- tests/test_persona_flip_test.py
 
 They share the test-suite registry policy; individual execution does not create
 a formal research run.
