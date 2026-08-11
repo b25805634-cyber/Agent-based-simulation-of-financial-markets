@@ -164,6 +164,33 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         True,
         "Non-market Wave 0 diagnostic: six cases x two temperatures x K=30 x three concurrency levels = 1080 planned grid samples, plus a separate two-call same-seed probe. Dry-run constructs no Provider; real OpenAI-compatible access requires --live; private endpoint records are mode 0600.",
     ),
+    _spec(
+        "experiments.v2_attention_market",
+        "experiments/v2_attention_market.py",
+        "python3 -m experiments.v2_attention_market",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT,
+        DIRECT_MANAGED,
+        (
+            "bootstrap",
+            "versioned non-Persona state/action/design validation",
+            "explicit Provider/live/request-count guard",
+            "ManagedRunContext with V2 research profile",
+            "Teacher samples and private raw records",
+            "family-grouped Student distillation",
+            "paired conserving budget-by-behavior market",
+            "public machine/Markdown/HTML export",
+        ),
+        (
+            "managed V2 run directory",
+            "public Teacher samples and 0600 private Teacher records",
+            "aggregated dataset/split/preprocessing/Student artifacts",
+            "integer-ledger market runs and 2x2 summary",
+            "V2 summary and Markdown/HTML reports",
+        ),
+        PROVIDER_DIRECT,
+        True,
+        "Provider access exists only in the offline Teacher phase. Dry-run constructs none; Fake Teachers are engineering controls; OpenAI-compatible access requires --live and exact request-count confirmation. The Student and market phases are provider-free, private rationale never propagates, and the isolated V2 mechanism does not change V1 semantics.",
+    ),
 
     # Experiment-level drivers.  Their run-count lifecycle is managed at the
     # driver level; every simulation remains a separate managed run_seed child.

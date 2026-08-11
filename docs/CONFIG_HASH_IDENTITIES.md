@@ -4,6 +4,76 @@
 manifest 说明都必须写出具体 hash 字段名、schema、输入 fixture 和
 base directory；不得只写模糊的“Config hash”。
 
+## V2 attention-distillation 的独立 identity envelope
+
+`python3 -m experiments.v2_attention_market` 不使用 legacy `Config` 来表达 V2
+科学语义。它的正式 summary/report 必须同时写出以下四个具名、
+secret-free identity，不得简称为“V2 Config hash”：
+
+| Identity | Schema | 绑定范围 |
+|---|---|---|
+| `v2_scientific_config_hash` | `v2_attention_market/0.1` | 固定日频 state/action/prompt 合同、状态设计、family-grouped split 的显式阈值/分配/回退规则、train-only OOD 几何与 `abs(z)>3.0` 规则、Student/baseline 架构与损失、整数清算/信用设施规则及 budget x behavior 四格参数 |
+| `v2_model_request_config_hash` | `v2_teacher_request/0.1` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；不包含 credential |
+| `v2_execution_config_hash` | `v2_attention_execution/0.1` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1` |
+| `v2_full_effective_config_hash` | `v2_attention_full_effective_config/0.1` | 显式 envelope，绑定上述 scientific/model-request/execution 三个 identity 及各自 schema |
+
+每次报告这些值时，还必须标出实际 managed run 目录/执行上下文与
+有效 V2 计划；不得把其他 run 的值称为“默认值”。变更 Provider request
+设置不应伪装成科学设计未变，变更 worker/dry-live 也不应伪装成同一
+full-effective identity。真实 Provider 仍可随机；相同 hash 不是端点完全确定性
+声明。
+
+V2 的 real-provider request 明确不发送 seed：
+`request_seed=null` 且
+`request_seed_support=unsupported_and_not_sent`。sample/replicate 的 SHA-256
+content identity 只用于请求与计数追踪，不是 Provider 随机性控制，
+相同 model-request hash 也不得被解释为实际端点确定性。
+
+OpenAI-compatible route 使用 V2-local
+`v2_endpoint_identity/0.1`：host/port/path 和 query key 可以进入规范化
+route identity，但 userinfo、fragment 和全部 query value 被省略，已配置
+API key 若出现在 path 中也先脱敏。credential 值和 raw endpoint 文本
+不进入 `v2_model_request_config_hash`。这是 V2 的局部身份边界，不修改
+V1/provider-capability 既有合同。
+
+`v2_scientific_component_fingerprint/0.1` 故意保守地绑定四个 V2
+模块以及完整的 `experiments/v2_attention_market.py`。由于报告渲染也在
+该 managed entrypoint 中，当前“只改报告”也可能使
+`v2_scientific_config_hash` 变化。这是防止科学实现漏绑定的已知
+conservative overbinding，不是报告文字必然改变数值科学语义的
+声明。跨运行比较必须同时报告该 fingerprint，不得手工忽略 hash
+差异。
+
+`v2_execution_component_fingerprint/0.1` 绑定 managed entrypoint 及
+Config/entrypoint registry/events/managed CLI/provider-attempt/provenance/
+run-context 执行边界，并进入 `v2_execution_config_hash`。它与上述
+scientific component fingerprint 分开报告，不得用任一个替代另一个。
+
+Student/market 还有一层不同于 Config identity 的 artifact lineage：
+
+| 字段 | 精确语义 |
+|---|---|
+| `model_semantic_hash` | 模型规范 JSON payload 的内容身份，绑定数值参数和结构语义 |
+| `artifact_sha256` | 已写入 model JSON 文件的精确字节 SHA-256 |
+| `model_envelope_hash` | `student_model_envelope` 在加入 self-hash 前的规范内容 hash，绑定 feature order、state contract、dataset/training projection、split、OOD reference 与各 model hash |
+| `student_model_envelope_artifact_sha256` | 包含 `model_envelope_hash` 字段的 envelope 文件精确字节 hash |
+
+Market `model_lineage` 同时携带 deployed model 的 semantic/artifact
+hash 和 envelope 的 content/artifact hash，并进入 market index、每个完成
+run ledger 和每个持久化 round row。上述 hash 类型不得互换，也不得用
+Config hash 代替 artifact integrity。
+
+V2 仍通过 `ManagedRunContext` 取得现有不可覆写生命周期、Git/文件指纹和
+artifact 登记能力，因此 manifest 中仍可能出现 legacy
+`scientific_config_hash`/`model_request_config_hash`/`execution_config_hash`/
+`full_effective_config_hash` 和 `scientific_component_fingerprint`。这些未加 `v2_`
+前缀的 identity 只描述管理生命周期所需的 legacy Config/代码基础设施；
+它们不是 V2 数据、Student 或市场的 scientific identity，不得用于 V2
+结果复用或跨运行等价性声明。该 managed attempt 的显式 `research_profile`
+将 legacy Persona contract 标记为 `applicable=false`，并指向独立 V2 prompt
+合同；这是范围隔离，不是对 V1 Persona 定义的修改。Legacy V1 `Config()`
+默认值、Persona/prompt 定义、科学指纹语义和现有入口行为保持不变。
+
 ## 2026-07-15 sealing cross-version check
 
 > 本节的 38/27/9 字段计数和精确 hash 只描述 2026-07-15 的封存 fixture，不代表当前 Wave 1 Config。当前分类为 41 字段：29 scientific、10 model-request、2 execution；报告当前运行时必须从该次 manifest 取得具名 identity，不得沿用下方历史值。

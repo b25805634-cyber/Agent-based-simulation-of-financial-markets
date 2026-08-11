@@ -1,7 +1,7 @@
 # Entrypoint inventory and management policy
 
-This document records the executable surfaces found through the Wave 0
-endpoint-stochasticity addition and their current lifecycle and result-reuse policy. The machine-readable source is
+This document records the executable surfaces found through the additive V2
+attention-distillation prototype and their current lifecycle and result-reuse policy. The machine-readable source is
 [nmsim/entrypoints.py](../nmsim/entrypoints.py). Importing that registry has no
 provider, Git, network, or filesystem side effect.
 
@@ -44,6 +44,7 @@ Management policies are more precise than a managed/unmanaged boolean:
 | python3 -m experiments.capture_traces | argparse → Config → build_llm → bare run_sim → JSON | Unmanaged | Ordinary trace JSON containing private reasoning | Direct | Yes only after direct_managed; rationale must be a 0600 private artifact |
 | python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Provider/real-use guard → ManagedRunContext → selected cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Mock/Fake; experimental CodexExec only behind explicit future-use confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
 | python3 -m experiments.endpoint_stochasticity | bootstrap → validate frozen qualification universe and 48-to-6 selection → Provider/live guard → ManagedRunContext → dry-run or 1080-sample grid plus separate two-call seed probe → public/private export | New in Wave 0 | Dry-run `dry_run_summary.json`, or full `endpoint_stochasticity_summary.json`, `endpoint_samples.jsonl`, and mode-0600 `private_endpoint_records.jsonl`, in a managed run | Fake offline; real OpenAI-compatible only with `--live`; dry-run constructs none | Yes, direct_managed with `run_kind=endpoint_stochasticity`; non-market noise diagnostic with zero simulation honest-N |
+| python3 -m experiments.v2_attention_market | bootstrap → V2 contract/count/live guard → ManagedRunContext with a non-Persona research profile → dry plan, or Teacher sampling → aggregation/group split → prior/linear/MLP Students → paired budget x behavior four-cell market → public/private export | New additive V2 prototype | One immutable managed run containing Teacher records, aggregated data/split, Student/evaluation artifacts, four-cell market ledgers, summary, and Markdown/HTML report | Direct only during the Teacher phase: deterministic Fake/Null offline; OpenAI-compatible only with `--live`, explicit model, and exact request-count confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=v2_attention_market`; one integrated engineering pipeline, isolated from the V1 Persona market |
 
 Evidence in the Phase 1.1A source:
 
@@ -178,6 +179,77 @@ run contributes `honest_n_runs=0` because it never clears a market.
 See [ENDPOINT_STOCHASTICITY.md](ENDPOINT_STOCHASTICITY.md) for exact commands,
 artifact schemas, estimators, N/K power interpretation, limitations, and the
 no-scientific-semantics-change statement.
+
+## V2 attention-distillation market entrypoint
+
+`python3 -m experiments.v2_attention_market` is the sole official managed
+entrypoint for the additive V2 prototype. One `direct_managed` attempt performs
+the complete Teacher → aggregated dataset → Student → four-cell market
+pipeline. Provider access is direct but confined to Teacher sampling; Student
+training, evaluation, and every market cell are provider-free. The legacy V1
+Persona prompts, social loop, Config defaults, clearing rule, and result
+schemas are not modified or silently redirected.
+
+`--dry-run` validates the plan and constructs no Provider. The built-in
+`fake_test_teacher` and `fake_null_teacher` execute the pipeline offline and
+are engineering fixtures, not endpoint or human-behavior evidence. A real
+OpenAI-compatible run fails closed unless `--provider openai`, `--live`, an
+explicit `--model`, and `--confirm-request-count` equal to the exact
+`--states * --replicates` plan are all present; a construction or request
+failure never falls back to either Fake.
+
+The exact default live confirmation is 96 states x 5 replicates = 480 planned
+requests:
+
+```bash
+OPENAI_BASE_URL=http://HOST/v1 OPENAI_API_KEY=... \
+python3 -m experiments.v2_attention_market \
+  --provider openai --model MODEL --live \
+  --states 96 --replicates 5 --confirm-request-count 480 \
+  --out results_v2
+```
+
+The real transport sends no request seed; replicate SHA-256 identities provide
+provenance only and do not make the endpoint deterministic. The model-request
+identity uses the V2-local secret-free endpoint route projection, never raw
+credentials.
+
+V2 reports three non-interchangeable honest-N units:
+`teacher_samples` for valid parsed Teacher responses, `aggregated_examples`
+for state-level examples that successfully enter the grouped dataset, and
+`market_runs` for successfully completed cell-by-seed ledgers. Requested
+calls, raw responses, state rows, and market runs therefore cannot substitute
+for one another or be added into a single N. Private prompts, raw responses,
+rationales, and detailed errors remain in exclusive mode-`0600` artifacts.
+The report is explicitly an engineering report: no Fake or dry result supports
+a human-likeness, real-endpoint, bubble, or causal-effect claim. This V2
+prototype currently supplies no human labels, no preregistered scientific
+acceptance threshold, and no authorized real-endpoint result.
+
+Family partition assignments are frozen before Provider construction. The
+default design uses tape-regime x position-regime stratification; a design too
+small to support all nine joint strata uses the explicit tape-only fallback and
+must still cover every tape regime in every non-empty partition. Coverage and
+missing joint cells are emitted rather than inferred, separately for the full
+pre-request planned design and the post-Teacher training-eligible rows. The
+scientific config freezes the tape cutoffs (`-0.10/+0.10`), position cutoffs
+(`0.20/0.80`), nine-cell/minimum-five-family joint eligibility, allocation
+fractions, and fallback rule. Teacher rows are
+private-first `fsync`ed per completion, and market outputs are `fsync`ed per
+settled round before a full run can enter `honest_n_market_runs`, so interrupted
+attempts preserve partial but correctly typed accounting.
+
+Validation/test OOD and market-vs-train OOD use a train-only per-feature
+rectangle and standardizer with the frozen tail rule `abs(z) > 3.0`. Market
+diagnostics are reported by cell and named
+feature; they are not joint-support estimates, acceptance thresholds, or
+validity decisions. Student files are bound by `student_model_envelope`, and
+market index/run/round artifacts carry `model_lineage` that distinguishes model
+semantic hashes from exact artifact SHA-256 values.
+
+See [V2_ATTENTION_DISTILLATION.md](V2_ATTENTION_DISTILLATION.md) for the frozen
+time/state/action contract, clearing and credit accounting, four controls,
+artifact identities, commands, and remaining scientific validation work.
 
 ## Test and diagnostic entrypoints
 

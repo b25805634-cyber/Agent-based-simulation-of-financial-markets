@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import tempfile
 import unittest
+from unittest import mock
 
 from nmsim.agents import make_agents
 from nmsim.config import Config
@@ -134,6 +135,49 @@ class RunProvenanceTests(unittest.TestCase):
         )
         self.assertEqual(manifest["execution"]["worker_count"], 3)
         self.assertEqual(manifest["execution"]["batching"]["max_batch_size"], 6)
+        self.assertNotIn("research_profile", manifest)
+
+    def test_non_persona_research_profile_does_not_load_legacy_prompts(self) -> None:
+        profile = {
+            "profile_id": "v2_attention_market/0.1",
+            "persona_contract": {
+                "applicable": False,
+                "reason": "the protocol has no identity or Persona input",
+            },
+            "prompt_contract": {
+                "schema_version": "v2_teacher_prompt/0.1",
+                "source_sha256": "0" * 64,
+            },
+        }
+        with mock.patch(
+            "nmsim.provenance._prompt_metadata",
+            side_effect=AssertionError("legacy Persona prompt was loaded"),
+        ):
+            manager = self._manager(
+                "non-persona-profile", research_profile=profile
+            )
+
+        manifest = _read_json(manager.manifest_path)
+        self.assertEqual(manifest["research_profile"], profile)
+        self.assertFalse(manifest["personas"]["applicable"])
+        self.assertEqual(manifest["personas"]["definitions"], [])
+        self.assertEqual(
+            manifest["personas"]["population"]["planned_llm_total"], 0
+        )
+        self.assertFalse(manifest["prompt"]["legacy_v1_prompt_applicable"])
+        text = manager.manifest_path.read_text(encoding="utf-8")
+        self.assertNotIn("retail_crowd", text)
+
+    def test_research_profile_fails_closed_on_unknown_fields(self) -> None:
+        profile = {
+            "profile_id": "v2_attention_market/0.1",
+            "persona_contract": {"applicable": False},
+            "prompt_contract": {"schema_version": "v2_teacher_prompt/0.1"},
+            "unexpected": True,
+        }
+        with self.assertRaisesRegex(ValueError, "fields must be exactly"):
+            self._manager("bad-profile", research_profile=profile)
+        self.assertFalse((self.root / "outputs" / "runs" / "bad-profile").exists())
 
     def test_manifest_redacts_endpoint_userinfo_query_and_fragment_credentials(self) -> None:
         userinfo_secret = "endpoint-userinfo-secret"
