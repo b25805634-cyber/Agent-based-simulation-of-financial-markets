@@ -331,6 +331,73 @@ network_access = false
 Mock 仍是 Provider 接口响应来源，但不需外部网络。Dry-run 不构造
 Provider，logical request 和 Provider call 均为 0，48 个 case 记为计划但未尝试，`honest_n_cases=0`。不论 case 数多少，qualification 都不得增加 `honest_n_runs`。
 
+## V2 Teacher → Student → 四格市场的三种单位
+
+`run_kind=v2_attention_market` 是一个 `direct_managed` 一体化入口，但“一个
+managed attempt”不会把内部的三种完成量变成同一个样本单位。V2
+必须独立报告：
+
+| V2 单位 | honest-N 定义 | 不得冒充该单位的计数 |
+|---|---|---|
+| `teacher_samples` | `honest_n_teacher_samples`：收到 response 后通过严格 schema、有限性和行动可行性校验的 Teacher response 数 | 计划请求、已尝试请求、仅收到的 raw response、parse/provider failure |
+| `aggregated_examples` | `honest_n_aggregated_examples`：至少有一个有效 Teacher sample、完成状态级聚合并实际进入 family-grouped dataset 的 example 数 | Teacher replicate 数、原始 state 计划数、被拒绝或无有效 sample 的 state |
+| `market_runs` | `honest_n_market_runs`：完整返回、通过现金/股份/信用设施不变量并完成 ledger/artifact 登记的一个 `cell x seed` 运行 | 已开始但失败的 cell、已完成 round 数、Teacher sample 或 aggregated example 数 |
+
+Teacher 计划请求数为 `states * replicates`。`attempted`、`raw_responses`、
+`valid`和 `failed` 必须分开；`honest_n_teacher_samples=valid`，不得用
+`attempted-failed` 猜测未明确记录的 response。一个 state 的多个有效 replicate
+只会形成一个 aggregated example，所以
+`honest_n_teacher_samples` 通常不等于 `honest_n_aggregated_examples`。四格
+`finite/credit x distilled/momentum` 每个 seed 各是一个 market-run 完成单位，
+但它们共享 Teacher/Student 且按 seed 配对；该计数是执行与 provenance
+单位，不自动等于独立统计样本量。
+
+Provider 只能出现在 Teacher phase。Student 与 market 不得增加
+`provider_calls`。`--dry-run` 不构造 Provider，三个 V2 honest-N 均为 0；Fake/Null
+离线运行可以有非零工程计数，但它们不是真实端点或人类行为样本。
+通用 manifest 的历史顶层 `honest_n`/`samples.*` 仍是兼容字段，不得替代
+上述三个具名 V2 单位，三者也不得相加成一个模糊 N。
+
+### Teacher 的 completion commit 与中断口径
+
+Teacher 每个已解析 completion 按以下顺序持久化：
+
+1. 追加完整 private row 到 mode-`0600`
+   `private_teacher_records.jsonl`，flush 并 `fsync`；
+2. 追加不含 prompt/raw/rationale/detail error 的 public row 到
+   `teacher_samples.jsonl`，flush 并 `fsync`；
+3. 再更新 result list、event、manifest completion 与
+   `honest_n_teacher_samples`。
+
+正常结束和异常退出都在 `finally` 再刷新一次计数。因此中断时，
+`attempted`、`resolved`、`raw_responses`、`valid`、已解析 failure、
+`unresolved_attempts` 和 `skipped` 保持不同口径；不用
+`attempted-failed` 推测 raw response。若在 private-first 与 public commit 之间
+中断，private row 可以是唯一已落盘证据，但不增加 public honest-N。
+
+family 分层与 train/validation/test assignment 在任何 Teacher request
+之前冻结。某 state 全部 replicate 失败时，它仍保留预先分配的
+family/stratum/partition 身份和计数轨迹，但不冒充
+`honest_n_aggregated_examples`。
+
+### Market run/round 的持久化边界
+
+每个 `cell x seed` 启动时独占创建一个 round JSONL。每个已完成
+settlement 且通过不变量的 round，先将 ledger 与 `model_lineage`
+追加并 `fsync`，再增加 `rounds.completed`。整个 cell x seed 完整返回后，
+才独占写入并 `fsync` full-run JSON、进入 run catalog，并增加
+`honest_n_market_runs`。因此中断后：
+
+- 已 `fsync` 的 settled rounds 仍是可审计的
+  `durably_persisted_settled_market_rounds`；
+- 已启动但未持久化完成的 round/run 计入 failed；
+- 未启动的 run 和 round slot 计入 skipped；
+- partial round JSONL 不得使该 run 进入
+  `honest_n_market_runs`。
+
+Round 持久化数是执行/provenance 证据，不是第四种独立统计
+N，也不得与 Teacher、aggregated-example 或 market-run honest-N 相加。
+
 ## 成功判定与不变量
 
 正式汇总应同时检查 lifecycle 和计数，而不是只检查某个输出文件：

@@ -422,6 +422,76 @@ def _create_event_logger(run_id: str, run_dir: Path):
             raise first_error
 
 
+def _research_profile_metadata(
+    cfg: Any,
+    repo_root: Path,
+    research_profile: Optional[Mapping[str, Any]],
+) -> tuple[dict[str, Any], dict[str, Any], Optional[dict[str, Any]]]:
+    """Return prompt/persona metadata for one explicitly selected profile.
+
+    ``None`` is the exact legacy path.  Provider protocols which do not use
+    the market Persona catalog may opt out without importing or hashing the V1
+    prompt module.  The opt-out is descriptive provenance only; callers still
+    own their separate versioned scientific contract and hashes.
+    """
+
+    if research_profile is None:
+        personas, prompt = _prompt_metadata(repo_root)
+        return (
+            {
+                "definitions": personas,
+                "population": _planned_population(cfg, personas),
+            },
+            prompt,
+            None,
+        )
+    if not isinstance(research_profile, Mapping):
+        raise ValueError("research_profile must be a mapping")
+    allowed = {"profile_id", "persona_contract", "prompt_contract"}
+    keys = {str(key) for key in research_profile}
+    if keys != allowed:
+        raise ValueError("research_profile fields must be exactly {}".format(sorted(allowed)))
+    profile_id = research_profile.get("profile_id")
+    persona_contract = research_profile.get("persona_contract")
+    prompt_contract = research_profile.get("prompt_contract")
+    if not isinstance(profile_id, str) or not profile_id.strip():
+        raise ValueError("research_profile profile_id must be nonblank")
+    if not isinstance(persona_contract, Mapping):
+        raise ValueError("research_profile persona_contract must be a mapping")
+    if not isinstance(prompt_contract, Mapping):
+        raise ValueError("research_profile prompt_contract must be a mapping")
+    if persona_contract.get("applicable") is not False:
+        raise ValueError("non-legacy research_profile must mark personas inapplicable")
+    profile = redact_secrets(
+        {
+            "profile_id": profile_id,
+            "persona_contract": dict(persona_contract),
+            "prompt_contract": dict(prompt_contract),
+        }
+    )
+    personas = {
+        "applicable": False,
+        "definitions": [],
+        "population": {
+            "requested": None,
+            "planned_llm_by_persona": {},
+            "planned_llm_total": 0,
+            "planned_noise_total": 0,
+            "actual_llm_by_persona": None,
+            "actual_llm_total": None,
+            "actual_noise_total": None,
+            "actual_agent_ids": None,
+        },
+        "contract": profile["persona_contract"],
+    }
+    prompt = {
+        "legacy_v1_prompt_applicable": False,
+        "profile_id": profile_id,
+        "contract": profile["prompt_contract"],
+    }
+    return personas, prompt, profile
+
+
 class RunManager:
     """Own one immutable run directory, manifest, and event logger."""
 
@@ -429,15 +499,18 @@ class RunManager:
     def create(cls, cfg: Any, out_root: Optional[os.PathLike] = None,
                scenario_id: Optional[str] = None, run_id: Optional[str] = None,
                worker_count: Optional[int] = None, batching: Any = None,
-               input_paths: Any = None, repo_root: Optional[os.PathLike] = None) -> "RunManager":
+               input_paths: Any = None, repo_root: Optional[os.PathLike] = None,
+               research_profile: Optional[Mapping[str, Any]] = None) -> "RunManager":
         return cls(cfg=cfg, out_root=out_root, scenario_id=scenario_id,
                    run_id=run_id, worker_count=worker_count, batching=batching,
-                   input_paths=input_paths, repo_root=repo_root)
+                   input_paths=input_paths, repo_root=repo_root,
+                   research_profile=research_profile)
 
     def __init__(self, cfg: Any, out_root: Optional[os.PathLike] = None,
                  scenario_id: Optional[str] = None, run_id: Optional[str] = None,
                  worker_count: Optional[int] = None, batching: Any = None,
-                 input_paths: Any = None, repo_root: Optional[os.PathLike] = None):
+                 input_paths: Any = None, repo_root: Optional[os.PathLike] = None,
+                 research_profile: Optional[Mapping[str, Any]] = None):
         self._lock = threading.RLock()
         self.cfg = cfg
         self.repo_root = Path(repo_root or Path(__file__).resolve().parent.parent).resolve()
@@ -456,7 +529,9 @@ class RunManager:
         )
         self.scientific_compatibility = scientific_compatibility
         config = redact_secrets(cfg)
-        personas, prompt = _prompt_metadata(self.repo_root)
+        personas, prompt, effective_research_profile = _research_profile_metadata(
+            cfg, self.repo_root, research_profile
+        )
         scenario_hash = _stable_json_hash({
             "n_rounds": getattr(cfg, "n_rounds", None),
             "news_round": getattr(cfg, "news_round", None),
@@ -584,10 +659,7 @@ class RunManager:
                 "batch_sizes": [],
                 "batch_count": 0,
             },
-            "personas": {
-                "definitions": personas,
-                "population": _planned_population(cfg, personas),
-            },
+            "personas": personas,
             "prompt": prompt,
             "inputs": input_items,
             "environment": {
@@ -608,6 +680,8 @@ class RunManager:
             "compatibility": {"latest_link": None, "legacy_links": [], "skipped": []},
             "warnings": [],
         }
+        if effective_research_profile is not None:
+            initial["research_profile"] = effective_research_profile
 
         self.runs_root = self.out_root / "runs"
         self.run_dir = self.runs_root / self.run_id

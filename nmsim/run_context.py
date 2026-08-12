@@ -253,6 +253,7 @@ class ManagedRunContext:
         run_kind: str = "simulation",
         planned_simulation_runs: Optional[int] = None,
         full_validation_completed: bool = True,
+        research_profile: Optional[Mapping[str, Any]] = None,
     ) -> "ManagedRunContext":
         manager = RunManager.create(
             cfg,
@@ -263,6 +264,7 @@ class ManagedRunContext:
             batching=batching,
             input_paths=input_paths,
             repo_root=repo_root,
+            research_profile=research_profile,
         )
         return cls(
             manager,
