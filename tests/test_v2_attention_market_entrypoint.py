@@ -85,6 +85,59 @@ def _small_full_args(out_root: Path) -> list:
     ]
 
 
+def _pilot_args(out_root: Path, *, live: bool = False, **overrides) -> list:
+    values = {
+        "provider": "openai",
+        "model": "MiniMax-M2.7",
+        "temperature": "0",
+        "max_tokens": "1024",
+        "states": "54",
+        "replicates": "3",
+        "workers": "1",
+        "seed": "20260811",
+        "training_epochs": "400",
+        "market_agents": "48",
+        "market_rounds": "60",
+        "market_seeds": "3",
+    }
+    values.update({key: str(value) for key, value in overrides.items()})
+    argv = [
+        "--provider",
+        values["provider"],
+        "--model",
+        values["model"],
+        "--temperature",
+        values["temperature"],
+        "--max-tokens",
+        values["max_tokens"],
+        "--states",
+        values["states"],
+        "--replicates",
+        values["replicates"],
+        "--workers",
+        values["workers"],
+        "--seed",
+        values["seed"],
+        "--training-epochs",
+        values["training_epochs"],
+        "--market-agents",
+        values["market_agents"],
+        "--market-rounds",
+        values["market_rounds"],
+        "--market-seeds",
+        values["market_seeds"],
+        "--pilot-profile",
+        entrypoint.MINIMAX_M27_JOINT54X3_PILOT,
+        "--out",
+        str(out_root),
+    ]
+    if live:
+        argv.extend(["--live", "--confirm-request-count", "162"])
+    else:
+        argv.append("--dry-run")
+    return argv
+
+
 class V2BootstrapAndGuardTests(unittest.TestCase):
     def setUp(self) -> None:
         self._temporary = tempfile.TemporaryDirectory(dir="/tmp")
@@ -379,6 +432,478 @@ class V2BootstrapAndGuardTests(unittest.TestCase):
         }
         self.assertEqual(after, before)
         self.assertEqual(len(list((out / "runs").iterdir())), 1)
+
+
+class V2FrozenTeacherPilotTests(unittest.TestCase):
+    ENDPOINT_ENV = {
+        "OPENAI_BASE_URL": "http://10.214.32.152:8000/v1",
+        "OPENAI_API_KEY": "EMPTY",
+    }
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+
+    def test_frozen_profile_dry_run_is_zero_network_162_plan_with_identities(self):
+        out = self.root / "pilot-dry-run"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint,
+            "_build_openai_provider",
+            side_effect=AssertionError("pilot dry-run constructed a provider"),
+        ) as build_provider, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("pilot dry-run opened a socket"),
+        ) as network, redirect_stdout(io.StringIO()):
+            entrypoint.main(_pilot_args(out))
+
+        build_provider.assert_not_called()
+        network.assert_not_called()
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        summary = _read_json(run_dir / "dry_run_summary.json")
+        profile = entrypoint.pilot_profile_descriptor(
+            entrypoint.MINIMAX_M27_JOINT54X3_PILOT
+        )
+        self.assertEqual(summary["planned_states"], 54)
+        self.assertEqual(summary["planned_replicates_per_state"], 3)
+        self.assertEqual(summary["planned_teacher_requests"], 162)
+        self.assertEqual(summary["provider_calls"], 0)
+        self.assertFalse(summary["network_access"])
+        self.assertEqual(summary["pilot_profile"], profile)
+        self.assertEqual(manifest["status"], "finished")
+        self.assertEqual(
+            manifest["execution"]["batching"]["teacher"]["strategy"],
+            "first_planned_canary_then_strict_sequential_fail_fast",
+        )
+        self.assertEqual(
+            manifest["completion"]["provider_calls"]["attempted"], 0
+        )
+        self.assertEqual(
+            manifest["v2_attention_market"]["teacher_acceptance_gate"]["status"],
+            "plan_only",
+        )
+        identities = manifest["v2_config_identities"]
+        scientific = identities["scientific_config"]
+        request = identities["model_request_config"]
+        execution = identities["execution_config"]
+        self.assertEqual(
+            scientific["teacher_sampling"]["pilot_profile_id"],
+            profile["profile_id"],
+        )
+        self.assertEqual(
+            scientific["teacher_sampling"]["teacher_acceptance_gate"],
+            profile["teacher_acceptance_gate"],
+        )
+        self.assertEqual(
+            request["pilot_profile_id"],
+            entrypoint.MINIMAX_M27_JOINT54X3_PILOT,
+        )
+        self.assertEqual(request["planned_requests"], 162)
+        self.assertEqual(request["required_reported_model"], "MiniMax-M2.7")
+        self.assertEqual(
+            request["planned_sample_order_hash"],
+            profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            request["canary_sample_id"], profile["canary_sample_id"]
+        )
+        self.assertTrue(execution["strict_sequential_teacher_transport"])
+        self.assertTrue(execution["first_planned_sample_is_canary"])
+        self.assertTrue(
+            execution["fail_fast_after_any_resolved_teacher_failure"]
+        )
+        for key in (
+            "v2_scientific_config_hash",
+            "v2_model_request_config_hash",
+            "v2_execution_config_hash",
+            "v2_full_effective_config_hash",
+        ):
+            self.assertRegex(summary[key], HASH_RE)
+
+    def test_every_frozen_profile_argument_mutation_fails_config_validation(self):
+        mutations = {
+            "provider": "fake_null_teacher",
+            "model": "MiniMax-M2.7-mutated",
+            "temperature": "0.1",
+            "max_tokens": "1025",
+            "states": "55",
+            "replicates": "4",
+            "workers": "2",
+            "seed": "20260812",
+            "training_epochs": "401",
+            "market_agents": "49",
+            "market_rounds": "61",
+            "market_seeds": "4",
+        }
+        for field, mutated_value in mutations.items():
+            with self.subTest(field=field):
+                out = self.root / "mutated-{}".format(field)
+                stderr = io.StringIO()
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError(
+                        "invalid profile constructed a provider"
+                    ),
+                ) as build_provider, mock.patch.object(
+                    socket,
+                    "create_connection",
+                    side_effect=AssertionError("invalid profile opened a socket"),
+                ) as network, redirect_stdout(io.StringIO()), redirect_stderr(
+                    stderr
+                ):
+                    with self.assertRaises(SystemExit) as raised:
+                        entrypoint.main(
+                            _pilot_args(out, **{field: mutated_value})
+                        )
+                self.assertEqual(raised.exception.code, 2)
+                build_provider.assert_not_called()
+                network.assert_not_called()
+                manifest = _read_json(_single_run(out) / "run_manifest.json")
+                self.assertEqual(manifest["status"], "failed")
+                self.assertEqual(
+                    manifest["failure_stage"], "config_validation"
+                )
+                self.assertEqual(
+                    manifest["completion"]["provider_calls"]["attempted"], 0
+                )
+
+        out = self.root / "mutated-endpoint-identity"
+        with mock.patch.dict(
+            os.environ,
+            {
+                "OPENAI_BASE_URL": "http://10.214.32.153:8000/v1",
+                "OPENAI_API_KEY": "EMPTY",
+            },
+            clear=False,
+        ), mock.patch.object(
+            entrypoint,
+            "_build_openai_provider",
+            side_effect=AssertionError("invalid endpoint constructed a provider"),
+        ) as build_provider, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("invalid endpoint opened a socket"),
+        ) as network, redirect_stdout(io.StringIO()), redirect_stderr(
+            io.StringIO()
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                entrypoint.main(_pilot_args(out))
+        self.assertEqual(raised.exception.code, 2)
+        build_provider.assert_not_called()
+        network.assert_not_called()
+        manifest = _read_json(_single_run(out) / "run_manifest.json")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "config_validation")
+        self.assertEqual(
+            manifest["completion"]["provider_calls"]["attempted"], 0
+        )
+
+    def test_strict_sequential_callback_failure_stops_after_first_call(self):
+        class Completions:
+            def __init__(self):
+                self.calls = 0
+
+            async def create(self, **kwargs):
+                del kwargs
+                self.calls += 1
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            message=SimpleNamespace(
+                                content=(
+                                    '{"action":"hold","intensity":0,'
+                                    '"reasoning":"private canary"}'
+                                )
+                            )
+                        )
+                    ],
+                    model="MiniMax-M2.7",
+                    id="strict-sequential-response",
+                    usage=SimpleNamespace(prompt_tokens=4, completion_tokens=5),
+                )
+
+        completions_api = Completions()
+        provider = object.__new__(entrypoint.OpenAITeacherProvider)
+        provider._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions_api)
+        )
+        provider.model = "MiniMax-M2.7"
+        provider.temperature = 0.0
+        provider.max_tokens = 1024
+        provider.workers = 1
+        provider.network_access = False
+        provider.request_count = 0
+        provider.response_count = 0
+        provider.batch_sizes = []
+        attempted = []
+        resolved = []
+
+        def reject_first(index, completion):
+            resolved.append((index, completion))
+            raise entrypoint.V2TeacherGateError("injected canary rejection")
+
+        with self.assertRaises(entrypoint.V2TeacherGateError):
+            asyncio.run(
+                provider.complete_many(
+                    [("system", "user")] * 3,
+                    before_attempt=attempted.append,
+                    on_completion=reject_first,
+                    strict_sequential=True,
+                )
+            )
+        self.assertEqual(attempted, [0])
+        self.assertEqual([index for index, _ in resolved], [0])
+        self.assertEqual(completions_api.calls, 1)
+        self.assertEqual(provider.request_count, 1)
+        self.assertEqual(provider.response_count, 1)
+        self.assertEqual(provider.batch_sizes, [3])
+
+    def test_reported_model_mismatch_stops_after_canary_without_downstream(self):
+        class MismatchedProvider:
+            model = "MiniMax-M2.7"
+
+            def __init__(self):
+                self.request_count = 0
+                self.response_count = 0
+                self.network_access = False
+                self.batch_sizes = []
+
+            async def complete_many(
+                self,
+                prompts,
+                *,
+                before_attempt=None,
+                on_completion=None,
+                strict_sequential=False,
+            ):
+                self.batch_sizes.append(len(prompts))
+                self.assert_strict = strict_sequential
+                values = []
+                for index, _ in enumerate(prompts):
+                    if before_attempt is not None:
+                        before_attempt(index)
+                    self.request_count += 1
+                    self.network_access = True
+                    self.response_count += 1
+                    completion = entrypoint.TeacherCompletion(
+                        raw_response=(
+                            '{"action":"hold","intensity":0,'
+                            '"reasoning":"private model mismatch canary"}'
+                        ),
+                        reported_model="MiniMax-M2.7-mutated",
+                        reported_model_raw="MiniMax-M2.7-mutated",
+                        input_tokens=11,
+                        output_tokens=7,
+                        response_id="mismatch-response-id",
+                    )
+                    values.append(completion)
+                    if on_completion is not None:
+                        on_completion(index, completion)
+                return values
+
+            async def aclose(self):
+                return None
+
+        provider = MismatchedProvider()
+        out = self.root / "model-mismatch"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint, "_build_openai_provider", return_value=provider
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                entrypoint.main(_pilot_args(out, live=True))
+        self.assertEqual(raised.exception.code, 1)
+        self.assertTrue(provider.assert_strict)
+        self.assertEqual(provider.batch_sizes, [162])
+        self.assertEqual(provider.request_count, 1)
+        self.assertEqual(provider.response_count, 1)
+
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        teacher = manifest["v2_attention_market"]["teacher_samples"]
+        gate = manifest["v2_attention_market"]["teacher_acceptance_gate"]
+        public_rows = _read_jsonl(run_dir / "teacher_samples.jsonl")
+        private_path = run_dir / "private_teacher_records.jsonl"
+        private_rows = _read_jsonl(private_path)
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["failure_stage"], "provider_setup")
+        self.assertEqual(teacher["attempted"], 1)
+        self.assertEqual(teacher["resolved"], 1)
+        self.assertEqual(teacher["valid"], 0)
+        self.assertEqual(teacher["failed"], 1)
+        self.assertEqual(teacher["skipped"], 161)
+        self.assertEqual(teacher["honest_n_teacher_samples"], 0)
+        self.assertEqual(manifest["honest_n_teacher_samples"], 0)
+        self.assertEqual(gate["status"], "failed")
+        self.assertEqual(gate["canary_status"], "failed")
+        self.assertEqual(gate["reason_codes"], ["reported_model_mismatch"])
+        self.assertFalse(gate["student_and_market_released"])
+        self.assertEqual(len(public_rows), 1)
+        self.assertEqual(public_rows[0]["status"], "failed")
+        self.assertEqual(
+            public_rows[0]["failure_code"], "reported_model_mismatch"
+        )
+        self.assertEqual(len(private_rows), 1)
+        self.assertEqual(stat.S_IMODE(private_path.stat().st_mode), 0o600)
+        for forbidden in (
+            "aggregated_dataset.json",
+            "linear_student.json",
+            "mlp_student.json",
+            "student_model_envelope.json",
+            "student_evaluation.json",
+            "market_2x2_summary.json",
+            "v2_attention_market_summary.json",
+        ):
+            self.assertFalse((run_dir / forbidden).exists(), forbidden)
+        self.assertEqual(list(run_dir.glob("market_*_seed_*.json")), [])
+        self.assertEqual(list(run_dir.glob("market_rounds_*_seed_*.jsonl")), [])
+
+    def test_valid_canary_then_invalid_second_response_stops_at_two(self):
+        from nmsim import v2_attention
+
+        valid_canary = v2_attention.fake_test_teacher(
+            v2_attention.generate_state_design(
+                54, 20260811, study_id="v2-attention-market"
+            )[0],
+            0,
+        )
+
+        class SecondInvalidProvider:
+            model = "MiniMax-M2.7"
+
+            def __init__(self):
+                self.request_count = 0
+                self.response_count = 0
+                self.network_access = False
+                self.batch_sizes = []
+
+            async def complete_many(
+                self, prompts, *, before_attempt=None, on_completion=None,
+                strict_sequential=False,
+            ):
+                self.batch_sizes.append(len(prompts))
+                self.assert_strict = strict_sequential
+                values = []
+                for index, _ in enumerate(prompts):
+                    if before_attempt is not None:
+                        before_attempt(index)
+                    self.request_count += 1
+                    self.response_count += 1
+                    self.network_access = True
+                    completion = entrypoint.TeacherCompletion(
+                        raw_response=(
+                            valid_canary if index == 0 else '{"action":"invalid"}'
+                        ),
+                        reported_model="MiniMax-M2.7",
+                        reported_model_raw="MiniMax-M2.7",
+                        input_tokens=1,
+                        output_tokens=1,
+                        response_id="second-invalid-{}".format(index),
+                    )
+                    values.append(completion)
+                    if on_completion is not None:
+                        on_completion(index, completion)
+                return values
+
+            async def aclose(self):
+                return None
+
+        provider = SecondInvalidProvider()
+        out = self.root / "second-invalid"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint, "_build_openai_provider", return_value=provider
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                entrypoint.main(_pilot_args(out, live=True))
+        self.assertEqual(raised.exception.code, 1)
+        self.assertTrue(provider.assert_strict)
+        self.assertEqual(provider.request_count, 2)
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        teacher = manifest["v2_attention_market"]["teacher_samples"]
+        gate = manifest["v2_attention_market"]["teacher_acceptance_gate"]
+        self.assertEqual(teacher["attempted"], 2)
+        self.assertEqual(teacher["valid"], 1)
+        self.assertEqual(teacher["failed"], 1)
+        self.assertEqual(teacher["skipped"], 160)
+        self.assertEqual(gate["canary_status"], "passed")
+        self.assertEqual(gate["status"], "failed")
+        self.assertEqual(gate["reason_codes"], ["teacher_response_invalid"])
+        self.assertFalse((run_dir / "aggregated_dataset.json").exists())
+        self.assertFalse((run_dir / "market_2x2_summary.json").exists())
+
+    def test_teacher_gate_requires_all_162_rows_and_three_per_state(self):
+        from nmsim import v2_attention
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / "unused")
+        )
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        plan = entrypoint._sample_plan(observations, 3)
+        public_rows = [
+            {
+                "sample_id": item["sample_id"],
+                "state_id": item["observation"].state_id,
+                "status": "valid",
+            }
+            for item in plan
+        ]
+        passed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=public_rows,
+            reported_models=["MiniMax-M2.7"] * 162,
+        )
+        self.assertEqual(passed["status"], "passed")
+        self.assertEqual(passed["planned_samples"], 162)
+        self.assertEqual(passed["resolved_samples"], 162)
+        self.assertEqual(passed["valid_samples"], 162)
+        self.assertEqual(passed["planned_states"], 54)
+        self.assertEqual(passed["states_with_exact_required_replicates"], 54)
+        self.assertEqual(passed["required_valid_replicates_per_state"], 3)
+        self.assertTrue(passed["student_and_market_released"])
+
+        wrong_attempted = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=public_rows,
+            reported_models=["MiniMax-M2.7"] * 162,
+            attempted_samples=161,
+        )
+        self.assertEqual(wrong_attempted["status"], "failed")
+        self.assertIn(
+            "not_all_planned_samples_attempted",
+            wrong_attempted["reason_codes"],
+        )
+
+        failed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=public_rows[:-1],
+            reported_models=["MiniMax-M2.7"] * 161,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertIn(
+            "not_all_planned_samples_resolved", failed["reason_codes"]
+        )
+        self.assertIn("not_all_planned_samples_valid", failed["reason_codes"])
+        self.assertIn(
+            "state_replicate_coverage_incomplete", failed["reason_codes"]
+        )
+        self.assertEqual(failed["states_with_exact_required_replicates"], 53)
+        self.assertFalse(failed["student_and_market_released"])
 
 
 class V2OpenAIAdapterTests(unittest.TestCase):

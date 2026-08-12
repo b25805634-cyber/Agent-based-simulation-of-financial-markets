@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+from collections import Counter
 from dataclasses import asdict, dataclass, is_dataclass
 import hashlib
 import html
@@ -44,6 +45,8 @@ MODEL_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.1"
 EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.1"
 FULL_CONFIG_SCHEMA_VERSION = "v2_attention_full_effective_config/0.1"
 ALLOWED_PROVIDERS = frozenset({"fake_test_teacher", "fake_null_teacher", "openai"})
+MINIMAX_M27_JOINT54X3_PILOT = "minimax_m27_joint54x3_v1"
+PILOT_PROFILES = frozenset({MINIMAX_M27_JOINT54X3_PILOT})
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
 TAPE_DECLINE_UPPER_EXCLUSIVE = -0.10
 TAPE_RISE_LOWER_EXCLUSIVE = 0.10
@@ -64,6 +67,65 @@ class V2ProtocolError(ValueError):
 
 class V2ProviderGuardError(ValueError):
     """A real Provider was requested without the exact explicit guard."""
+
+
+class V2TeacherGateError(RuntimeError):
+    """A frozen live-pilot Teacher acceptance condition failed."""
+
+
+def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, Any]]:
+    """Return the frozen, opt-in live-pilot contract without endpoint secrets."""
+
+    if profile_id is None:
+        return None
+    if profile_id != MINIMAX_M27_JOINT54X3_PILOT:
+        raise V2ProviderGuardError("unknown --pilot-profile")
+    return {
+        "schema_version": "v2_teacher_pilot_profile/0.1",
+        "profile_id": MINIMAX_M27_JOINT54X3_PILOT,
+        "purpose": "exploratory_endpoint_teacher_not_human_ground_truth",
+        "provider": "openai",
+        "model_requested": "MiniMax-M2.7",
+        "required_reported_model": "MiniMax-M2.7",
+        "endpoint_identity_sha256": "66e21f44b31bae951b37de32684b004d81c0821d956eb3351432770f11aad0c1",
+        "states": 54,
+        "replicates_per_state": 3,
+        "planned_requests": 162,
+        "seed": 20260811,
+        "temperature": 0.0,
+        "max_tokens": 1024,
+        "workers": 1,
+        "training_epochs": 400,
+        "market_agents": 48,
+        "market_rounds": 60,
+        "market_seeds": 3,
+        "state_design_hash": "26f02f06fb9cefb8dd16da029864fe9687fb9bd724ab5389f6a42ab9231c59f8",
+        "planned_split_hash": "8953691100c66949fee911b65d1c557bda037228c4d81b2d3e8e9594f5daeca6",
+        "planned_split_counts": {
+            "train_rows": 36,
+            "validation_rows": 9,
+            "test_rows": 9,
+            "train_families": 36,
+            "validation_families": 9,
+            "test_families": 9,
+        },
+        "planned_sample_order_hash": "ea45fd623d56aa88cd55100231b6d59f83ae1ee093411d6339e3cdfe670d1ac2",
+        "canary_sample_id": "82029f81cfbb9c227637d03ee98303e5fabd05eef2681a76c25b98a8eff197a5",
+        "transport_release_policy": {
+            "first_planned_sample_is_canary": True,
+            "strict_sequential": True,
+            "fail_fast_after_any_resolved_failure": True,
+            "provider_retry_count": 0,
+        },
+        "teacher_acceptance_gate": {
+            "all_planned_samples_must_resolve_valid": True,
+            "required_valid_replicates_per_state": 3,
+            "required_unique_reported_models": ["MiniMax-M2.7"],
+            "student_and_market_forbidden_on_failure": True,
+            "selective_supplement_forbidden": True,
+            "partial_run_merge_forbidden": True,
+        },
+    }
 
 
 def split_regime_descriptor() -> dict[str, Any]:
@@ -471,6 +533,7 @@ class OpenAITeacherProvider:
         *,
         before_attempt: Optional[Callable[[int], None]] = None,
         on_completion: Optional[Callable[[int, TeacherCompletion], None]] = None,
+        strict_sequential: bool = False,
     ) -> list[TeacherCompletion]:
         self.batch_sizes.append(len(prompts))
         semaphore = asyncio.Semaphore(self.workers)
@@ -485,12 +548,21 @@ class OpenAITeacherProvider:
                 on_completion(pair[0], pair[1])
             return pair
 
-        pairs = await asyncio.gather(
-            *(
-                observed(index, system, user)
-                for index, (system, user) in enumerate(prompts)
+        if strict_sequential:
+            if self.workers != 1:
+                raise V2ProviderGuardError(
+                    "strict sequential Teacher transport requires --workers 1"
+                )
+            pairs = []
+            for index, (system, user) in enumerate(prompts):
+                pairs.append(await observed(index, system, user))
+        else:
+            pairs = await asyncio.gather(
+                *(
+                    observed(index, system, user)
+                    for index, (system, user) in enumerate(prompts)
+                )
             )
-        )
         pairs.sort(key=lambda pair: pair[0])
         return [completion for _, completion in pairs]
 
@@ -570,6 +642,7 @@ def build_argparser() -> argparse.ArgumentParser:
     parser.add_argument("--market-agents", type=int, default=48)
     parser.add_argument("--market-rounds", type=int, default=60)
     parser.add_argument("--market-seeds", type=int, default=3)
+    parser.add_argument("--pilot-profile", choices=sorted(PILOT_PROFILES), default=None)
     parser.add_argument("--confirm-request-count", type=int, default=None)
     parser.add_argument("--dry-run", action="store_true")
     parser.add_argument("--live", action="store_true")
@@ -623,6 +696,40 @@ def _validate_args(args: argparse.Namespace) -> int:
     if not math.isfinite(args.temperature) or not 0.0 <= args.temperature <= 2.0:
         raise V2ProtocolError("--temperature must be finite and in [0,2]")
     planned_requests = int(args.states) * int(args.replicates)
+    pilot = pilot_profile_descriptor(args.pilot_profile)
+    if pilot is not None:
+        actual = {
+            "provider": args.provider,
+            "model_requested": args.model,
+            "states": args.states,
+            "replicates_per_state": args.replicates,
+            "planned_requests": planned_requests,
+            "seed": args.seed,
+            "temperature": args.temperature,
+            "max_tokens": args.max_tokens,
+            "workers": args.workers,
+            "training_epochs": args.training_epochs,
+            "market_agents": args.market_agents,
+            "market_rounds": args.market_rounds,
+            "market_seeds": args.market_seeds,
+        }
+        mismatches = [
+            key for key, expected in pilot.items()
+            if key in actual and actual[key] != expected
+        ]
+        if mismatches:
+            raise V2ProviderGuardError(
+                "--pilot-profile settings do not match frozen fields: {}".format(
+                    ", ".join(sorted(mismatches))
+                )
+            )
+        endpoint_identity = _v2_endpoint_identity(
+            os.environ.get("OPENAI_BASE_URL")
+        )["endpoint_identity_sha256"]
+        if endpoint_identity != pilot["endpoint_identity_sha256"]:
+            raise V2ProviderGuardError(
+                "--pilot-profile endpoint identity does not match the frozen endpoint"
+            )
     if args.provider == "openai" and args.live:
         if args.confirm_request_count != planned_requests:
             raise V2ProviderGuardError(
@@ -992,6 +1099,60 @@ def _safe_private_detail(manager: ManagedRunContext, value: Optional[str]) -> Op
     return manager._manager._sanitize_text(value, max_length=None)
 
 
+def _teacher_gate_result(
+    *,
+    args: argparse.Namespace,
+    plan: Sequence[Mapping[str, Any]],
+    public_rows: Sequence[Mapping[str, Any]],
+    reported_models: Sequence[str],
+    attempted_samples: Optional[int] = None,
+) -> dict[str, Any]:
+    """Evaluate the frozen pilot gate without weakening honest-N semantics."""
+
+    pilot = pilot_profile_descriptor(args.pilot_profile)
+    if pilot is None:
+        return {"enabled": False, "status": "not_applicable"}
+    valid_rows = [row for row in public_rows if row.get("status") == "valid"]
+    counts = Counter(str(row["state_id"]) for row in valid_rows)
+    required_per_state = int(args.replicates)
+    expected_state_ids = sorted(
+        {str(item["observation"].state_id) for item in plan}
+    )
+    reason_codes: list[str] = []
+    attempted = len(public_rows) if attempted_samples is None else int(attempted_samples)
+    if attempted != len(plan):
+        reason_codes.append("not_all_planned_samples_attempted")
+    if len(public_rows) != len(plan):
+        reason_codes.append("not_all_planned_samples_resolved")
+    if len(valid_rows) != len(plan):
+        reason_codes.append("not_all_planned_samples_valid")
+    if any(counts[state_id] != required_per_state for state_id in expected_state_ids):
+        reason_codes.append("state_replicate_coverage_incomplete")
+    if sorted(set(reported_models)) != [pilot["required_reported_model"]]:
+        reason_codes.append("reported_model_identity_not_unique_exact_match")
+    return {
+        "enabled": True,
+        "profile_id": args.pilot_profile,
+        "status": "passed" if not reason_codes else "failed",
+        "reason_codes": reason_codes,
+        "canary_sample_id": plan[0]["sample_id"],
+        "canary_policy": "first_planned_sample_then_strict_sequential_release",
+        "planned_samples": len(plan),
+        "attempted_samples": attempted,
+        "resolved_samples": len(public_rows),
+        "valid_samples": len(valid_rows),
+        "planned_states": len(expected_state_ids),
+        "states_with_exact_required_replicates": sum(
+            counts[state_id] == required_per_state
+            for state_id in expected_state_ids
+        ),
+        "required_valid_replicates_per_state": required_per_state,
+        "required_reported_model": pilot["required_reported_model"],
+        "reported_models": sorted(set(reported_models)),
+        "student_and_market_released": not reason_codes,
+    }
+
+
 def run_teacher_phase(
     manager: ManagedRunContext,
     *,
@@ -1003,6 +1164,7 @@ def run_teacher_phase(
     from nmsim import v2_attention
 
     plan = _sample_plan(observations, args.replicates)
+    pilot = pilot_profile_descriptor(args.pilot_profile)
     if args.provider == "openai":
         provider: Any = _build_openai_provider(args)
         runtime_details = {
@@ -1039,6 +1201,7 @@ def run_teacher_phase(
     input_tokens = 0
     output_tokens = 0
     invalid_reported_model_alias_count = 0
+    provider_exception_count = 0
     teacher_completion: dict[str, Any] = {
         "unit": "teacher_samples",
         "planned": len(plan),
@@ -1055,6 +1218,16 @@ def run_teacher_phase(
     manager.manifest["v2_attention_market"]["teacher_samples"] = dict(
         teacher_completion
     )
+    if pilot is not None:
+        manager.manifest["v2_attention_market"]["teacher_acceptance_gate"] = {
+            "enabled": True,
+            "profile_id": args.pilot_profile,
+            "status": "pending",
+            "reason_codes": [],
+            "canary_sample_id": plan[0]["sample_id"],
+            "canary_status": "pending",
+            "student_and_market_released": False,
+        }
     manager._write()
 
     public_stream = _open_exclusive(
@@ -1117,6 +1290,14 @@ def run_teacher_phase(
         )
         manager.sync_llm_accounting(provider)
         completion_accounting = manager.manifest["completion"]
+        if args.provider == "openai":
+            completion_accounting["provider_calls"].update(
+                {
+                    "attempted": attempted,
+                    "succeeded": max(0, attempted - provider_exception_count),
+                    "failed": provider_exception_count,
+                }
+            )
         completion_accounting["agent_decisions"].update(
             {
                 "planned": len(plan),
@@ -1130,12 +1311,13 @@ def run_teacher_phase(
             row["failure_code"] == "teacher_response_invalid"
             for row in public_rows
         )
+        parse_attempts = sum(
+            row["response_hash"] is not None
+            and row["failure_code"] != "reported_model_mismatch"
+            for row in public_rows
+        )
         provider_exceptions = sum(
             row["failure_code"] == "provider_exception" for row in public_rows
-        )
-        response_shape_failures = sum(
-            row["failure_code"] == "provider_response_shape_invalid"
-            for row in public_rows
         )
         failure_counts: dict[str, int] = {}
         for row in public_rows:
@@ -1147,7 +1329,7 @@ def run_teacher_phase(
         teacher_completion["failure_counts"] = dict(sorted(failure_counts.items()))
         completion_accounting["parsing"].update(
             {
-                "attempted": raw_responses,
+                "attempted": parse_attempts,
                 "succeeded": valid,
                 "failed": parse_failures,
                 "fallbacks": 0,
@@ -1167,12 +1349,7 @@ def run_teacher_phase(
                     "provider_exceptions": provider_exceptions,
                     "retries_scheduled": 0,
                     "logical_requests_with_retry": 0,
-                    "exhausted_logical_requests": (
-                        parse_failures
-                        + provider_exceptions
-                        + response_shape_failures
-                        + unresolved
-                    ),
+                    "exhausted_logical_requests": resolved_failures + unresolved,
                     "reported_models": sorted(reported_models)[:16],
                     "reported_models_truncated": len(reported_models) > 16,
                     "invalid_reported_model_alias_count": (
@@ -1197,6 +1374,7 @@ def run_teacher_phase(
 
     def record_completion(index: int, completion: TeacherCompletion) -> None:
         nonlocal input_tokens, output_tokens, invalid_reported_model_alias_count
+        nonlocal provider_exception_count
         if index in processed_indices or index < 0 or index >= len(plan):
             raise RuntimeError("Teacher completion index violated immutable plan")
         item = plan[index]
@@ -1225,6 +1403,8 @@ def run_teacher_phase(
         failure_code = None
         private_error = None
         if completion.raw_response is None:
+            if completion.error_type != "ProviderResponseShapeError":
+                provider_exception_count += 1
             failure_code = (
                 "provider_response_shape_invalid"
                 if completion.error_type == "ProviderResponseShapeError"
@@ -1253,15 +1433,22 @@ def run_teacher_phase(
                     "provider_reported_model_raw": private_reported_model,
                 },
             )
-            try:
-                parsed = v2_attention.parse_teacher_response(
-                    completion.raw_response, observation.state
-                )
-            except v2_attention.TeacherResponseError as error:
-                failure_code = "teacher_response_invalid"
-                private_error = _safe_private_detail(
-                    manager, "{}: {}".format(type(error).__name__, error)
-                )
+            if (
+                pilot is not None
+                and public_reported_model != pilot["required_reported_model"]
+            ):
+                failure_code = "reported_model_mismatch"
+                private_error = "reported model did not match frozen pilot alias"
+            else:
+                try:
+                    parsed = v2_attention.parse_teacher_response(
+                        completion.raw_response, observation.state
+                    )
+                except v2_attention.TeacherResponseError as error:
+                    failure_code = "teacher_response_invalid"
+                    private_error = _safe_private_detail(
+                        manager, "{}: {}".format(type(error).__name__, error)
+                    )
 
         if parsed is not None:
             replicate = v2_attention.TeacherReplicateResult.success(
@@ -1341,19 +1528,43 @@ def run_teacher_phase(
             },
         )
         refresh_accounting()
+        if pilot is not None:
+            gate = manager.manifest["v2_attention_market"][
+                "teacher_acceptance_gate"
+            ]
+            if index == 0:
+                gate["canary_status"] = "passed" if status == "valid" else "failed"
+                manager._write()
+            if status != "valid":
+                gate.update(
+                    {
+                        "status": "failed",
+                        "reason_codes": [failure_code or "unknown_failure"],
+                        "student_and_market_released": False,
+                    }
+                )
+                manager._write()
+                raise V2TeacherGateError(
+                    "frozen Teacher pilot stopped after a resolved sample failure"
+                )
 
     try:
         if args.provider == "openai":
 
             async def execute_and_close() -> list[TeacherCompletion]:
                 try:
+                    call_kwargs = {
+                        "before_attempt": record_attempt,
+                        "on_completion": record_completion,
+                    }
+                    if pilot is not None:
+                        call_kwargs["strict_sequential"] = True
                     return await provider.complete_many(
                         [
                             (item["prompt"].system, item["prompt"].user)
                             for item in plan
                         ],
-                        before_attempt=record_attempt,
-                        on_completion=record_completion,
+                        **call_kwargs,
                     )
                 finally:
                     await provider.aclose()
@@ -1369,6 +1580,23 @@ def run_teacher_phase(
             raise RuntimeError(
                 "Teacher completion count did not match the immutable plan"
             )
+        gate = _teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=public_rows,
+            reported_models=sorted(reported_models),
+            attempted_samples=int(getattr(provider, "request_count", 0)),
+        )
+        if pilot is not None:
+            gate["canary_status"] = "passed"
+            manager.manifest["v2_attention_market"][
+                "teacher_acceptance_gate"
+            ] = gate
+            manager._write()
+            if gate["status"] != "passed":
+                raise V2TeacherGateError(
+                    "frozen Teacher acceptance gate rejected downstream execution"
+                )
     finally:
         try:
             refresh_accounting()
@@ -1940,11 +2168,11 @@ def _component_fingerprint(repo_root: Path) -> dict[str, Any]:
     return _source_fingerprint(
         repo_root,
         relative_paths=(
-        "nmsim/v2_attention.py",
-        "nmsim/v2_distillation.py",
-        "nmsim/v2_market.py",
-        "nmsim/v2_market_experiment.py",
-        "experiments/v2_attention_market.py",
+            "nmsim/v2_attention.py",
+            "nmsim/v2_distillation.py",
+            "nmsim/v2_market.py",
+            "nmsim/v2_market_experiment.py",
+            "experiments/v2_attention_market.py",
         ),
         schema_version="v2_scientific_component_fingerprint/0.1",
         role="scientific",
@@ -1979,6 +2207,8 @@ def build_v2_identities(
     from nmsim.v2_market_experiment import market_experiment_descriptor
 
     state_design = [observation.to_dict() for observation in observations]
+    sample_plan = _sample_plan(observations, args.replicates)
+    pilot = pilot_profile_descriptor(args.pilot_profile)
     planned_split = preflight_group_split(observations, args.seed)
     planned_split_manifest = planned_split.to_dict()
     planned_split_hash = stable_hash(planned_split_manifest)
@@ -1987,6 +2217,39 @@ def build_v2_identities(
     )
     component_fingerprint = _component_fingerprint(repo_root)
     execution_component_fingerprint = _execution_component_fingerprint(repo_root)
+    if pilot is not None:
+        frozen_checks = {
+            "state_design_hash": stable_hash(state_design),
+            "planned_split_hash": planned_split_hash,
+            "planned_sample_order_hash": stable_hash(
+                [item["sample_id"] for item in sample_plan]
+            ),
+            "canary_sample_id": sample_plan[0]["sample_id"],
+        }
+        mismatches = [
+            key
+            for key, actual in frozen_checks.items()
+            if actual != pilot[key]
+        ]
+        if planned_split_manifest["counts"] != pilot["planned_split_counts"]:
+            mismatches.append("planned_split_counts")
+        coverage = _split_regime_coverage(
+            observations,
+            planned_split.family_assignments,
+            planned_split.family_strata,
+        )
+        if (
+            coverage["split_stratification_unit"]
+            != "return_20d_tape_regime_x_position_fraction_regime"
+            or not coverage["all_partitions_cover_all_design_strata"]
+        ):
+            mismatches.append("planned_joint_stratum_coverage")
+        if mismatches:
+            raise V2ProviderGuardError(
+                "--pilot-profile generated design does not match frozen fields: {}".format(
+                    ", ".join(sorted(set(mismatches)))
+                )
+            )
     scientific = {
         "schema_version": PROTOCOL_VERSION,
         "identity": "v2_scientific_config",
@@ -2004,6 +2267,10 @@ def build_v2_identities(
             "fake_test_teacher_rng": "sha256 integer sub-seed",
             "real_provider_request_seed": None,
             "real_provider_seed_support": "unsupported_and_not_sent",
+            "pilot_profile_id": args.pilot_profile,
+            "teacher_acceptance_gate": (
+                pilot["teacher_acceptance_gate"] if pilot is not None else None
+            ),
         },
         "group_split": {
             "fractions": list(SPLIT_FRACTIONS),
@@ -2065,6 +2332,16 @@ def build_v2_identities(
         "provider_retry_count": 0,
         "request_seed": None,
         "request_seed_support": "unsupported_and_not_sent",
+        "pilot_profile_id": args.pilot_profile,
+        "required_reported_model": (
+            pilot["required_reported_model"] if pilot is not None else None
+        ),
+        "planned_sample_order_hash": stable_hash(
+            [item["sample_id"] for item in sample_plan]
+        ),
+        "canary_sample_id": (
+            sample_plan[0]["sample_id"] if pilot is not None else None
+        ),
     }
     execution = {
         "schema_version": EXECUTION_SCHEMA_VERSION,
@@ -2085,6 +2362,10 @@ def build_v2_identities(
         ),
         "output_root_is_execution_only": True,
         "caller_run_id": args.run_id,
+        "pilot_profile_id": args.pilot_profile,
+        "strict_sequential_teacher_transport": pilot is not None,
+        "first_planned_sample_is_canary": pilot is not None,
+        "fail_fast_after_any_resolved_teacher_failure": pilot is not None,
         "v2_execution_component_fingerprint": execution_component_fingerprint,
     }
     scientific_hash = stable_hash(scientific)
@@ -2137,6 +2418,7 @@ def _initialise_manifest(
     identities: Mapping[str, Any],
     planned_requests: int,
 ) -> None:
+    pilot = pilot_profile_descriptor(args.pilot_profile)
     completion = manager.manifest["completion"]
     planned_market_runs = 0 if args.dry_run else 4 * args.market_seeds
     completion["simulation_runs"].update(
@@ -2186,6 +2468,7 @@ def _initialise_manifest(
         "network_access": False,
         "teacher_is_human_evidence": False,
         "fake_teacher": args.provider != "openai",
+        "pilot_profile": pilot,
         "legacy_config_scope": "managed_lifecycle_infrastructure_only",
         "legacy_scientific_fingerprint_scope": "V1_compatibility_metadata_only",
         "v2_scientific_config_hash": identities["v2_scientific_config_hash"],
@@ -2216,10 +2499,23 @@ def _initialise_manifest(
             else (
                 "engineering_fake_only"
                 if args.provider != "openai"
-                else "endpoint_teacher_only_not_human_ground_truth"
+                else (
+                    "exploratory_endpoint_pilot_not_human_ground_truth"
+                    if args.pilot_profile is not None
+                    else "endpoint_teacher_only_not_human_ground_truth"
+                )
             )
         ),
     }
+    if pilot is not None:
+        manager.manifest["v2_attention_market"]["teacher_acceptance_gate"] = {
+            "enabled": True,
+            "profile_id": args.pilot_profile,
+            "status": "plan_only" if args.dry_run else "pending",
+            "reason_codes": [],
+            "canary_status": "not_attempted" if args.dry_run else "pending",
+            "student_and_market_released": False,
+        }
     manager.manifest["v2_config_identities"] = {
         key: identities[key]
         for key in (
@@ -2522,6 +2818,7 @@ def _dry_run_summary(
         "live": False,
         "provider": args.provider,
         "model_requested": args.model or None,
+        "pilot_profile": pilot_profile_descriptor(args.pilot_profile),
         "planned_states": args.states,
         "planned_replicates_per_state": args.replicates,
         "planned_teacher_requests": planned_requests,
@@ -2565,6 +2862,11 @@ def _full_summary(
         "model_requested": args.model or None,
         "model_resolved": teacher["model_resolved"],
         "reported_models": teacher["reported_models"],
+        "pilot_profile": pilot_profile_descriptor(args.pilot_profile),
+        "teacher_acceptance_gate": manager.manifest["v2_attention_market"].get(
+            "teacher_acceptance_gate",
+            {"enabled": False, "status": "not_applicable"},
+        ),
         "network_access": bool(manager.network_access),
         "v2_scientific_config_hash": identities["v2_scientific_config_hash"],
         "v2_model_request_config_hash": identities[
@@ -2660,7 +2962,11 @@ def _full_summary(
         "scientific_claim_status": (
             "engineering_fake_only"
             if args.provider != "openai"
-            else "endpoint_teacher_only_not_human_ground_truth"
+            else (
+                "exploratory_endpoint_pilot_not_human_ground_truth"
+                if args.pilot_profile is not None
+                else "endpoint_teacher_only_not_human_ground_truth"
+            )
         ),
         "remaining_validation": [
             "human comparison labels",
@@ -2729,6 +3035,10 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         "v2_market_experiment_source": repo_root / "nmsim/v2_market_experiment.py",
         "v2_managed_entrypoint_source": Path(__file__).resolve(),
     }
+    if args.pilot_profile is not None:
+        input_paths["v2_teacher_pilot_protocol"] = (
+            repo_root / "docs/V2_TEACHER_PILOT.md"
+        )
     manager = ManagedRunContext.create(
         cfg,
         out_root=args.out,
@@ -2739,9 +3049,14 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         worker_count=args.workers,
         batching={
             "teacher": {
-                "strategy": "bounded_concurrent_exact_replicates",
+                "strategy": (
+                    "first_planned_canary_then_strict_sequential_fail_fast"
+                    if args.pilot_profile is not None
+                    else "bounded_concurrent_exact_replicates"
+                ),
                 "workers": args.workers if args.provider == "openai" else 1,
                 "cache_enabled": False,
+                "pilot_profile_id": args.pilot_profile,
             },
             "market": {
                 "cells": 4,
@@ -2890,14 +3205,18 @@ __all__ = [
     "FakeTeacherProvider",
     "OpenAITeacherProvider",
     "OUTPUT_SCHEMA_VERSION",
+    "MINIMAX_M27_JOINT54X3_PILOT",
+    "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",
     "V2ProtocolError",
     "V2ProviderGuardError",
+    "V2TeacherGateError",
     "build_argparser",
     "build_training_examples",
     "build_v2_identities",
     "main",
+    "pilot_profile_descriptor",
     "render_html_report",
     "render_markdown_report",
     "run_distillation_phase",
