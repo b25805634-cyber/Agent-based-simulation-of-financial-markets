@@ -46,7 +46,15 @@ EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.1"
 FULL_CONFIG_SCHEMA_VERSION = "v2_attention_full_effective_config/0.1"
 ALLOWED_PROVIDERS = frozenset({"fake_test_teacher", "fake_null_teacher", "openai"})
 MINIMAX_M27_JOINT54X3_PILOT = "minimax_m27_joint54x3_v1"
-PILOT_PROFILES = frozenset({MINIMAX_M27_JOINT54X3_PILOT})
+MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT = (
+    "minimax_m27_request_higgsai_reported_joint54x3_v2"
+)
+PILOT_PROFILES = frozenset(
+    {
+        MINIMAX_M27_JOINT54X3_PILOT,
+        MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
+    }
+)
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
 TAPE_DECLINE_UPPER_EXCLUSIVE = -0.10
 TAPE_RISE_LOWER_EXCLUSIVE = 0.10
@@ -78,15 +86,26 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
 
     if profile_id is None:
         return None
-    if profile_id != MINIMAX_M27_JOINT54X3_PILOT:
+    if profile_id not in PILOT_PROFILES:
         raise V2ProviderGuardError("unknown --pilot-profile")
-    return {
-        "schema_version": "v2_teacher_pilot_profile/0.1",
-        "profile_id": MINIMAX_M27_JOINT54X3_PILOT,
+    required_reported_model = (
+        "HiggsAI"
+        if profile_id
+        == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+        else "MiniMax-M2.7"
+    )
+    descriptor = {
+        "schema_version": (
+            "v2_teacher_pilot_profile/0.2"
+            if profile_id
+            == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+            else "v2_teacher_pilot_profile/0.1"
+        ),
+        "profile_id": profile_id,
         "purpose": "exploratory_endpoint_teacher_not_human_ground_truth",
         "provider": "openai",
         "model_requested": "MiniMax-M2.7",
-        "required_reported_model": "MiniMax-M2.7",
+        "required_reported_model": required_reported_model,
         "endpoint_identity_sha256": "66e21f44b31bae951b37de32684b004d81c0821d956eb3351432770f11aad0c1",
         "states": 54,
         "replicates_per_state": 3,
@@ -120,12 +139,33 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         "teacher_acceptance_gate": {
             "all_planned_samples_must_resolve_valid": True,
             "required_valid_replicates_per_state": 3,
-            "required_unique_reported_models": ["MiniMax-M2.7"],
+            "required_unique_reported_models": [required_reported_model],
             "student_and_market_forbidden_on_failure": True,
             "selective_supplement_forbidden": True,
             "partial_run_merge_forbidden": True,
         },
     }
+    if profile_id == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT:
+        descriptor["model_identity_semantics"] = {
+            "requested_and_reported_are_distinct_fields": True,
+            "reported_value_source": "provider_sdk_response_model_field",
+            "reported_alias_is_underlying_serving_weights_identity_claim": False,
+            "gateway_mapping_operator_confirmed_on": "2026-08-12",
+        }
+        descriptor["predecessor_failed_run"] = {
+            "run_id": "v2-teacher-pilot-live-20260812-a1",
+            "status": "failed",
+            "attempted": 1,
+            "valid": 0,
+            "skipped": 161,
+            "run_manifest_sha256": "8e9fde17ed2c71267c2c45cc110c6c951690269d997f84fbf080e5e7e9881c7d",
+            "reuse_supplement_or_merge_forbidden": True,
+        }
+        descriptor["required_run_ids"] = {
+            "dry_run": "v2-teacher-pilot-v2-dry-20260812-a1",
+            "live": "v2-teacher-pilot-live-20260812-a2",
+        }
+    return descriptor
 
 
 def split_regime_descriptor() -> dict[str, Any]:
@@ -730,6 +770,17 @@ def _validate_args(args: argparse.Namespace) -> int:
             raise V2ProviderGuardError(
                 "--pilot-profile endpoint identity does not match the frozen endpoint"
             )
+        required_run_ids = pilot.get("required_run_ids")
+        if required_run_ids is not None:
+            required_run_id = required_run_ids[
+                "live" if args.live else "dry_run"
+            ]
+            if args.run_id != required_run_id:
+                raise V2ProviderGuardError(
+                    "--pilot-profile requires the frozen {} run id".format(
+                        "live" if args.live else "dry-run"
+                    )
+                )
     if args.provider == "openai" and args.live:
         if args.confirm_request_count != planned_requests:
             raise V2ProviderGuardError(
@@ -807,8 +858,15 @@ def render_markdown_report(summary: Mapping[str, Any]) -> str:
         "## Run identity",
         "",
         "- Run id: `{}`".format(summary.get("run_id")),
-        "- Provider: `{}`; model: `{}`".format(
-            summary.get("provider"), summary.get("model_resolved")
+        "- Provider: `{}`".format(summary.get("provider")),
+        "- Requested model: `{}`".format(summary.get("model_requested")),
+        "- Provider/SDK-reported model aliases: `{}`".format(
+            summary.get("reported_models", [])
+        ),
+        "- Underlying serving weights independently verified: `{}`".format(
+            summary.get("model_identity", {}).get(
+                "underlying_serving_weights_independently_verified", False
+            )
         ),
         "- Protocol: `{}`".format(summary.get("protocol_version")),
         "- `v2_scientific_config_hash`: `{}`".format(
@@ -1015,6 +1073,12 @@ dl {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:0 }} dl div {
 <p><strong>Fixed-MLP baseline diagnostic:</strong> deployed model failed to beat a baseline = {baseline_failed}. This is descriptive and was not used for model selection.</p>
 <h2>Budget × behavior diagnostic</h2><div class="grid">{cards}</div>
 <p><strong>Market-vs-train OOD:</strong> {ood_rows} of {ood_n} effective agent-round states ({ood_fraction}) exceeded at least one train-only rectangular feature range. This reports marginal extrapolation; it does not mark those states invalid, and joint/manifold support and distribution shift are not assessed.</p>
+<h2>Endpoint model identity</h2><div class="identity">
+<p><strong>Requested model</strong><br><code>{model_requested}</code></p>
+<p><strong>Provider/SDK-reported aliases</strong><br><code>{reported_models}</code></p>
+<p><strong>Underlying serving weights independently verified</strong><br>{weights_verified}</p>
+<p>Requested and reported values are separate provenance fields. A gateway alias is not an independently verified claim about underlying weights.</p>
+</div>
 <h2>Named V2 identities</h2><div class="identity">
 <p><code>v2_scientific_config_hash</code><br>{science}</p>
 <p><code>v2_model_request_config_hash</code><br>{request}</p>
@@ -1058,6 +1122,15 @@ dl {{ display:grid; grid-template-columns:1fr 1fr; gap:8px; margin:0 }} dl div {
         ood_n=html.escape(str(all_market_ood.get("n", 0))),
         ood_fraction=html.escape(
             _fmt(all_market_ood.get("outside_train_range_row_fraction"))
+        ),
+        model_requested=html.escape(str(summary.get("model_requested"))),
+        reported_models=html.escape(str(summary.get("reported_models", []))),
+        weights_verified=html.escape(
+            str(
+                summary.get("model_identity", {}).get(
+                    "underlying_serving_weights_independently_verified", False
+                )
+            )
         ),
         science=html.escape(str(summary.get("v2_scientific_config_hash"))),
         request=html.escape(str(summary.get("v2_model_request_config_hash"))),
@@ -1126,6 +1199,16 @@ def _teacher_gate_result(
         reason_codes.append("not_all_planned_samples_resolved")
     if len(valid_rows) != len(plan):
         reason_codes.append("not_all_planned_samples_valid")
+    if any(
+        row.get("model_requested") != pilot["model_requested"]
+        for row in public_rows
+    ):
+        reason_codes.append("requested_model_identity_not_exact_match")
+    if any(
+        row.get("reported_model") != pilot["required_reported_model"]
+        for row in public_rows
+    ):
+        reason_codes.append("reported_model_row_identity_not_exact_match")
     if any(counts[state_id] != required_per_state for state_id in expected_state_ids):
         reason_codes.append("state_replicate_coverage_incomplete")
     if sorted(set(reported_models)) != [pilot["required_reported_model"]]:
@@ -1147,6 +1230,7 @@ def _teacher_gate_result(
             for state_id in expected_state_ids
         ),
         "required_valid_replicates_per_state": required_per_state,
+        "required_requested_model": pilot["model_requested"],
         "required_reported_model": pilot["required_reported_model"],
         "reported_models": sorted(set(reported_models)),
         "student_and_market_released": not reason_codes,
@@ -2862,6 +2946,17 @@ def _full_summary(
         "model_requested": args.model or None,
         "model_resolved": teacher["model_resolved"],
         "reported_models": teacher["reported_models"],
+        "model_identity": {
+            "model_requested": args.model or None,
+            "provider_sdk_reported_aliases": teacher["reported_models"],
+            "requested_and_reported_are_distinct_fields": True,
+            "underlying_serving_weights_independently_verified": False,
+            "legacy_model_resolved_field_semantics": (
+                "single safe provider-reported alias when unique; otherwise "
+                "requested provider model; retained for schema compatibility "
+                "and not an underlying-weights identity claim"
+            ),
+        },
         "pilot_profile": pilot_profile_descriptor(args.pilot_profile),
         "teacher_acceptance_gate": manager.manifest["v2_attention_market"].get(
             "teacher_acceptance_gate",
@@ -3037,7 +3132,13 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
     }
     if args.pilot_profile is not None:
         input_paths["v2_teacher_pilot_protocol"] = (
-            repo_root / "docs/V2_TEACHER_PILOT.md"
+            repo_root
+            / (
+                "docs/V2_TEACHER_PILOT_V2.md"
+                if args.pilot_profile
+                == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                else "docs/V2_TEACHER_PILOT.md"
+            )
         )
     manager = ManagedRunContext.create(
         cfg,
@@ -3206,6 +3307,7 @@ __all__ = [
     "OpenAITeacherProvider",
     "OUTPUT_SCHEMA_VERSION",
     "MINIMAX_M27_JOINT54X3_PILOT",
+    "MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",
