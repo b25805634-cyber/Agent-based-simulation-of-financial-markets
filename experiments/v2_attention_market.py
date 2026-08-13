@@ -54,11 +54,15 @@ MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT = (
 MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT = (
     "minimax_m27_higgsai_finish_audit_joint54x3_v3"
 )
+MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT = (
+    "minimax_m27_higgsai_finish_audit_external_joint54x3_v4"
+)
 PILOT_PROFILES = frozenset(
     {
         MINIMAX_M27_JOINT54X3_PILOT,
         MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
     }
 )
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
@@ -100,9 +104,15 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     higgs_alias_profile = profile_id in {
         MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
     }
-    finish_audit_profile = (
-        profile_id == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+    finish_audit_profile = profile_id in {
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+    }
+    external_execution_successor_profile = (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
     )
     required_reported_model = (
         "HiggsAI"
@@ -111,12 +121,16 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     )
     descriptor = {
         "schema_version": (
-            "v2_teacher_pilot_profile/0.3"
-            if finish_audit_profile
+            "v2_teacher_pilot_profile/0.4"
+            if external_execution_successor_profile
             else (
-                "v2_teacher_pilot_profile/0.2"
-                if higgs_alias_profile
-                else "v2_teacher_pilot_profile/0.1"
+                "v2_teacher_pilot_profile/0.3"
+                if finish_audit_profile
+                else (
+                    "v2_teacher_pilot_profile/0.2"
+                    if higgs_alias_profile
+                    else "v2_teacher_pilot_profile/0.1"
+                )
             )
         ),
         "profile_id": profile_id,
@@ -192,6 +206,20 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                     "reuse_supplement_or_merge_forbidden": True,
                 },
             ]
+            if external_execution_successor_profile:
+                descriptor["predecessor_failed_runs"].append(
+                    {
+                        "run_id": "v2-teacher-pilot-live-20260813-a3",
+                        "status": "failed",
+                        "attempted": 1,
+                        "responses": 0,
+                        "valid": 0,
+                        "skipped": 161,
+                        "failure_code": "provider_exception",
+                        "run_manifest_sha256": "ede68ce4d7c069feb2424884cf62f0f0d92546c56638c5e5550cb56f6ee326cf",
+                        "reuse_supplement_or_merge_forbidden": True,
+                    }
+                )
             descriptor["response_termination_contract"] = {
                 "finish_reason_source": "provider_sdk_choice_finish_reason",
                 "required_finish_reason": "stop",
@@ -199,16 +227,32 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                 "length_finish_reason_is_failure": True,
                 "reasoning_content_is_never_a_decision_source": True,
             }
-            descriptor["engineering_change_from_v2"] = {
-                "max_tokens": {"from": 1024, "to": 4096},
-                "motivation": "a2 response 4 reached the 1024-token output cap without returning string content, consistent with output-budget exhaustion",
-                "teacher_prompt_changed": False,
-                "state_design_changed": False,
-            }
-            descriptor["required_run_ids"] = {
-                "dry_run": "v2-teacher-pilot-v3-dry-20260813-a1",
-                "live": "v2-teacher-pilot-live-20260813-a3",
-            }
+            if external_execution_successor_profile:
+                descriptor["successor_scope"] = "execution_only"
+                descriptor["external_network_required"] = True
+                descriptor["engineering_change_from_v3"] = {
+                    "motivation": "a3 failed before any provider response because the endpoint was unreachable from its execution environment",
+                    "model_request_changed": False,
+                    "teacher_prompt_changed": False,
+                    "state_design_changed": False,
+                    "sample_identity_changed": False,
+                    "finish_reason_contract_changed": False,
+                }
+                descriptor["required_run_ids"] = {
+                    "dry_run": "v2-teacher-pilot-v4-dry-20260813-a1",
+                    "live": "v2-teacher-pilot-live-20260813-a4",
+                }
+            else:
+                descriptor["engineering_change_from_v2"] = {
+                    "max_tokens": {"from": 1024, "to": 4096},
+                    "motivation": "a2 response 4 reached the 1024-token output cap without returning string content, consistent with output-budget exhaustion",
+                    "teacher_prompt_changed": False,
+                    "state_design_changed": False,
+                }
+                descriptor["required_run_ids"] = {
+                    "dry_run": "v2-teacher-pilot-v3-dry-20260813-a1",
+                    "live": "v2-teacher-pilot-live-20260813-a3",
+                }
         else:
             descriptor["predecessor_failed_run"] = {
                 "run_id": "v2-teacher-pilot-live-20260812-a1",
@@ -227,7 +271,10 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
 
 
 def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
-    if profile_id == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT:
+    if profile_id in {
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+    }:
         return FINISH_AUDIT_REQUEST_SCHEMA_VERSION
     return MODEL_REQUEST_SCHEMA_VERSION
 
@@ -1254,8 +1301,8 @@ def _sample_plan(observations: Sequence[Any], replicates: int) -> list[dict[str,
         for replicate_index in range(replicates):
             sample_id = v2_attention.sha256_hex(
                 {
-                    # Sample identity remains frozen across the v1/v2/v3 pilot
-                    # succession.  The v3 request/row projection advances to
+                    # Sample identity remains frozen across the v1/v2/v3/v4
+                    # pilot succession.  The v3/v4 request/row projection uses
                     # 0.2, but that additive provenance change must not reorder
                     # or otherwise redefine the 162 planned samples.
                     "schema_version": SAMPLE_IDENTITY_SCHEMA_VERSION,
@@ -3331,14 +3378,19 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_paths["v2_teacher_pilot_protocol"] = (
             repo_root
             / (
-                "docs/V2_TEACHER_PILOT_V3.md"
+                "docs/V2_TEACHER_PILOT_V4.md"
                 if args.pilot_profile
-                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
                 else (
-                    "docs/V2_TEACHER_PILOT_V2.md"
+                    "docs/V2_TEACHER_PILOT_V3.md"
                     if args.pilot_profile
-                    == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-                    else "docs/V2_TEACHER_PILOT.md"
+                    == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                    else (
+                        "docs/V2_TEACHER_PILOT_V2.md"
+                        if args.pilot_profile
+                        == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                        else "docs/V2_TEACHER_PILOT.md"
+                    )
                 )
             )
         )
@@ -3511,6 +3563,7 @@ __all__ = [
     "MINIMAX_M27_JOINT54X3_PILOT",
     "MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT",
+    "MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",

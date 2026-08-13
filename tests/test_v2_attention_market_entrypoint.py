@@ -166,6 +166,22 @@ def _pilot_args(
                 ),
             ]
         )
+    elif (
+        profile
+        == entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+    ):
+        if "max_tokens" not in explicit_overrides:
+            argv[argv.index("--max-tokens") + 1] = "4096"
+        argv.extend(
+            [
+                "--run-id",
+                (
+                    "v2-teacher-pilot-live-20260813-a4"
+                    if live
+                    else "v2-teacher-pilot-v4-dry-20260813-a1"
+                ),
+            ]
+        )
     return argv
 
 
@@ -1029,6 +1045,13 @@ class V2ConfirmedGatewayAliasPilotTests(unittest.TestCase):
             entrypoint.stable_hash(v2),
             "3f586f02974265e243bc49a0f925eb7e274a2554b4aaee6e706a354becacfebc",
         )
+        v3 = entrypoint.pilot_profile_descriptor(
+            entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+        )
+        self.assertEqual(
+            entrypoint.stable_hash(v3),
+            "c042e41f2263f7c3ee093f7c6b258ee8972edb3a4db44bcae725cc6e0e00aa3e",
+        )
 
     def test_v1_and_v2_have_distinct_named_config_identities(self):
         from nmsim import v2_attention
@@ -1769,6 +1792,287 @@ class V3FinishAuditPilotTests(unittest.TestCase):
                 run_dir.mkdir(parents=True)
                 sentinel = run_dir / "immutable-sentinel.bin"
                 sentinel.write_bytes(b"immutable-v3-boundary\x00")
+                before_hash = _sha256(sentinel)
+                before_entries = sorted(path.name for path in run_dir.iterdir())
+                argv = _pilot_args(out, live=True, profile=self.PROFILE)
+                argv[argv.index("--run-id") + 1] = run_id
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError("O_EXCL path built provider"),
+                ) as provider, redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises((SystemExit, FileExistsError)) as raised:
+                        entrypoint.main(argv)
+                if isinstance(raised.exception, SystemExit):
+                    self.assertEqual(raised.exception.code, 2)
+                provider.assert_not_called()
+                self.assertEqual(_sha256(sentinel), before_hash)
+                self.assertEqual(
+                    sorted(path.name for path in run_dir.iterdir()),
+                    before_entries,
+                )
+
+
+class V4ExternalExecutionSuccessorTests(unittest.TestCase):
+    ENDPOINT_ENV = V2FrozenTeacherPilotTests.ENDPOINT_ENV
+    PROFILE = (
+        entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+    )
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+
+    def _identities(self, profile: str, out_name: str) -> dict:
+        from nmsim import v2_attention
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / out_name, profile=profile)
+        )
+        entrypoint._validate_args(args)
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        return entrypoint.build_v2_identities(
+            args,
+            observations,
+            repo_root=Path(entrypoint.__file__).resolve().parents[1],
+        )
+
+    def test_v4_descriptor_and_dry_run_are_frozen_and_zero_network(self):
+        out = self.root / "v4-dry"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint,
+            "_build_openai_provider",
+            side_effect=AssertionError("v4 dry-run constructed provider"),
+        ) as provider, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("v4 dry-run opened socket"),
+        ) as network, redirect_stdout(io.StringIO()):
+            entrypoint.main(_pilot_args(out, profile=self.PROFILE))
+        provider.assert_not_called()
+        network.assert_not_called()
+
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        summary = _read_json(run_dir / "dry_run_summary.json")
+        profile = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(
+            entrypoint.stable_hash(profile),
+            "5851865c1a22ec2d772524db55e2f57d9bd7e101a02eb7be692bd5f42da5f9b5",
+        )
+        self.assertEqual(profile["schema_version"], "v2_teacher_pilot_profile/0.4")
+        self.assertEqual(profile["successor_scope"], "execution_only")
+        self.assertTrue(profile["external_network_required"])
+        self.assertEqual(profile["planned_requests"], 162)
+        self.assertEqual(profile["max_tokens"], 4096)
+        self.assertEqual(profile["required_reported_model"], "HiggsAI")
+        self.assertEqual(
+            profile["response_termination_contract"]["required_finish_reason"],
+            "stop",
+        )
+        self.assertEqual(
+            [row["run_id"] for row in profile["predecessor_failed_runs"]],
+            [
+                "v2-teacher-pilot-live-20260812-a1",
+                "v2-teacher-pilot-live-20260812-a2",
+                "v2-teacher-pilot-live-20260813-a3",
+            ],
+        )
+        self.assertEqual(
+            profile["predecessor_failed_runs"][2]["run_manifest_sha256"],
+            "ede68ce4d7c069feb2424884cf62f0f0d92546c56638c5e5550cb56f6ee326cf",
+        )
+        self.assertEqual(
+            profile["required_run_ids"],
+            {
+                "dry_run": "v2-teacher-pilot-v4-dry-20260813-a1",
+                "live": "v2-teacher-pilot-live-20260813-a4",
+            },
+        )
+        self.assertEqual(summary["provider_calls"], 0)
+        self.assertFalse(summary["network_access"])
+        self.assertEqual(summary["planned_teacher_requests"], 162)
+        self.assertEqual(summary["pilot_profile"], profile)
+        request = manifest["v2_config_identities"]["model_request_config"]
+        self.assertEqual(
+            request["schema_version"],
+            entrypoint.FINISH_AUDIT_REQUEST_SCHEMA_VERSION,
+        )
+        self.assertEqual(request["pilot_profile_id"], self.PROFILE)
+        pilot_input = next(
+            row for row in manifest["inputs"]
+            if row["label"] == "v2_teacher_pilot_protocol"
+        )
+        self.assertTrue(pilot_input["path"].endswith("V2_TEACHER_PILOT_V4.md"))
+
+    def test_v4_changes_provenance_only_not_frozen_request_or_science(self):
+        from nmsim import v2_attention
+
+        v3_id = entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+        with mock.patch.dict(os.environ, self.ENDPOINT_ENV, clear=False):
+            v3 = self._identities(v3_id, "v3-identities")
+            v4 = self._identities(self.PROFILE, "v4-identities")
+
+        v3_science = json.loads(json.dumps(v3["scientific_config"]))
+        v4_science = json.loads(json.dumps(v4["scientific_config"]))
+        self.assertEqual(
+            v3_science["teacher_sampling"].pop("pilot_profile_id"), v3_id
+        )
+        self.assertEqual(
+            v4_science["teacher_sampling"].pop("pilot_profile_id"), self.PROFILE
+        )
+        self.assertEqual(v4_science, v3_science)
+
+        v3_request = json.loads(json.dumps(v3["model_request_config"]))
+        v4_request = json.loads(json.dumps(v4["model_request_config"]))
+        self.assertEqual(v3_request.pop("pilot_profile_id"), v3_id)
+        self.assertEqual(v4_request.pop("pilot_profile_id"), self.PROFILE)
+        self.assertEqual(v4_request, v3_request)
+        self.assertNotEqual(
+            v4["v2_scientific_config_hash"], v3["v2_scientific_config_hash"]
+        )
+        self.assertNotEqual(
+            v4["v2_model_request_config_hash"],
+            v3["v2_model_request_config_hash"],
+        )
+        self.assertNotEqual(
+            v4["v2_execution_config_hash"], v3["v2_execution_config_hash"]
+        )
+        self.assertNotEqual(
+            v4["v2_full_effective_config_hash"],
+            v3["v2_full_effective_config_hash"],
+        )
+
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        prompt_hashes = [
+            v2_attention.render_teacher_prompt(row).prompt_hash
+            for row in observations
+        ]
+        plan = entrypoint._sample_plan(observations, 3)
+        sample_ids = [row["sample_id"] for row in plan]
+        v3_profile = entrypoint.pilot_profile_descriptor(v3_id)
+        v4_profile = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(len(prompt_hashes), 54)
+        self.assertEqual(
+            entrypoint.stable_hash(prompt_hashes),
+            "3a3431b90ee082ec87c32bf58f181523f9c203aeb911b30f58bd57553aea84bc",
+        )
+        self.assertEqual(len(sample_ids), 162)
+        self.assertEqual(
+            entrypoint.stable_hash(sample_ids),
+            v3_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            v4_profile["planned_sample_order_hash"],
+            v3_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(v4_profile["canary_sample_id"], sample_ids[0])
+        for key in (
+            "state_design_hash",
+            "planned_split_hash",
+            "planned_split_counts",
+            "planned_sample_order_hash",
+            "canary_sample_id",
+            "temperature",
+            "max_tokens",
+            "model_requested",
+            "required_reported_model",
+            "response_termination_contract",
+            "teacher_acceptance_gate",
+            "transport_release_policy",
+        ):
+            with self.subTest(field=key):
+                self.assertEqual(v4_profile[key], v3_profile[key])
+
+    def test_v4_wrong_run_ids_fail_before_provider_and_gate_is_strict(self):
+        for run_id in (
+            "v2-teacher-pilot-live-20260813-a3",
+            "v2-teacher-pilot-live-20260813-a5",
+        ):
+            with self.subTest(run_id=run_id):
+                out = self.root / run_id
+                argv = _pilot_args(out, live=True, profile=self.PROFILE)
+                argv[argv.index("--run-id") + 1] = run_id
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError("invalid v4 built provider"),
+                ) as provider, redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises(SystemExit) as raised:
+                        entrypoint.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+                provider.assert_not_called()
+                manifest = _read_json(_single_run(out) / "run_manifest.json")
+                self.assertEqual(manifest["failure_stage"], "config_validation")
+                self.assertEqual(
+                    manifest["completion"]["provider_calls"]["attempted"], 0
+                )
+
+        from nmsim import v2_attention
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / "gate", profile=self.PROFILE)
+        )
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        plan = entrypoint._sample_plan(observations, 3)
+        rows = [
+            {
+                "state_id": item["observation"].state_id,
+                "status": "valid",
+                "model_requested": "MiniMax-M2.7",
+                "reported_model": "HiggsAI",
+                "finish_reason": "stop",
+            }
+            for item in plan
+        ]
+        passed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=rows,
+            reported_models=["HiggsAI"] * 162,
+            attempted_samples=162,
+        )
+        self.assertEqual(passed["status"], "passed")
+        self.assertTrue(passed["student_and_market_released"])
+        rows[0]["finish_reason"] = "length"
+        failed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=rows,
+            reported_models=["HiggsAI"] * 162,
+            attempted_samples=162,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertFalse(failed["student_and_market_released"])
+
+    def test_v4_a3_and_a4_directories_are_o_excl_immutable(self):
+        for run_id in (
+            "v2-teacher-pilot-live-20260813-a3",
+            "v2-teacher-pilot-live-20260813-a4",
+        ):
+            with self.subTest(run_id=run_id):
+                out = self.root / run_id
+                run_dir = out / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                sentinel = run_dir / "immutable-sentinel.bin"
+                sentinel.write_bytes(b"immutable-v4-boundary\x00")
                 before_hash = _sha256(sentinel)
                 before_entries = sorted(path.name for path in run_dir.iterdir())
                 argv = _pilot_args(out, live=True, profile=self.PROFILE)

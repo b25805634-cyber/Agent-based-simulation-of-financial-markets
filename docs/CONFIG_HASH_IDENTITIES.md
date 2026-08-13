@@ -31,6 +31,18 @@ Finish-audit v3 的 model-request config 投影和 Teacher public/private row
 混称；相同 sample ID 也不是复用历史 Provider response 的授权。
 具体 v3 冻结口径见 `docs/V2_TEACHER_PILOT_V3.md`。
 
+External-network execution successor v4 继续使用
+`v2_teacher_request/0.2`，并保持 v3 的 wire-level request、prompt、
+4096 token cap、finish gate 和 `v2_teacher_request/0.1` sample identity
+不变。但 `pilot_profile_id` 本身属于 model-request config 投影，
+因此 v4 的 `v2_model_request_config_hash` 预期与 v3 不同；这是
+successor-profile identity 的保守区分，不是请求载荷或科学
+语义改变。v4 的 run-id/profile 也必须产生独立的
+`v2_execution_config_hash` 和 `v2_full_effective_config_hash`。外部网络
+权限是执行前提，不是 Provider 稳定性或模型权重身份声明。
+具体 v4 证据、非复用边界和冻结命令见
+`docs/V2_TEACHER_PILOT_V4.md`。
+
 V2 的 real-provider request 明确不发送 seed：
 `request_seed=null` 且
 `request_seed_support=unsupported_and_not_sent`。sample/replicate 的 SHA-256
