@@ -42,6 +42,8 @@ RUN_KIND = "v2_attention_market"
 OUTPUT_SCHEMA_VERSION = "v2_attention_market_result/0.1"
 PROTOCOL_VERSION = "v2_attention_market/0.1"
 MODEL_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.1"
+FINISH_AUDIT_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.2"
+SAMPLE_IDENTITY_SCHEMA_VERSION = "v2_teacher_request/0.1"
 EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.1"
 FULL_CONFIG_SCHEMA_VERSION = "v2_attention_full_effective_config/0.1"
 ALLOWED_PROVIDERS = frozenset({"fake_test_teacher", "fake_null_teacher", "openai"})
@@ -49,10 +51,14 @@ MINIMAX_M27_JOINT54X3_PILOT = "minimax_m27_joint54x3_v1"
 MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT = (
     "minimax_m27_request_higgsai_reported_joint54x3_v2"
 )
+MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT = (
+    "minimax_m27_higgsai_finish_audit_joint54x3_v3"
+)
 PILOT_PROFILES = frozenset(
     {
         MINIMAX_M27_JOINT54X3_PILOT,
         MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
     }
 )
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
@@ -63,6 +69,9 @@ POSITION_INVESTED_LOWER_EXCLUSIVE = 0.80
 JOINT_SPLIT_REQUIRED_STRATA = 9
 JOINT_SPLIT_MIN_FAMILIES_PER_STRATUM = 5
 _PUBLIC_MODEL_ALIAS_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/+\-]{0,255}$")
+_PUBLIC_FINISH_REASONS = frozenset(
+    {"stop", "length", "content_filter", "tool_calls", "function_call"}
+)
 _SECRET_ENDPOINT_QUERY_KEY_RE = re.compile(
     r"(?:api[_-]?key|access[_-]?token|auth(?:orization)?|bearer|credential|password|secret|signature|sig|token)",
     re.IGNORECASE,
@@ -88,18 +97,27 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         return None
     if profile_id not in PILOT_PROFILES:
         raise V2ProviderGuardError("unknown --pilot-profile")
+    higgs_alias_profile = profile_id in {
+        MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
+    }
+    finish_audit_profile = (
+        profile_id == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+    )
     required_reported_model = (
         "HiggsAI"
-        if profile_id
-        == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+        if higgs_alias_profile
         else "MiniMax-M2.7"
     )
     descriptor = {
         "schema_version": (
-            "v2_teacher_pilot_profile/0.2"
-            if profile_id
-            == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-            else "v2_teacher_pilot_profile/0.1"
+            "v2_teacher_pilot_profile/0.3"
+            if finish_audit_profile
+            else (
+                "v2_teacher_pilot_profile/0.2"
+                if higgs_alias_profile
+                else "v2_teacher_pilot_profile/0.1"
+            )
         ),
         "profile_id": profile_id,
         "purpose": "exploratory_endpoint_teacher_not_human_ground_truth",
@@ -112,7 +130,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         "planned_requests": 162,
         "seed": 20260811,
         "temperature": 0.0,
-        "max_tokens": 1024,
+        "max_tokens": 4096 if finish_audit_profile else 1024,
         "workers": 1,
         "training_epochs": 400,
         "market_agents": 48,
@@ -145,27 +163,73 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             "partial_run_merge_forbidden": True,
         },
     }
-    if profile_id == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT:
+    if higgs_alias_profile:
         descriptor["model_identity_semantics"] = {
             "requested_and_reported_are_distinct_fields": True,
             "reported_value_source": "provider_sdk_response_model_field",
             "reported_alias_is_underlying_serving_weights_identity_claim": False,
             "gateway_mapping_operator_confirmed_on": "2026-08-12",
         }
-        descriptor["predecessor_failed_run"] = {
-            "run_id": "v2-teacher-pilot-live-20260812-a1",
-            "status": "failed",
-            "attempted": 1,
-            "valid": 0,
-            "skipped": 161,
-            "run_manifest_sha256": "8e9fde17ed2c71267c2c45cc110c6c951690269d997f84fbf080e5e7e9881c7d",
-            "reuse_supplement_or_merge_forbidden": True,
-        }
-        descriptor["required_run_ids"] = {
-            "dry_run": "v2-teacher-pilot-v2-dry-20260812-a1",
-            "live": "v2-teacher-pilot-live-20260812-a2",
-        }
+        if finish_audit_profile:
+            descriptor["predecessor_failed_runs"] = [
+                {
+                    "run_id": "v2-teacher-pilot-live-20260812-a1",
+                    "status": "failed",
+                    "attempted": 1,
+                    "valid": 0,
+                    "skipped": 161,
+                    "run_manifest_sha256": "8e9fde17ed2c71267c2c45cc110c6c951690269d997f84fbf080e5e7e9881c7d",
+                    "reuse_supplement_or_merge_forbidden": True,
+                },
+                {
+                    "run_id": "v2-teacher-pilot-live-20260812-a2",
+                    "status": "failed",
+                    "attempted": 4,
+                    "valid": 3,
+                    "skipped": 158,
+                    "failure_code": "provider_response_shape_invalid",
+                    "run_manifest_sha256": "1dc925131c31ed24e85df891c9b6bcbb6a879082e0db6ef2f38b02c5007dc6c8",
+                    "reuse_supplement_or_merge_forbidden": True,
+                },
+            ]
+            descriptor["response_termination_contract"] = {
+                "finish_reason_source": "provider_sdk_choice_finish_reason",
+                "required_finish_reason": "stop",
+                "missing_finish_reason_is_failure": True,
+                "length_finish_reason_is_failure": True,
+                "reasoning_content_is_never_a_decision_source": True,
+            }
+            descriptor["engineering_change_from_v2"] = {
+                "max_tokens": {"from": 1024, "to": 4096},
+                "motivation": "a2 response 4 reached the 1024-token output cap without returning string content, consistent with output-budget exhaustion",
+                "teacher_prompt_changed": False,
+                "state_design_changed": False,
+            }
+            descriptor["required_run_ids"] = {
+                "dry_run": "v2-teacher-pilot-v3-dry-20260813-a1",
+                "live": "v2-teacher-pilot-live-20260813-a3",
+            }
+        else:
+            descriptor["predecessor_failed_run"] = {
+                "run_id": "v2-teacher-pilot-live-20260812-a1",
+                "status": "failed",
+                "attempted": 1,
+                "valid": 0,
+                "skipped": 161,
+                "run_manifest_sha256": "8e9fde17ed2c71267c2c45cc110c6c951690269d997f84fbf080e5e7e9881c7d",
+                "reuse_supplement_or_merge_forbidden": True,
+            }
+            descriptor["required_run_ids"] = {
+                "dry_run": "v2-teacher-pilot-v2-dry-20260812-a1",
+                "live": "v2-teacher-pilot-live-20260812-a2",
+            }
     return descriptor
+
+
+def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
+    if profile_id == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT:
+        return FINISH_AUDIT_REQUEST_SCHEMA_VERSION
+    return MODEL_REQUEST_SCHEMA_VERSION
 
 
 def split_regime_descriptor() -> dict[str, Any]:
@@ -236,6 +300,11 @@ class TeacherCompletion:
     reported_model_raw: Optional[str] = None
     error_type: Optional[str] = None
     error_detail: Optional[str] = None
+    # Additive v3 fields remain after every pre-v3 field so older positional
+    # construction cannot silently bind an error as termination provenance.
+    finish_reason: Optional[str] = None
+    finish_reason_raw: Optional[str] = None
+    provider_sdk_response_json: Optional[str] = None
 
 
 def _jsonable(value: Any) -> Any:
@@ -362,6 +431,14 @@ def _safe_public_model_alias(value: Any) -> Optional[str]:
         if alias == candidate or (len(candidate) >= 4 and candidate in alias):
             return None
     return alias
+
+
+def _safe_public_finish_reason(value: Any) -> Optional[str]:
+    """Expose only the SDK's finite, non-secret Chat Completion reasons."""
+
+    if not isinstance(value, str) or value not in _PUBLIC_FINISH_REASONS:
+        return None
+    return value
 
 
 def _v2_endpoint_identity(endpoint: Optional[str]) -> dict[str, Any]:
@@ -523,6 +600,15 @@ class OpenAITeacherProvider:
                     error_detail="{}: {}".format(type(error).__name__, error),
                 )
             self.response_count += 1
+            provider_sdk_response_json = None
+            dump_response = getattr(response, "model_dump_json", None)
+            if callable(dump_response):
+                try:
+                    dumped = dump_response()
+                    if isinstance(dumped, str):
+                        provider_sdk_response_json = dumped
+                except Exception:
+                    provider_sdk_response_json = None
             usage = getattr(response, "usage", None)
             raw_reported_model = (
                 str(response.model) if getattr(response, "model", None) else None
@@ -535,11 +621,16 @@ class OpenAITeacherProvider:
             response_id = (
                 str(response.id) if getattr(response, "id", None) else None
             )
+            raw_finish_reason = None
+            finish_reason = None
             try:
                 choices = getattr(response, "choices", None)
                 if not choices:
                     raise V2ProtocolError("provider response has no choice")
-                message = getattr(choices[0], "message", None)
+                choice = choices[0]
+                raw_finish_reason = getattr(choice, "finish_reason", None)
+                finish_reason = _safe_public_finish_reason(raw_finish_reason)
+                message = getattr(choice, "message", None)
                 if message is None:
                     raise V2ProtocolError("provider choice has no message")
                 content = getattr(message, "content", None)
@@ -555,6 +646,13 @@ class OpenAITeacherProvider:
                     output_tokens=output_tokens,
                     response_id=response_id,
                     reported_model_raw=raw_reported_model,
+                    finish_reason=finish_reason,
+                    finish_reason_raw=(
+                        str(raw_finish_reason)
+                        if raw_finish_reason is not None
+                        else None
+                    ),
+                    provider_sdk_response_json=provider_sdk_response_json,
                     error_type="ProviderResponseShapeError",
                     error_detail="ProviderResponseShapeError: {}".format(error),
                 )
@@ -565,6 +663,13 @@ class OpenAITeacherProvider:
                 output_tokens=output_tokens,
                 response_id=response_id,
                 reported_model_raw=raw_reported_model,
+                finish_reason=finish_reason,
+                finish_reason_raw=(
+                    str(raw_finish_reason)
+                    if raw_finish_reason is not None
+                    else None
+                ),
+                provider_sdk_response_json=provider_sdk_response_json,
             )
 
     async def complete_many(
@@ -1149,7 +1254,11 @@ def _sample_plan(observations: Sequence[Any], replicates: int) -> list[dict[str,
         for replicate_index in range(replicates):
             sample_id = v2_attention.sha256_hex(
                 {
-                    "schema_version": MODEL_REQUEST_SCHEMA_VERSION,
+                    # Sample identity remains frozen across the v1/v2/v3 pilot
+                    # succession.  The v3 request/row projection advances to
+                    # 0.2, but that additive provenance change must not reorder
+                    # or otherwise redefine the 162 planned samples.
+                    "schema_version": SAMPLE_IDENTITY_SCHEMA_VERSION,
                     "state_id": observation.state_id,
                     "prompt_hash": prompt.prompt_hash,
                     "replicate_index": replicate_index,
@@ -1209,6 +1318,13 @@ def _teacher_gate_result(
         for row in public_rows
     ):
         reason_codes.append("reported_model_row_identity_not_exact_match")
+    termination_contract = pilot.get("response_termination_contract")
+    if termination_contract is not None and any(
+        row.get("finish_reason")
+        != termination_contract["required_finish_reason"]
+        for row in public_rows
+    ):
+        reason_codes.append("finish_reason_not_exact_match")
     if any(counts[state_id] != required_per_state for state_id in expected_state_ids):
         reason_codes.append("state_replicate_coverage_incomplete")
     if sorted(set(reported_models)) != [pilot["required_reported_model"]]:
@@ -1232,6 +1348,11 @@ def _teacher_gate_result(
         "required_valid_replicates_per_state": required_per_state,
         "required_requested_model": pilot["model_requested"],
         "required_reported_model": pilot["required_reported_model"],
+        "required_finish_reason": (
+            termination_contract["required_finish_reason"]
+            if termination_contract is not None
+            else None
+        ),
         "reported_models": sorted(set(reported_models)),
         "student_and_market_released": not reason_codes,
     }
@@ -1249,6 +1370,9 @@ def run_teacher_phase(
 
     plan = _sample_plan(observations, args.replicates)
     pilot = pilot_profile_descriptor(args.pilot_profile)
+    request_schema_version = _teacher_request_schema_version(
+        args.pilot_profile
+    )
     if args.provider == "openai":
         provider: Any = _build_openai_provider(args)
         runtime_details = {
@@ -1285,7 +1409,10 @@ def run_teacher_phase(
     input_tokens = 0
     output_tokens = 0
     invalid_reported_model_alias_count = 0
+    invalid_finish_reason_count = 0
+    missing_finish_reason_count = 0
     provider_exception_count = 0
+    finish_reason_counts: Counter[str] = Counter()
     teacher_completion: dict[str, Any] = {
         "unit": "teacher_samples",
         "planned": len(plan),
@@ -1339,7 +1466,7 @@ def run_teacher_phase(
                 "family_id": observation.family_id,
                 "replicate_index": item["replicate_index"],
                 "prompt_hash": prompt.prompt_hash,
-                "request_schema_version": MODEL_REQUEST_SCHEMA_VERSION,
+                "request_schema_version": request_schema_version,
             },
             private_data={
                 "system_prompt": prompt.system,
@@ -1397,7 +1524,8 @@ def run_teacher_phase(
         )
         parse_attempts = sum(
             row["response_hash"] is not None
-            and row["failure_code"] != "reported_model_mismatch"
+            and row["failure_code"]
+            not in {"reported_model_mismatch", "finish_reason_invalid"}
             for row in public_rows
         )
         provider_exceptions = sum(
@@ -1441,6 +1569,20 @@ def run_teacher_phase(
                     ),
                 }
             )
+            if request_schema_version == FINISH_AUDIT_REQUEST_SCHEMA_VERSION:
+                visible_attempts.update(
+                    {
+                        "finish_reason_counts": dict(
+                            sorted(finish_reason_counts.items())
+                        ),
+                        "invalid_finish_reason_count": (
+                            invalid_finish_reason_count
+                        ),
+                        "missing_finish_reason_count": (
+                            missing_finish_reason_count
+                        ),
+                    }
+                )
         manager.manifest["v2_attention_market"]["teacher_samples"] = dict(
             teacher_completion
         )
@@ -1458,6 +1600,8 @@ def run_teacher_phase(
 
     def record_completion(index: int, completion: TeacherCompletion) -> None:
         nonlocal input_tokens, output_tokens, invalid_reported_model_alias_count
+        nonlocal invalid_finish_reason_count
+        nonlocal missing_finish_reason_count
         nonlocal provider_exception_count
         if index in processed_indices or index < 0 or index >= len(plan):
             raise RuntimeError("Teacher completion index violated immutable plan")
@@ -1469,6 +1613,9 @@ def run_teacher_phase(
             if completion.raw_response is not None
             else None
         )
+        private_sdk_response_json = _safe_private_detail(
+            manager, completion.provider_sdk_response_json
+        )
         raw_reported_model = (
             completion.reported_model_raw
             if completion.reported_model_raw is not None
@@ -1477,6 +1624,19 @@ def run_teacher_phase(
         private_reported_model = _safe_private_detail(manager, raw_reported_model)
         private_response_id = _safe_private_detail(manager, completion.response_id)
         public_reported_model = _safe_public_model_alias(raw_reported_model)
+        raw_finish_reason = (
+            completion.finish_reason_raw
+            if completion.finish_reason_raw is not None
+            else completion.finish_reason
+        )
+        private_finish_reason = _safe_private_detail(manager, raw_finish_reason)
+        public_finish_reason = _safe_public_finish_reason(raw_finish_reason)
+        if public_finish_reason is not None:
+            finish_reason_counts[public_finish_reason] += 1
+        elif raw_finish_reason is not None:
+            invalid_finish_reason_count += 1
+        elif pilot is not None and "response_termination_contract" in pilot:
+            missing_finish_reason_count += 1
         if public_reported_model:
             reported_models.add(public_reported_model)
         elif raw_reported_model is not None:
@@ -1523,6 +1683,18 @@ def run_teacher_phase(
             ):
                 failure_code = "reported_model_mismatch"
                 private_error = "reported model did not match frozen pilot alias"
+            elif (
+                pilot is not None
+                and "response_termination_contract" in pilot
+                and public_finish_reason
+                != pilot["response_termination_contract"][
+                    "required_finish_reason"
+                ]
+            ):
+                failure_code = "finish_reason_invalid"
+                private_error = (
+                    "finish reason did not match frozen pilot termination contract"
+                )
             else:
                 try:
                     parsed = v2_attention.parse_teacher_response(
@@ -1551,7 +1723,7 @@ def run_teacher_phase(
             private_rationale = None
             status = "failed"
         public_row = {
-            "schema_version": MODEL_REQUEST_SCHEMA_VERSION,
+            "schema_version": request_schema_version,
             "sample_id": item["sample_id"],
             "provider": args.provider,
             "model_requested": args.model or None,
@@ -1568,6 +1740,8 @@ def run_teacher_phase(
             "input_tokens": completion.input_tokens,
             "output_tokens": completion.output_tokens,
         }
+        if request_schema_version == FINISH_AUDIT_REQUEST_SCHEMA_VERSION:
+            public_row["finish_reason"] = public_finish_reason
         private_row = {
             **public_row,
             "system_prompt": prompt.system,
@@ -1589,6 +1763,23 @@ def run_teacher_phase(
                 else None
             ),
         }
+        if request_schema_version == FINISH_AUDIT_REQUEST_SCHEMA_VERSION:
+            private_row.update(
+                {
+                    "provider_finish_reason_raw": private_finish_reason,
+                    "provider_finish_reason_raw_sha256": (
+                        sha256_text(raw_finish_reason)
+                        if raw_finish_reason is not None
+                        else None
+                    ),
+                    "provider_sdk_response_json": private_sdk_response_json,
+                    "provider_sdk_response_json_sha256": (
+                        sha256_text(completion.provider_sdk_response_json)
+                        if completion.provider_sdk_response_json is not None
+                        else None
+                    ),
+                }
+            )
         _write_jsonl_row(private_stream, private_row)
         os.fsync(private_stream.fileno())
         _write_jsonl_row(public_stream, public_row)
@@ -2399,7 +2590,9 @@ def build_v2_identities(
     endpoint = os.environ.get("OPENAI_BASE_URL") if args.provider == "openai" else None
     endpoint_identity = _v2_endpoint_identity(endpoint)
     model_request = {
-        "schema_version": MODEL_REQUEST_SCHEMA_VERSION,
+        "schema_version": _teacher_request_schema_version(
+            args.pilot_profile
+        ),
         "identity": "v2_model_request_config",
         "provider": args.provider,
         "model_requested": args.model or None,
@@ -2427,6 +2620,10 @@ def build_v2_identities(
             sample_plan[0]["sample_id"] if pilot is not None else None
         ),
     }
+    if pilot is not None and pilot.get("response_termination_contract") is not None:
+        model_request["response_termination_contract"] = pilot[
+            "response_termination_contract"
+        ]
     execution = {
         "schema_version": EXECUTION_SCHEMA_VERSION,
         "identity": "v2_execution_config",
@@ -3134,10 +3331,15 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_paths["v2_teacher_pilot_protocol"] = (
             repo_root
             / (
-                "docs/V2_TEACHER_PILOT_V2.md"
+                "docs/V2_TEACHER_PILOT_V3.md"
                 if args.pilot_profile
-                == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-                else "docs/V2_TEACHER_PILOT.md"
+                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                else (
+                    "docs/V2_TEACHER_PILOT_V2.md"
+                    if args.pilot_profile
+                    == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                    else "docs/V2_TEACHER_PILOT.md"
+                )
             )
         )
     manager = ManagedRunContext.create(
@@ -3308,6 +3510,7 @@ __all__ = [
     "OUTPUT_SCHEMA_VERSION",
     "MINIMAX_M27_JOINT54X3_PILOT",
     "MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT",
+    "MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",

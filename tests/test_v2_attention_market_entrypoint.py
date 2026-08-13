@@ -92,6 +92,7 @@ def _pilot_args(
     profile: str = entrypoint.MINIMAX_M27_JOINT54X3_PILOT,
     **overrides,
 ) -> list:
+    explicit_overrides = set(overrides)
     values = {
         "provider": "openai",
         "model": "MiniMax-M2.7",
@@ -149,6 +150,19 @@ def _pilot_args(
                     "v2-teacher-pilot-live-20260812-a2"
                     if live
                     else "v2-teacher-pilot-v2-dry-20260812-a1"
+                ),
+            ]
+        )
+    elif profile == entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT:
+        if "max_tokens" not in explicit_overrides:
+            argv[argv.index("--max-tokens") + 1] = "4096"
+        argv.extend(
+            [
+                "--run-id",
+                (
+                    "v2-teacher-pilot-live-20260813-a3"
+                    if live
+                    else "v2-teacher-pilot-v3-dry-20260813-a1"
                 ),
             ]
         )
@@ -768,6 +782,11 @@ class V2FrozenTeacherPilotTests(unittest.TestCase):
         self.assertEqual(
             public_rows[0]["failure_code"], "reported_model_mismatch"
         )
+        self.assertNotIn(
+            "finish_reason",
+            public_rows[0],
+            "the frozen v1 public-row schema must not acquire v3 fields",
+        )
         self.assertEqual(len(private_rows), 1)
         self.assertEqual(stat.S_IMODE(private_path.stat().st_mode), 0o600)
         for forbidden in (
@@ -981,6 +1000,11 @@ class V2ConfirmedGatewayAliasPilotTests(unittest.TestCase):
         request = manifest["v2_config_identities"]["model_request_config"]
         self.assertEqual(request["model_requested"], "MiniMax-M2.7")
         self.assertEqual(request["required_reported_model"], "HiggsAI")
+        self.assertNotIn(
+            "response_termination_contract",
+            request,
+            "the frozen v2 model-request projection must not acquire v3 fields",
+        )
         pilot_input = next(
             row for row in manifest["inputs"]
             if row["label"] == "v2_teacher_pilot_protocol"
@@ -1000,6 +1024,11 @@ class V2ConfirmedGatewayAliasPilotTests(unittest.TestCase):
         self.assertEqual(v1["required_reported_model"], "MiniMax-M2.7")
         self.assertNotIn("predecessor_failed_run", v1)
         self.assertNotIn("model_identity_semantics", v1)
+        v2 = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(
+            entrypoint.stable_hash(v2),
+            "3f586f02974265e243bc49a0f925eb7e274a2554b4aaee6e706a354becacfebc",
+        )
 
     def test_v1_and_v2_have_distinct_named_config_identities(self):
         from nmsim import v2_attention
@@ -1283,6 +1312,19 @@ class V2ConfirmedGatewayAliasPilotTests(unittest.TestCase):
             {row["model_requested"] for row in rows}, {"MiniMax-M2.7"}
         )
         self.assertEqual({row["reported_model"] for row in rows}, {"HiggsAI"})
+        self.assertTrue(
+            all("finish_reason" not in row for row in rows),
+            "the frozen v2 public-row schema must not acquire v3 fields",
+        )
+        private_rows = _read_jsonl(run_dir / "private_teacher_records.jsonl")
+        self.assertTrue(
+            all(
+                "provider_finish_reason_raw" not in row
+                and "provider_sdk_response_json" not in row
+                for row in private_rows
+            ),
+            "the frozen v2 private-row schema must not acquire v3 fields",
+        )
         self.assertEqual(
             manifest["v2_attention_market"]["reported_models"], ["HiggsAI"]
         )
@@ -1312,7 +1354,464 @@ class V2ConfirmedGatewayAliasPilotTests(unittest.TestCase):
         self.assertNotIn("Provider: `openai`; model: `HiggsAI`", markdown)
 
 
+class V3FinishAuditPilotTests(unittest.TestCase):
+    ENDPOINT_ENV = V2FrozenTeacherPilotTests.ENDPOINT_ENV
+    PROFILE = entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+
+    def test_v3_descriptor_and_dry_run_are_frozen_and_zero_network(self):
+        out = self.root / "v3-dry"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint,
+            "_build_openai_provider",
+            side_effect=AssertionError("v3 dry-run constructed provider"),
+        ) as provider, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("v3 dry-run opened socket"),
+        ) as network, redirect_stdout(io.StringIO()):
+            entrypoint.main(_pilot_args(out, profile=self.PROFILE))
+        provider.assert_not_called()
+        network.assert_not_called()
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        summary = _read_json(run_dir / "dry_run_summary.json")
+        profile = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(
+            entrypoint.stable_hash(profile),
+            "c042e41f2263f7c3ee093f7c6b258ee8972edb3a4db44bcae725cc6e0e00aa3e",
+        )
+        self.assertEqual(profile["schema_version"], "v2_teacher_pilot_profile/0.3")
+        self.assertEqual(profile["max_tokens"], 4096)
+        self.assertEqual(profile["states"], 54)
+        self.assertEqual(profile["replicates_per_state"], 3)
+        self.assertEqual(profile["planned_requests"], 162)
+        self.assertEqual(profile["required_reported_model"], "HiggsAI")
+        self.assertEqual(
+            profile["response_termination_contract"]["required_finish_reason"],
+            "stop",
+        )
+        self.assertTrue(
+            profile["response_termination_contract"][
+                "reasoning_content_is_never_a_decision_source"
+            ]
+        )
+        self.assertEqual(
+            [row["run_id"] for row in profile["predecessor_failed_runs"]],
+            [
+                "v2-teacher-pilot-live-20260812-a1",
+                "v2-teacher-pilot-live-20260812-a2",
+            ],
+        )
+        self.assertEqual(
+            profile["predecessor_failed_runs"][1]["run_manifest_sha256"],
+            "1dc925131c31ed24e85df891c9b6bcbb6a879082e0db6ef2f38b02c5007dc6c8",
+        )
+        self.assertEqual(summary["provider_calls"], 0)
+        self.assertFalse(summary["network_access"])
+        request = manifest["v2_config_identities"]["model_request_config"]
+        self.assertEqual(
+            request["schema_version"],
+            entrypoint.FINISH_AUDIT_REQUEST_SCHEMA_VERSION,
+        )
+        self.assertEqual(request["max_tokens"], 4096)
+        self.assertEqual(
+            request["response_termination_contract"],
+            profile["response_termination_contract"],
+        )
+        v2_profile = entrypoint.pilot_profile_descriptor(
+            entrypoint.MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+        )
+        self.assertEqual(
+            request["planned_sample_order_hash"],
+            v2_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            request["canary_sample_id"], v2_profile["canary_sample_id"]
+        )
+        self.assertEqual(
+            profile["planned_sample_order_hash"],
+            v2_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            profile["canary_sample_id"], v2_profile["canary_sample_id"]
+        )
+        pilot_input = next(
+            row for row in manifest["inputs"]
+            if row["label"] == "v2_teacher_pilot_protocol"
+        )
+        self.assertTrue(pilot_input["path"].endswith("V2_TEACHER_PILOT_V3.md"))
+
+    def test_v3_keeps_v2_sample_ids_order_and_canary_but_versions_rows(self):
+        from nmsim import v2_attention
+
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        sample_ids = [
+            item["sample_id"]
+            for item in entrypoint._sample_plan(observations, 3)
+        ]
+        v2_profile = entrypoint.pilot_profile_descriptor(
+            entrypoint.MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+        )
+        v3_profile = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(len(sample_ids), 162)
+        self.assertEqual(sample_ids[0], v2_profile["canary_sample_id"])
+        self.assertEqual(sample_ids[0], v3_profile["canary_sample_id"])
+        self.assertEqual(
+            entrypoint.stable_hash(sample_ids),
+            v2_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            entrypoint.stable_hash(sample_ids),
+            v3_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            entrypoint._teacher_request_schema_version(
+                entrypoint.MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+            ),
+            entrypoint.MODEL_REQUEST_SCHEMA_VERSION,
+        )
+        self.assertEqual(
+            entrypoint._teacher_request_schema_version(self.PROFILE),
+            entrypoint.FINISH_AUDIT_REQUEST_SCHEMA_VERSION,
+        )
+
+    def test_v3_mutations_and_predecessor_run_ids_fail_before_provider(self):
+        cases = (
+            ("max-1024", {"max_tokens": 1024}, None),
+            ("max-4095", {"max_tokens": 4095}, None),
+            ("max-4097", {"max_tokens": 4097}, None),
+            ("a2", {}, "v2-teacher-pilot-live-20260812-a2"),
+            ("a4", {}, "v2-teacher-pilot-live-20260813-a4"),
+        )
+        for name, overrides, run_id in cases:
+            with self.subTest(name=name):
+                out = self.root / name
+                argv = _pilot_args(
+                    out, live=True, profile=self.PROFILE, **overrides
+                )
+                if run_id is not None:
+                    argv[argv.index("--run-id") + 1] = run_id
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError("invalid v3 built provider"),
+                ) as provider, redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises(SystemExit) as raised:
+                        entrypoint.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+                provider.assert_not_called()
+                manifest = _read_json(_single_run(out) / "run_manifest.json")
+                self.assertEqual(manifest["failure_stage"], "config_validation")
+                self.assertEqual(
+                    manifest["completion"]["provider_calls"]["attempted"], 0
+                )
+
+    def test_v3_gate_requires_stop_for_every_row(self):
+        from nmsim import v2_attention
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / "gate", profile=self.PROFILE)
+        )
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        plan = entrypoint._sample_plan(observations, 3)
+        rows = [
+            {
+                "state_id": item["observation"].state_id,
+                "status": "valid",
+                "model_requested": "MiniMax-M2.7",
+                "reported_model": "HiggsAI",
+                "finish_reason": "stop",
+            }
+            for item in plan
+        ]
+        passed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=rows,
+            reported_models=["HiggsAI"] * 162,
+            attempted_samples=162,
+        )
+        self.assertEqual(passed["status"], "passed")
+        self.assertEqual(passed["required_finish_reason"], "stop")
+        for value in (None, "length", "content_filter", "tool_calls"):
+            with self.subTest(finish_reason=value):
+                invalid_rows = [dict(row) for row in rows]
+                invalid_rows[0]["finish_reason"] = value
+                failed = entrypoint._teacher_gate_result(
+                    args=args,
+                    plan=plan,
+                    public_rows=invalid_rows,
+                    reported_models=["HiggsAI"] * 162,
+                    attempted_samples=162,
+                )
+                self.assertEqual(failed["status"], "failed")
+                self.assertIn(
+                    "finish_reason_not_exact_match", failed["reason_codes"]
+                )
+
+    def test_v3_all_162_stop_rows_release_distillation_only_after_gate(self):
+        class AllStopProvider:
+            model = "MiniMax-M2.7"
+
+            def __init__(self):
+                self.request_count = 0
+                self.response_count = 0
+                self.network_access = False
+                self.batch_sizes = []
+                self.strict_sequential = None
+
+            async def complete_many(
+                self,
+                prompts,
+                *,
+                before_attempt=None,
+                on_completion=None,
+                strict_sequential=False,
+            ):
+                self.batch_sizes.append(len(prompts))
+                self.strict_sequential = strict_sequential
+                values = []
+                for index, _ in enumerate(prompts):
+                    if before_attempt is not None:
+                        before_attempt(index)
+                    self.request_count += 1
+                    self.response_count += 1
+                    self.network_access = True
+                    completion = entrypoint.TeacherCompletion(
+                        raw_response=(
+                            '{"action":"hold","intensity":0,'
+                            '"reasoning":"private synthetic stop fixture"}'
+                        ),
+                        reported_model="HiggsAI",
+                        reported_model_raw="HiggsAI",
+                        input_tokens=7,
+                        output_tokens=5,
+                        response_id="all-stop-{}".format(index),
+                        finish_reason="stop",
+                        finish_reason_raw="stop",
+                    )
+                    values.append(completion)
+                    if on_completion is not None:
+                        on_completion(index, completion)
+                return values
+
+            async def aclose(self):
+                return None
+
+        class DownstreamReached(RuntimeError):
+            pass
+
+        provider = AllStopProvider()
+        out = self.root / "all-162-stop"
+        distillation = mock.Mock(side_effect=DownstreamReached("sentinel"))
+        market = mock.Mock(
+            side_effect=AssertionError("market ran past distillation sentinel")
+        )
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint, "_build_openai_provider", return_value=provider
+        ), mock.patch.object(
+            entrypoint, "run_distillation_phase", distillation
+        ), mock.patch.object(
+            entrypoint, "run_market_phase", market
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                entrypoint.main(
+                    _pilot_args(out, live=True, profile=self.PROFILE)
+                )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(provider.batch_sizes, [162])
+        self.assertTrue(provider.strict_sequential)
+        self.assertEqual(provider.request_count, 162)
+        self.assertEqual(provider.response_count, 162)
+        distillation.assert_called_once()
+        market.assert_not_called()
+
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        rows = _read_jsonl(run_dir / "teacher_samples.jsonl")
+        teacher = manifest["v2_attention_market"]["teacher_samples"]
+        gate = manifest["v2_attention_market"]["teacher_acceptance_gate"]
+        self.assertEqual(len(rows), 162)
+        self.assertEqual(
+            {row["schema_version"] for row in rows},
+            {entrypoint.FINISH_AUDIT_REQUEST_SCHEMA_VERSION},
+        )
+        self.assertEqual({row["finish_reason"] for row in rows}, {"stop"})
+        self.assertEqual({row["status"] for row in rows}, {"valid"})
+        self.assertEqual(teacher["attempted"], 162)
+        self.assertEqual(teacher["resolved"], 162)
+        self.assertEqual(teacher["valid"], 162)
+        self.assertEqual(teacher["failed"], 0)
+        self.assertEqual(teacher["skipped"], 0)
+        self.assertEqual(manifest["honest_n_teacher_samples"], 162)
+        self.assertEqual(gate["status"], "passed")
+        self.assertEqual(gate["canary_status"], "passed")
+        self.assertEqual(gate["required_finish_reason"], "stop")
+        self.assertTrue(gate["student_and_market_released"])
+
+    def test_v3_length_canary_fails_closed_and_keeps_sdk_envelope_private(self):
+        from nmsim import v2_attention
+
+        valid = v2_attention.fake_test_teacher(
+            v2_attention.generate_state_design(
+                54, 20260811, study_id="v2-attention-market"
+            )[0],
+            0,
+        )
+        private_marker = "PRIVATE_SDK_ENVELOPE_MARKER"
+
+        class LengthProvider:
+            model = "MiniMax-M2.7"
+
+            def __init__(self):
+                self.request_count = 0
+                self.response_count = 0
+                self.network_access = False
+                self.batch_sizes = []
+
+            async def complete_many(
+                self, prompts, *, before_attempt=None, on_completion=None,
+                strict_sequential=False,
+            ):
+                self.batch_sizes.append(len(prompts))
+                self.strict = strict_sequential
+                if before_attempt is not None:
+                    before_attempt(0)
+                self.request_count = 1
+                self.response_count = 1
+                self.network_access = True
+                completion = entrypoint.TeacherCompletion(
+                    raw_response=valid,
+                    reported_model="HiggsAI",
+                    reported_model_raw="HiggsAI",
+                    input_tokens=710,
+                    output_tokens=4096,
+                    response_id="v3-length-canary",
+                    finish_reason="length",
+                    finish_reason_raw="length",
+                    provider_sdk_response_json=private_marker,
+                )
+                if on_completion is not None:
+                    on_completion(0, completion)
+                return [completion]
+
+            async def aclose(self):
+                return None
+
+        provider = LengthProvider()
+        out = self.root / "length-canary"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint, "_build_openai_provider", return_value=provider
+        ), redirect_stdout(io.StringIO()), redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as raised:
+                entrypoint.main(
+                    _pilot_args(out, live=True, profile=self.PROFILE)
+                )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertTrue(provider.strict)
+        self.assertEqual(provider.request_count, 1)
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        rows = _read_jsonl(run_dir / "teacher_samples.jsonl")
+        private_path = run_dir / "private_teacher_records.jsonl"
+        private_text = private_path.read_text(encoding="utf-8")
+        self.assertEqual(rows[0]["failure_code"], "finish_reason_invalid")
+        self.assertEqual(rows[0]["finish_reason"], "length")
+        self.assertNotIn(private_marker, (run_dir / "teacher_samples.jsonl").read_text())
+        self.assertNotIn(private_marker, (run_dir / "run_manifest.json").read_text())
+        self.assertIn(private_marker, private_text)
+        self.assertEqual(stat.S_IMODE(private_path.stat().st_mode), 0o600)
+        teacher = manifest["v2_attention_market"]["teacher_samples"]
+        gate = manifest["v2_attention_market"]["teacher_acceptance_gate"]
+        self.assertEqual(teacher["attempted"], 1)
+        self.assertEqual(teacher["valid"], 0)
+        self.assertEqual(teacher["skipped"], 161)
+        self.assertEqual(manifest["honest_n_teacher_samples"], 0)
+        self.assertEqual(
+            manifest["completion"]["parsing"]["attempted"], 0
+        )
+        self.assertEqual(manifest["completion"]["parsing"]["failed"], 0)
+        attempts = manifest["completion"]["application_provider_attempts"]
+        self.assertEqual(attempts["finish_reason_counts"], {"length": 1})
+        self.assertEqual(attempts["missing_finish_reason_count"], 0)
+        self.assertEqual(gate["reason_codes"], ["finish_reason_invalid"])
+        self.assertFalse(gate["student_and_market_released"])
+        self.assertFalse((run_dir / "aggregated_dataset.json").exists())
+        self.assertFalse((run_dir / "market_2x2_summary.json").exists())
+
+    def test_v3_predecessor_and_target_directories_are_o_excl_immutable(self):
+        for run_id in (
+            "v2-teacher-pilot-live-20260812-a2",
+            "v2-teacher-pilot-live-20260813-a3",
+        ):
+            with self.subTest(run_id=run_id):
+                out = self.root / run_id
+                run_dir = out / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                sentinel = run_dir / "immutable-sentinel.bin"
+                sentinel.write_bytes(b"immutable-v3-boundary\x00")
+                before_hash = _sha256(sentinel)
+                before_entries = sorted(path.name for path in run_dir.iterdir())
+                argv = _pilot_args(out, live=True, profile=self.PROFILE)
+                argv[argv.index("--run-id") + 1] = run_id
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError("O_EXCL path built provider"),
+                ) as provider, redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises((SystemExit, FileExistsError)) as raised:
+                        entrypoint.main(argv)
+                if isinstance(raised.exception, SystemExit):
+                    self.assertEqual(raised.exception.code, 2)
+                provider.assert_not_called()
+                self.assertEqual(_sha256(sentinel), before_hash)
+                self.assertEqual(
+                    sorted(path.name for path in run_dir.iterdir()),
+                    before_entries,
+                )
+
+
 class V2OpenAIAdapterTests(unittest.TestCase):
+    def test_teacher_completion_preserves_pre_v3_positional_error_fields(self):
+        completion = entrypoint.TeacherCompletion(
+            None,
+            None,
+            None,
+            None,
+            None,
+            None,
+            "LegacyTransportError",
+            "legacy positional detail",
+        )
+        self.assertEqual(completion.error_type, "LegacyTransportError")
+        self.assertEqual(completion.error_detail, "legacy positional detail")
+        self.assertIsNone(completion.finish_reason)
+        self.assertIsNone(completion.finish_reason_raw)
+        self.assertIsNone(completion.provider_sdk_response_json)
+
     def test_transport_sends_requested_minimax_and_records_higgsai_alias(self):
         class Completions:
             def __init__(self):
@@ -1355,6 +1854,102 @@ class V2OpenAIAdapterTests(unittest.TestCase):
         self.assertEqual(provider.model, "MiniMax-M2.7")
         self.assertEqual(completions[0].reported_model, "HiggsAI")
         self.assertEqual(completions[0].reported_model_raw, "HiggsAI")
+
+    def test_transport_records_stop_finish_reason_and_private_sdk_envelope(self):
+        class Response(SimpleNamespace):
+            def model_dump_json(self):
+                return '{"private_sdk_field":"audit-only"}'
+
+        class Completions:
+            async def create(self, **kwargs):
+                self.kwargs = kwargs
+                return Response(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            message=SimpleNamespace(content='{"ok":true}'),
+                        )
+                    ],
+                    model="HiggsAI",
+                    id="finish-audit-response",
+                    usage=SimpleNamespace(
+                        prompt_tokens=7, completion_tokens=3
+                    ),
+                )
+
+        completions_api = Completions()
+        provider = object.__new__(entrypoint.OpenAITeacherProvider)
+        provider._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=completions_api)
+        )
+        provider.model = "MiniMax-M2.7"
+        provider.temperature = 0.0
+        provider.max_tokens = 4096
+        provider.workers = 1
+        provider.network_access = False
+        provider.request_count = 0
+        provider.response_count = 0
+        provider.batch_sizes = []
+        completion = asyncio.run(
+            provider.complete_many(
+                [("system", "user")], strict_sequential=True
+            )
+        )[0]
+        self.assertEqual(completions_api.kwargs["max_tokens"], 4096)
+        self.assertEqual(completion.finish_reason, "stop")
+        self.assertEqual(completion.finish_reason_raw, "stop")
+        self.assertEqual(
+            completion.provider_sdk_response_json,
+            '{"private_sdk_field":"audit-only"}',
+        )
+
+    def test_length_with_null_content_is_preserved_as_shape_failure(self):
+        class Response(SimpleNamespace):
+            def model_dump_json(self):
+                return '{"choices":[{"finish_reason":"length"}]}'
+
+        class Completions:
+            async def create(self, **kwargs):
+                return Response(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="length",
+                            message=SimpleNamespace(
+                                content=None,
+                                reasoning_content="must never become decision",
+                            ),
+                        )
+                    ],
+                    model="HiggsAI",
+                    id="length-response",
+                    usage=SimpleNamespace(
+                        prompt_tokens=710, completion_tokens=1024
+                    ),
+                )
+
+        provider = object.__new__(entrypoint.OpenAITeacherProvider)
+        provider._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=Completions())
+        )
+        provider.model = "MiniMax-M2.7"
+        provider.temperature = 0.0
+        provider.max_tokens = 4096
+        provider.workers = 1
+        provider.network_access = False
+        provider.request_count = 0
+        provider.response_count = 0
+        provider.batch_sizes = []
+        completion = asyncio.run(
+            provider.complete_many(
+                [("system", "user")], strict_sequential=True
+            )
+        )[0]
+        self.assertIsNone(completion.raw_response)
+        self.assertEqual(completion.error_type, "ProviderResponseShapeError")
+        self.assertEqual(completion.finish_reason, "length")
+        self.assertNotIn(
+            "must never become decision", completion.error_detail or ""
+        )
 
     def test_public_model_alias_rejects_short_key_and_fragment_secrets(self):
         with mock.patch.dict(

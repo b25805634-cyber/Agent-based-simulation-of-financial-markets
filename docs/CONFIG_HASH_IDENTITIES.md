@@ -13,7 +13,7 @@ secret-free identity，不得简称为“V2 Config hash”：
 | Identity | Schema | 绑定范围 |
 |---|---|---|
 | `v2_scientific_config_hash` | `v2_attention_market/0.1` | 固定日频 state/action/prompt 合同、状态设计、family-grouped split 的显式阈值/分配/回退规则、train-only OOD 几何与 `abs(z)>3.0` 规则、Student/baseline 架构与损失、整数清算/信用设施规则及 budget x behavior 四格参数 |
-| `v2_model_request_config_hash` | `v2_teacher_request/0.1` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；不包含 credential |
+| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3 为 `v2_teacher_request/0.2` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；v3 还绑定 termination provenance/验收合同；不包含 credential |
 | `v2_execution_config_hash` | `v2_attention_execution/0.1` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1` |
 | `v2_full_effective_config_hash` | `v2_attention_full_effective_config/0.1` | 显式 envelope，绑定上述 scientific/model-request/execution 三个 identity 及各自 schema |
 
@@ -22,6 +22,14 @@ secret-free identity，不得简称为“V2 Config hash”：
 设置不应伪装成科学设计未变，变更 worker/dry-live 也不应伪装成同一
 full-effective identity。真实 Provider 仍可随机；相同 hash 不是端点完全确定性
 声明。
+
+Finish-audit v3 的 model-request config 投影和 Teacher public/private row
+使用 `v2_teacher_request/0.2`，明确记录 SDK `finish_reason` 且仅接受
+精确的 `stop`。但 sample ID 的计划身份材料仍固定为
+`v2_teacher_request/0.1` 的 `state_id + prompt_hash + replicate_index`，
+以保留原计划的 sample ID、顺序和 canary。这两层 schema 不得
+混称；相同 sample ID 也不是复用历史 Provider response 的授权。
+具体 v3 冻结口径见 `docs/V2_TEACHER_PILOT_V3.md`。
 
 V2 的 real-provider request 明确不发送 seed：
 `request_seed=null` 且
