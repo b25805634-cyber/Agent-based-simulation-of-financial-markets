@@ -43,6 +43,7 @@ OUTPUT_SCHEMA_VERSION = "v2_attention_market_result/0.1"
 PROTOCOL_VERSION = "v2_attention_market/0.1"
 MODEL_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.1"
 FINISH_AUDIT_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.2"
+OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.3"
 SAMPLE_IDENTITY_SCHEMA_VERSION = "v2_teacher_request/0.1"
 EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.1"
 TRANSPORT_AUDIT_EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.2"
@@ -67,9 +68,13 @@ MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT = (
 MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT = (
     "minimax_m27_higgsai_finish_audit_timeout1800_output65536_joint54x3_v7"
 )
+MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT = (
+    "minimax_m27_higgsai_finish_audit_t1_p095_k40_timeout7200_output190000_joint54x3_v8"
+)
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 V5_REQUEST_TIMEOUT_SECONDS = 600.0
 V7_REQUEST_TIMEOUT_SECONDS = 1800.0
+V8_REQUEST_TIMEOUT_SECONDS = 7200.0
 PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PILOT_PROFILES = frozenset(
     {
@@ -80,6 +85,7 @@ PILOT_PROFILES = frozenset(
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
 )
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
@@ -125,6 +131,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     finish_audit_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
@@ -132,23 +139,30 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     external_execution_successor_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     long_timeout_execution_successor_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     output_budget_successor_profile = (
         profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
     )
     expanded_output_budget_and_timeout_successor_profile = (
         profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
+    )
+    official_sampling_near_context_successor_profile = (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
     )
     required_reported_model = (
         "HiggsAI"
@@ -157,24 +171,28 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     )
     descriptor = {
         "schema_version": (
-            "v2_teacher_pilot_profile/0.7"
-            if expanded_output_budget_and_timeout_successor_profile
+            "v2_teacher_pilot_profile/0.8"
+            if official_sampling_near_context_successor_profile
             else (
-                "v2_teacher_pilot_profile/0.6"
-                if output_budget_successor_profile
+                "v2_teacher_pilot_profile/0.7"
+                if expanded_output_budget_and_timeout_successor_profile
                 else (
-                    "v2_teacher_pilot_profile/0.5"
-                    if long_timeout_execution_successor_profile
+                    "v2_teacher_pilot_profile/0.6"
+                    if output_budget_successor_profile
                     else (
-                        "v2_teacher_pilot_profile/0.4"
-                        if external_execution_successor_profile
+                        "v2_teacher_pilot_profile/0.5"
+                        if long_timeout_execution_successor_profile
                         else (
-                            "v2_teacher_pilot_profile/0.3"
-                            if finish_audit_profile
+                            "v2_teacher_pilot_profile/0.4"
+                            if external_execution_successor_profile
                             else (
-                                "v2_teacher_pilot_profile/0.2"
-                                if higgs_alias_profile
-                                else "v2_teacher_pilot_profile/0.1"
+                                "v2_teacher_pilot_profile/0.3"
+                                if finish_audit_profile
+                                else (
+                                    "v2_teacher_pilot_profile/0.2"
+                                    if higgs_alias_profile
+                                    else "v2_teacher_pilot_profile/0.1"
+                                )
                             )
                         )
                     )
@@ -191,14 +209,20 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         "replicates_per_state": 3,
         "planned_requests": 162,
         "seed": 20260811,
-        "temperature": 0.0,
+        "temperature": (
+            1.0 if official_sampling_near_context_successor_profile else 0.0
+        ),
         "max_tokens": (
-            65536
-            if expanded_output_budget_and_timeout_successor_profile
+            190000
+            if official_sampling_near_context_successor_profile
             else (
-                16384
-                if output_budget_successor_profile
-                else (4096 if finish_audit_profile else 1024)
+                65536
+                if expanded_output_budget_and_timeout_successor_profile
+                else (
+                    16384
+                    if output_budget_successor_profile
+                    else (4096 if finish_audit_profile else 1024)
+                )
             )
         ),
         "workers": 1,
@@ -233,6 +257,9 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             "partial_run_merge_forbidden": True,
         },
     }
+    if official_sampling_near_context_successor_profile:
+        descriptor["top_p"] = 0.95
+        descriptor["top_k"] = 40
     if higgs_alias_profile:
         descriptor["model_identity_semantics"] = {
             "requested_and_reported_are_distinct_fields": True,
@@ -294,6 +321,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             if (
                 output_budget_successor_profile
                 or expanded_output_budget_and_timeout_successor_profile
+                or official_sampling_near_context_successor_profile
             ):
                 descriptor["predecessor_failed_runs"].append(
                     {
@@ -313,7 +341,10 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
-            if expanded_output_budget_and_timeout_successor_profile:
+            if (
+                expanded_output_budget_and_timeout_successor_profile
+                or official_sampling_near_context_successor_profile
+            ):
                 descriptor["predecessor_failed_runs"].append(
                     {
                         "run_id": "v2-teacher-pilot-live-20260820-a6",
@@ -333,6 +364,28 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
+            if official_sampling_near_context_successor_profile:
+                descriptor["predecessor_failed_runs"].append(
+                    {
+                        "run_id": "v2-teacher-pilot-live-20260820-a7",
+                        "status": "failed",
+                        "planned": 162,
+                        "attempted": 45,
+                        "responses": 45,
+                        "valid": 44,
+                        "honest_n": 44,
+                        "skipped": 117,
+                        "failure_code": "provider_response_shape_invalid",
+                        "finish_reason": "length",
+                        "input_tokens": 745,
+                        "output_tokens": 65536,
+                        "parsing_succeeded": 44,
+                        "student_runs": 0,
+                        "market_runs": 0,
+                        "run_manifest_sha256": "137ebb06875c6853a73f58519c90168d9ba7fc879c15c00433d484f277453641",
+                        "reuse_supplement_or_merge_forbidden": True,
+                    }
+                )
             descriptor["response_termination_contract"] = {
                 "finish_reason_source": "provider_sdk_choice_finish_reason",
                 "required_finish_reason": "stop",
@@ -342,7 +395,62 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             }
             if external_execution_successor_profile:
                 descriptor["external_network_required"] = True
-                if expanded_output_budget_and_timeout_successor_profile:
+                if official_sampling_near_context_successor_profile:
+                    descriptor["successor_scope"] = (
+                        "near_context_output_and_official_sampling_with_execution_timeout"
+                    )
+                    descriptor["httpx_phase_inactivity_timeout_seconds"] = 7200
+                    descriptor["hard_request_deadline_seconds"] = 7200
+                    descriptor["connect_timeout_seconds"] = 10
+                    descriptor["causal_attribution_forbidden"] = True
+                    descriptor["engineering_change_from_v7"] = {
+                        "max_tokens": {"from": 65536, "to": 190000},
+                        "temperature": {"from": 0.0, "to": 1.0},
+                        "top_p": {"from": None, "to": 0.95},
+                        "top_k": {"from": None, "to": 40},
+                        "httpx_phase_inactivity_timeout_seconds": {
+                            "from": 1800,
+                            "to": 7200,
+                        },
+                        "hard_request_deadline_seconds": {
+                            "from": 1800,
+                            "to": 7200,
+                        },
+                        "motivation": (
+                            "a7 request 45 resolved with finish_reason=length at "
+                            "output_tokens=65536 under temperature=0; v8 combines "
+                            "a near-context output allowance with the official "
+                            "MiniMax-M2.7 sampling tuple and matching non-streaming "
+                            "transport budgets"
+                        ),
+                        "model_request_change_scope": [
+                            "max_tokens",
+                            "temperature",
+                            "top_p",
+                            "top_k",
+                        ],
+                        "model_request_changed": True,
+                        "execution_change_scope": [
+                            "httpx_phase_inactivity_timeout_seconds",
+                            "hard_request_deadline_seconds",
+                        ],
+                        "execution_contract_changed": True,
+                        "causal_attribution_to_any_single_change_forbidden": True,
+                        "connect_timeout_changed": False,
+                        "teacher_prompt_changed": False,
+                        "state_design_changed": False,
+                        "sample_identity_changed": False,
+                        "sample_order_changed": False,
+                        "finish_reason_contract_changed": False,
+                        "provider_retry_count_changed": False,
+                        "student_changed": False,
+                        "market_changed": False,
+                    }
+                    descriptor["required_run_ids"] = {
+                        "dry_run": "v2-teacher-pilot-v8-dry-20260820-a1",
+                        "live": "v2-teacher-pilot-live-20260820-a8",
+                    }
+                elif expanded_output_budget_and_timeout_successor_profile:
                     descriptor["successor_scope"] = (
                         "output_budget_and_execution_timeout"
                     )
@@ -491,6 +599,11 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
 
 
 def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
+    if (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION
     if profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
@@ -502,7 +615,37 @@ def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
     return MODEL_REQUEST_SCHEMA_VERSION
 
 
+def _uses_finish_audit_request_schema(schema_version: str) -> bool:
+    return schema_version in {
+        FINISH_AUDIT_REQUEST_SCHEMA_VERSION,
+        OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION,
+    }
+
+
+def _request_top_p(profile_id: Optional[str]) -> Optional[float]:
+    if (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return 0.95
+    return None
+
+
+def _request_top_k(profile_id: Optional[str]) -> Optional[int]:
+    if (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return 40
+    return None
+
+
 def _request_timeout_seconds(profile_id: Optional[str]) -> float:
+    if (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return V8_REQUEST_TIMEOUT_SECONDS
     if profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT:
         return V7_REQUEST_TIMEOUT_SECONDS
     if profile_id in {
@@ -514,6 +657,11 @@ def _request_timeout_seconds(profile_id: Optional[str]) -> float:
 
 
 def _hard_request_deadline_seconds(profile_id: Optional[str]) -> Optional[float]:
+    if (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return V8_REQUEST_TIMEOUT_SECONDS
     if profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT:
         return V7_REQUEST_TIMEOUT_SECONDS
     if profile_id in {
@@ -529,6 +677,7 @@ def _execution_schema_version(profile_id: Optional[str]) -> str:
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         return TRANSPORT_AUDIT_EXECUTION_SCHEMA_VERSION
     return EXECUTION_SCHEMA_VERSION
@@ -837,12 +986,43 @@ class OpenAITeacherProvider:
         temperature: float,
         max_tokens: int,
         workers: int,
+        top_p: Optional[float] = None,
+        top_k: Optional[int] = None,
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         hard_request_deadline_seconds: Optional[float] = None,
     ) -> None:
         import httpx
         from openai import AsyncOpenAI
 
+        if isinstance(temperature, bool):
+            raise V2ProviderGuardError("temperature must be a finite number in [0,2]")
+        try:
+            temperature_value = float(temperature)
+        except (TypeError, ValueError) as error:
+            raise V2ProviderGuardError(
+                "temperature must be a finite number in [0,2]"
+            ) from error
+        if not math.isfinite(temperature_value) or not 0.0 <= temperature_value <= 2.0:
+            raise V2ProviderGuardError("temperature must be a finite number in [0,2]")
+        if top_p is None:
+            top_p_value = None
+        else:
+            if isinstance(top_p, bool):
+                raise V2ProviderGuardError("top_p must be a finite number in [0,1]")
+            try:
+                top_p_value = float(top_p)
+            except (TypeError, ValueError) as error:
+                raise V2ProviderGuardError(
+                    "top_p must be a finite number in [0,1]"
+                ) from error
+            if not math.isfinite(top_p_value) or not 0.0 <= top_p_value <= 1.0:
+                raise V2ProviderGuardError("top_p must be a finite number in [0,1]")
+        if top_k is None:
+            top_k_value = None
+        else:
+            if isinstance(top_k, bool) or not isinstance(top_k, int) or top_k < 1:
+                raise V2ProviderGuardError("top_k must be an integer >= 1")
+            top_k_value = int(top_k)
         timeout_seconds = float(request_timeout_seconds)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
             raise V2ProviderGuardError(
@@ -882,9 +1062,11 @@ class OpenAITeacherProvider:
             max_retries=0,
         )
         self.model = model
-        self.temperature = float(temperature)
+        self.temperature = temperature_value
         self.max_tokens = int(max_tokens)
         self.workers = int(workers)
+        self.top_p = top_p_value
+        self.top_k = top_k_value
         self.request_timeout_seconds = timeout_seconds
         self.httpx_phase_inactivity_timeout_seconds = timeout_seconds
         self.hard_request_deadline_seconds = hard_deadline_seconds
@@ -909,14 +1091,23 @@ class OpenAITeacherProvider:
             self.request_count += 1
             self.network_access = True
             try:
-                request = self._client.chat.completions.create(
-                    model=self.model,
-                    max_tokens=self.max_tokens,
-                    temperature=self.temperature,
-                    messages=[
+                request_kwargs: dict[str, Any] = {
+                    "model": self.model,
+                    "max_tokens": self.max_tokens,
+                    "temperature": self.temperature,
+                    "messages": [
                         {"role": "system", "content": system},
                         {"role": "user", "content": user},
                     ],
+                }
+                request_top_p = getattr(self, "top_p", None)
+                request_top_k = getattr(self, "top_k", None)
+                if request_top_p is not None:
+                    request_kwargs["top_p"] = request_top_p
+                if request_top_k is not None:
+                    request_kwargs["extra_body"] = {"top_k": request_top_k}
+                request = self._client.chat.completions.create(
+                    **request_kwargs
                 )
                 hard_deadline = getattr(
                     self, "hard_request_deadline_seconds", None
@@ -1179,6 +1370,18 @@ def _validate_args(args: argparse.Namespace) -> int:
             raise V2ProtocolError("{} must be >= {}".format(option, minimum))
     if not math.isfinite(args.temperature) or not 0.0 <= args.temperature <= 2.0:
         raise V2ProtocolError("--temperature must be finite and in [0,2]")
+    request_top_p = _request_top_p(args.pilot_profile)
+    if request_top_p is not None and (
+        not math.isfinite(request_top_p) or not 0.0 <= request_top_p <= 1.0
+    ):
+        raise V2ProtocolError("frozen request top_p must be finite and in [0,1]")
+    request_top_k = _request_top_k(args.pilot_profile)
+    if request_top_k is not None and (
+        isinstance(request_top_k, bool)
+        or not isinstance(request_top_k, int)
+        or request_top_k < 1
+    ):
+        raise V2ProtocolError("frozen request top_k must be an integer >= 1")
     planned_requests = int(args.states) * int(args.replicates)
     pilot = pilot_profile_descriptor(args.pilot_profile)
     if pilot is not None:
@@ -1191,6 +1394,8 @@ def _validate_args(args: argparse.Namespace) -> int:
             "seed": args.seed,
             "temperature": args.temperature,
             "max_tokens": args.max_tokens,
+            "top_p": request_top_p,
+            "top_k": request_top_k,
             "workers": args.workers,
             "training_epochs": args.training_epochs,
             "market_agents": args.market_agents,
@@ -1245,16 +1450,23 @@ def _validate_args(args: argparse.Namespace) -> int:
 
 
 def _build_openai_provider(args: argparse.Namespace) -> OpenAITeacherProvider:
-    return OpenAITeacherProvider(
-        model=args.model,
-        temperature=args.temperature,
-        max_tokens=args.max_tokens,
-        workers=args.workers,
-        request_timeout_seconds=_request_timeout_seconds(args.pilot_profile),
-        hard_request_deadline_seconds=_hard_request_deadline_seconds(
+    provider_kwargs: dict[str, Any] = {
+        "model": args.model,
+        "temperature": args.temperature,
+        "max_tokens": args.max_tokens,
+        "workers": args.workers,
+        "request_timeout_seconds": _request_timeout_seconds(args.pilot_profile),
+        "hard_request_deadline_seconds": _hard_request_deadline_seconds(
             args.pilot_profile
         ),
-    )
+    }
+    request_top_p = _request_top_p(args.pilot_profile)
+    request_top_k = _request_top_k(args.pilot_profile)
+    if request_top_p is not None:
+        provider_kwargs["top_p"] = request_top_p
+    if request_top_k is not None:
+        provider_kwargs["top_k"] = request_top_k
+    return OpenAITeacherProvider(**provider_kwargs)
 
 
 # The pipeline and report functions are kept below the strict transport and CLI
@@ -1604,10 +1816,10 @@ def _sample_plan(observations: Sequence[Any], replicates: int) -> list[dict[str,
         for replicate_index in range(replicates):
             sample_id = v2_attention.sha256_hex(
                 {
-                    # Sample identity remains frozen across the v1/v2/v3/v4
-                    # pilot succession.  The v3/v4 request/row projection uses
-                    # 0.2, but that additive provenance change must not reorder
-                    # or otherwise redefine the 162 planned samples.
+                    # Sample identity remains frozen across the v1-v8 pilot
+                    # succession.  Later request/row projections add explicit
+                    # provenance, but must not reorder or otherwise redefine
+                    # the 162 planned samples.
                     "schema_version": SAMPLE_IDENTITY_SCHEMA_VERSION,
                     "state_id": observation.state_id,
                     "prompt_hash": prompt.prompt_hash,
@@ -1736,6 +1948,7 @@ def run_teacher_phase(
             MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
             MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
             MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+            MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         }:
             runtime_details.update(
                 {
@@ -1749,6 +1962,15 @@ def run_teacher_phase(
                     "provider_retry_count": 0,
                 }
             )
+            if args.pilot_profile == (
+                MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+            ):
+                runtime_details["generation_sampling"] = {
+                    "temperature": args.temperature,
+                    "max_tokens": args.max_tokens,
+                    "top_p": _request_top_p(args.pilot_profile),
+                    "top_k": _request_top_k(args.pilot_profile),
+                }
         else:
             runtime_details.update(
                 {
@@ -1946,7 +2168,7 @@ def run_teacher_phase(
                     ),
                 }
             )
-            if request_schema_version == FINISH_AUDIT_REQUEST_SCHEMA_VERSION:
+            if _uses_finish_audit_request_schema(request_schema_version):
                 visible_attempts.update(
                     {
                         "finish_reason_counts": dict(
@@ -2117,8 +2339,15 @@ def run_teacher_phase(
             "input_tokens": completion.input_tokens,
             "output_tokens": completion.output_tokens,
         }
-        if request_schema_version == FINISH_AUDIT_REQUEST_SCHEMA_VERSION:
+        if _uses_finish_audit_request_schema(request_schema_version):
             public_row["finish_reason"] = public_finish_reason
+        if request_schema_version == OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION:
+            public_row["generation_sampling"] = {
+                "temperature": args.temperature,
+                "max_tokens": args.max_tokens,
+                "top_p": _request_top_p(args.pilot_profile),
+                "top_k": _request_top_k(args.pilot_profile),
+            }
         private_row = {
             **public_row,
             "system_prompt": prompt.system,
@@ -2140,7 +2369,7 @@ def run_teacher_phase(
                 else None
             ),
         }
-        if request_schema_version == FINISH_AUDIT_REQUEST_SCHEMA_VERSION:
+        if _uses_finish_audit_request_schema(request_schema_version):
             private_row.update(
                 {
                     "provider_finish_reason_raw": private_finish_reason,
@@ -3001,6 +3230,15 @@ def build_v2_identities(
         model_request["response_termination_contract"] = pilot[
             "response_termination_contract"
         ]
+    if args.pilot_profile == (
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        model_request.update(
+            {
+                "top_p": _request_top_p(args.pilot_profile),
+                "top_k": _request_top_k(args.pilot_profile),
+            }
+        )
     execution = {
         "schema_version": _execution_schema_version(args.pilot_profile),
         "identity": "v2_execution_config",
@@ -3030,6 +3268,7 @@ def build_v2_identities(
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         execution.update(
             {
@@ -3725,30 +3964,35 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_paths["v2_teacher_pilot_protocol"] = (
             repo_root
             / (
-                "docs/V2_TEACHER_PILOT_V7.md"
+                "docs/V2_TEACHER_PILOT_V8.md"
                 if args.pilot_profile
-                == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
+                == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
                 else (
-                    "docs/V2_TEACHER_PILOT_V6.md"
+                    "docs/V2_TEACHER_PILOT_V7.md"
                     if args.pilot_profile
-                    == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
+                    == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
                     else (
-                        "docs/V2_TEACHER_PILOT_V5.md"
+                        "docs/V2_TEACHER_PILOT_V6.md"
                         if args.pilot_profile
-                        == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
+                        == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
                         else (
-                            "docs/V2_TEACHER_PILOT_V4.md"
+                            "docs/V2_TEACHER_PILOT_V5.md"
                             if args.pilot_profile
-                            == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+                            == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
                             else (
-                                "docs/V2_TEACHER_PILOT_V3.md"
+                                "docs/V2_TEACHER_PILOT_V4.md"
                                 if args.pilot_profile
-                                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
                                 else (
-                                    "docs/V2_TEACHER_PILOT_V2.md"
+                                    "docs/V2_TEACHER_PILOT_V3.md"
                                     if args.pilot_profile
-                                    == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-                                    else "docs/V2_TEACHER_PILOT.md"
+                                    == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                                    else (
+                                        "docs/V2_TEACHER_PILOT_V2.md"
+                                        if args.pilot_profile
+                                        == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                                        else "docs/V2_TEACHER_PILOT.md"
+                                    )
                                 )
                             )
                         )
@@ -3929,6 +4173,7 @@ __all__ = [
     "MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT",
+    "MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",
