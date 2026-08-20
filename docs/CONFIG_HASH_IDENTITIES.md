@@ -13,8 +13,8 @@ secret-free identity，不得简称为“V2 Config hash”：
 | Identity | Schema | 绑定范围 |
 |---|---|---|
 | `v2_scientific_config_hash` | `v2_attention_market/0.1` | 固定日频 state/action/prompt 合同、状态设计、family-grouped split 的显式阈值/分配/回退规则、train-only OOD 几何与 `abs(z)>3.0` 规则、Student/baseline 架构与损失、整数清算/信用设施规则及 budget x behavior 四格参数 |
-| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3-v7 为 `v2_teacher_request/0.2`；recommended-sampling v8 为 `v2_teacher_request/0.3`；JSON-object v9 为 `v2_teacher_request/0.4` | Teacher provider、请求 model、temperature/top-p/top-k 采样设置、token cap、response-format 生成约束、state/replicate 请求计划与 termination provenance/验收合同；不包含 credential |
-| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5-v9 为 `v2_attention_execution/0.2` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5-v9 还显式绑定 hard wall-clock request deadline、HTTPX phase-inactivity timeout、connect timeout 与 retry policy |
+| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3-v7 为 `v2_teacher_request/0.2`；recommended-sampling v8 为 `v2_teacher_request/0.3`；JSON-object v9 为 `v2_teacher_request/0.4`；audited-retry v10 为 `v2_teacher_request/0.5` | Teacher provider、请求 model、temperature/top-p/top-k 采样设置、token cap、response-format 生成约束、state/replicate 请求计划与 termination provenance/验收合同；不包含 credential |
+| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5-v9 为 `v2_attention_execution/0.2`；audited-retry v10 为 `v2_attention_execution/0.3` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5-v9 显式绑定 timeout/connect/零重试；v10 还绑定 logical-vs-physical attempt 边界、应用重试次数与延时、eligible error allowlist、non-retryable 语义类和 SDK-retry-zero |
 | `v2_full_effective_config_hash` | `v2_attention_full_effective_config/0.1` | 显式 envelope，绑定上述 scientific/model-request/execution 三个 identity 及各自 schema |
 
 每次报告这些值时，还必须标出实际 managed run 目录/执行上下文与
@@ -141,6 +141,28 @@ sample identity 仍使用 `v2_teacher_request/0.1`，execution 仍使用
 a1-a8 的 response/honest-N，也不能把 v9 与未完成 a8 的差异单因素归因于
 `response_format`。具体证据、官方 vLLM/OpenAPI 依据、非复用边界、冻结命令和
 风险见 `docs/V2_TEACHER_PILOT_V9.md`。
+
+Audited transient-retry successor v10 使用
+`v2_teacher_request/0.5` request/row schema 与
+`v2_attention_execution/0.3` execution schema。它完全继承 v9 的
+MiniMax-M2.7、190000 token cap、1/.95/40 采样元组、JSON-object
+response format、7200/7200/10 秒 transport 值和 SDK retry 0；唯一新机制是
+每个 logical Teacher request 最多 5 个可审计 physical Provider attempts，重试前延时
+严格为 `[10,30,60,120]` 秒。只有 connection、timeout、HTTP 429 和 HTTP 5xx
+可重试；收到的 content、alias、finish reason、parser 或 feasibility 失败均不得
+重采样。每个 physical attempt 必须进入 Provider-attempt accounting 和 0600 private
+audit，但多个 physical attempts 仍只能解析一个 logical row，最多贡献一个
+honest-N。该执行/获取变更必须进入 `v2_execution_config_hash`；profile 与
+request/row schema 的保守 successor identity 也使
+`v2_model_request_config_hash` 与 v9 不同，但不得把该差异误报为 generation
+payload 改变。sample identity 仍使用 `v2_teacher_request/0.1`，a1-a9 全部不复用。
+其中 timeout allowlist 必须区分 OpenAI SDK `APITimeoutError` 与客户端
+7200 秒 hard-deadline `asyncio.wait_for` 产生的 built-in `TimeoutError`；两者都可重试。
+v10 `provider_calls` 的 unit 是
+`physical_provider_attempts_after_cache_and_replay`，且 SDK retries disabled；
+`llm_logical_requests` 仍使用 logical-request unit，两者不得混用。
+具体 a9 失败证据、logical/physical accounting、retry allowlist/禁止类、冻结命令和风险
+见 `docs/V2_TEACHER_PILOT_V10.md`。
 
 V2 的 real-provider request 明确不发送 seed：
 `request_seed=null` 且

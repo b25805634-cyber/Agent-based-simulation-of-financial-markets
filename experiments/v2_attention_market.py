@@ -45,9 +45,11 @@ MODEL_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.1"
 FINISH_AUDIT_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.2"
 OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.3"
 JSON_OBJECT_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.4"
+TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.5"
 SAMPLE_IDENTITY_SCHEMA_VERSION = "v2_teacher_request/0.1"
 EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.1"
 TRANSPORT_AUDIT_EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.2"
+TECHNICAL_RETRY_EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.3"
 FULL_CONFIG_SCHEMA_VERSION = "v2_attention_full_effective_config/0.1"
 ALLOWED_PROVIDERS = frozenset({"fake_test_teacher", "fake_null_teacher", "openai"})
 MINIMAX_M27_JOINT54X3_PILOT = "minimax_m27_joint54x3_v1"
@@ -75,10 +77,15 @@ MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT = (
 MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT = (
     "minimax_m27_higgsai_json_object_t1_p095_k40_timeout7200_output190000_joint54x3_v9"
 )
+MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT = (
+    "minimax_m27_higgsai_json_object_retry5_t1_p095_k40_timeout7200_output190000_joint54x3_v10"
+)
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 V5_REQUEST_TIMEOUT_SECONDS = 600.0
 V7_REQUEST_TIMEOUT_SECONDS = 1800.0
 V8_REQUEST_TIMEOUT_SECONDS = 7200.0
+V10_APPLICATION_MAX_ATTEMPTS = 5
+V10_RETRY_DELAYS_SECONDS = (10, 30, 60, 120)
 PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PILOT_PROFILES = frozenset(
     {
@@ -91,6 +98,7 @@ PILOT_PROFILES = frozenset(
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
 )
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
@@ -138,6 +146,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     finish_audit_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
@@ -147,6 +156,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     external_execution_successor_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
@@ -155,6 +165,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     long_timeout_execution_successor_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
@@ -162,6 +173,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }
     output_budget_successor_profile = (
         profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
@@ -177,9 +189,17 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         profile_id
         == MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
     )
+    technical_retry_successor_profile = (
+        profile_id
+        == MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    )
+    json_object_profile = (
+        json_object_network_recovery_successor_profile
+        or technical_retry_successor_profile
+    )
     official_sampling_profile = (
         official_sampling_near_context_successor_profile
-        or json_object_network_recovery_successor_profile
+        or json_object_profile
     )
     required_reported_model = (
         "HiggsAI"
@@ -188,30 +208,34 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     )
     descriptor = {
         "schema_version": (
-            "v2_teacher_pilot_profile/0.9"
-            if json_object_network_recovery_successor_profile
+            "v2_teacher_pilot_profile/0.10"
+            if technical_retry_successor_profile
             else (
-                "v2_teacher_pilot_profile/0.8"
-                if official_sampling_near_context_successor_profile
+                "v2_teacher_pilot_profile/0.9"
+                if json_object_network_recovery_successor_profile
                 else (
-                    "v2_teacher_pilot_profile/0.7"
-                    if expanded_output_budget_and_timeout_successor_profile
+                    "v2_teacher_pilot_profile/0.8"
+                    if official_sampling_near_context_successor_profile
                     else (
-                        "v2_teacher_pilot_profile/0.6"
-                        if output_budget_successor_profile
+                        "v2_teacher_pilot_profile/0.7"
+                        if expanded_output_budget_and_timeout_successor_profile
                         else (
-                            "v2_teacher_pilot_profile/0.5"
-                            if long_timeout_execution_successor_profile
+                            "v2_teacher_pilot_profile/0.6"
+                            if output_budget_successor_profile
                             else (
-                                "v2_teacher_pilot_profile/0.4"
-                                if external_execution_successor_profile
+                                "v2_teacher_pilot_profile/0.5"
+                                if long_timeout_execution_successor_profile
                                 else (
-                                    "v2_teacher_pilot_profile/0.3"
-                                    if finish_audit_profile
+                                    "v2_teacher_pilot_profile/0.4"
+                                    if external_execution_successor_profile
                                     else (
-                                        "v2_teacher_pilot_profile/0.2"
-                                        if higgs_alias_profile
-                                        else "v2_teacher_pilot_profile/0.1"
+                                        "v2_teacher_pilot_profile/0.3"
+                                        if finish_audit_profile
+                                        else (
+                                            "v2_teacher_pilot_profile/0.2"
+                                            if higgs_alias_profile
+                                            else "v2_teacher_pilot_profile/0.1"
+                                        )
                                     )
                                 )
                             )
@@ -281,8 +305,13 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     if official_sampling_profile:
         descriptor["top_p"] = 0.95
         descriptor["top_k"] = 40
-    if json_object_network_recovery_successor_profile:
+    if json_object_profile:
         descriptor["response_format"] = {"type": "json_object"}
+    if technical_retry_successor_profile:
+        descriptor["application_max_attempts"] = V10_APPLICATION_MAX_ATTEMPTS
+        descriptor["application_retry_delays_seconds"] = list(
+            V10_RETRY_DELAYS_SECONDS
+        )
     if higgs_alias_profile:
         descriptor["model_identity_semantics"] = {
             "requested_and_reported_are_distinct_fields": True,
@@ -346,6 +375,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                 or expanded_output_budget_and_timeout_successor_profile
                 or official_sampling_near_context_successor_profile
                 or json_object_network_recovery_successor_profile
+                or technical_retry_successor_profile
             ):
                 descriptor["predecessor_failed_runs"].append(
                     {
@@ -369,6 +399,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                 expanded_output_budget_and_timeout_successor_profile
                 or official_sampling_near_context_successor_profile
                 or json_object_network_recovery_successor_profile
+                or technical_retry_successor_profile
             ):
                 descriptor["predecessor_failed_runs"].append(
                     {
@@ -392,6 +423,7 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             if (
                 official_sampling_near_context_successor_profile
                 or json_object_network_recovery_successor_profile
+                or technical_retry_successor_profile
             ):
                 descriptor["predecessor_failed_runs"].append(
                     {
@@ -414,7 +446,10 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
-            if json_object_network_recovery_successor_profile:
+            if (
+                json_object_network_recovery_successor_profile
+                or technical_retry_successor_profile
+            ):
                 descriptor["predecessor_failed_runs"].append(
                     {
                         "run_id": "v2-teacher-pilot-live-20260820-a8",
@@ -441,6 +476,28 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
+            if technical_retry_successor_profile:
+                descriptor["predecessor_failed_runs"].append(
+                    {
+                        "run_id": "v2-teacher-pilot-live-20260820-a9",
+                        "status": "failed",
+                        "planned": 162,
+                        "attempted": 81,
+                        "responses": 80,
+                        "resolved": 81,
+                        "valid": 80,
+                        "honest_n": 80,
+                        "skipped": 81,
+                        "failure_code": "provider_exception",
+                        "provider_error_type": "APIConnectionError",
+                        "finish_reason_counts": {"stop": 80},
+                        "parsing_succeeded": 80,
+                        "student_runs": 0,
+                        "market_runs": 0,
+                        "run_manifest_sha256": "8b065ece52502230aed88e321cc3e3717fa6430c7549b0d526954235527a779e",
+                        "reuse_supplement_or_merge_forbidden": True,
+                    }
+                )
             descriptor["response_termination_contract"] = {
                 "finish_reason_source": "provider_sdk_choice_finish_reason",
                 "required_finish_reason": "stop",
@@ -450,7 +507,57 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             }
             if external_execution_successor_profile:
                 descriptor["external_network_required"] = True
-                if json_object_network_recovery_successor_profile:
+                if technical_retry_successor_profile:
+                    descriptor["successor_scope"] = (
+                        "bounded_retryable_transport_recovery"
+                    )
+                    descriptor["httpx_phase_inactivity_timeout_seconds"] = 7200
+                    descriptor["hard_request_deadline_seconds"] = 7200
+                    descriptor["connect_timeout_seconds"] = 10
+                    descriptor["technical_retry_policy"] = {
+                        "application_max_attempts": V10_APPLICATION_MAX_ATTEMPTS,
+                        "retry_delays_seconds": list(V10_RETRY_DELAYS_SECONDS),
+                        "sdk_max_retries": 0,
+                        "retryable_error_types": [
+                            "APIConnectionError",
+                            "APITimeoutError",
+                            "RateLimitError",
+                            "InternalServerError",
+                            "APIStatusError(status_code>=500)",
+                            "TimeoutError(asyncio hard deadline)",
+                        ],
+                        "response_content_failures_are_never_retried": True,
+                        "non_retryable_exceptions_are_never_retried": True,
+                        "logical_honest_n_is_not_incremented_by_retries": True,
+                    }
+                    descriptor["engineering_change_from_v9"] = {
+                        "motivation": (
+                            "a9 request 81 failed with APIConnectionError after "
+                            "80 valid logical Teacher samples; v10 adds bounded "
+                            "application retries for a frozen transient-error "
+                            "allowlist while retaining zero SDK retries"
+                        ),
+                        "model_request_changed": False,
+                        "execution_change_scope": [
+                            "application_max_attempts",
+                            "application_retry_delays_seconds",
+                            "application_retryable_error_allowlist",
+                        ],
+                        "execution_contract_changed": True,
+                        "teacher_prompt_changed": False,
+                        "state_design_changed": False,
+                        "sample_identity_changed": False,
+                        "sample_order_changed": False,
+                        "finish_reason_contract_changed": False,
+                        "sdk_retry_count_changed": False,
+                        "student_changed": False,
+                        "market_changed": False,
+                    }
+                    descriptor["required_run_ids"] = {
+                        "dry_run": "v2-teacher-pilot-v10-dry-20260820-a1",
+                        "live": "v2-teacher-pilot-live-20260820-a10",
+                    }
+                elif json_object_network_recovery_successor_profile:
                     descriptor["successor_scope"] = (
                         "json_object_request_after_external_execution_interruption"
                     )
@@ -703,6 +810,10 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
 
 def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
     if profile_id == (
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION
+    if profile_id == (
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
     ):
         return JSON_OBJECT_REQUEST_SCHEMA_VERSION
@@ -727,6 +838,7 @@ def _uses_finish_audit_request_schema(schema_version: str) -> bool:
         FINISH_AUDIT_REQUEST_SCHEMA_VERSION,
         OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION,
         JSON_OBJECT_REQUEST_SCHEMA_VERSION,
+        TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION,
     }
 
 
@@ -734,6 +846,7 @@ def _uses_official_sampling_request_schema(schema_version: str) -> bool:
     return schema_version in {
         OFFICIAL_SAMPLING_REQUEST_SCHEMA_VERSION,
         JSON_OBJECT_REQUEST_SCHEMA_VERSION,
+        TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION,
     }
 
 
@@ -741,6 +854,7 @@ def _request_top_p(profile_id: Optional[str]) -> Optional[float]:
     if profile_id in {
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         return 0.95
     return None
@@ -750,6 +864,7 @@ def _request_top_k(profile_id: Optional[str]) -> Optional[int]:
     if profile_id in {
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         return 40
     return None
@@ -760,13 +875,36 @@ def _request_response_format(profile_id: Optional[str]) -> Optional[dict[str, st
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
     ):
         return {"type": "json_object"}
+    if profile_id == (
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return {"type": "json_object"}
     return None
+
+
+def _application_max_attempts(profile_id: Optional[str]) -> int:
+    if profile_id == (
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return V10_APPLICATION_MAX_ATTEMPTS
+    return 1
+
+
+def _application_retry_delays_seconds(
+    profile_id: Optional[str],
+) -> tuple[float, ...]:
+    if profile_id == (
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return V10_RETRY_DELAYS_SECONDS
+    return ()
 
 
 def _request_timeout_seconds(profile_id: Optional[str]) -> float:
     if profile_id in {
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         return V8_REQUEST_TIMEOUT_SECONDS
     if profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT:
@@ -783,6 +921,7 @@ def _hard_request_deadline_seconds(profile_id: Optional[str]) -> Optional[float]
     if profile_id in {
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         return V8_REQUEST_TIMEOUT_SECONDS
     if profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT:
@@ -796,6 +935,10 @@ def _hard_request_deadline_seconds(profile_id: Optional[str]) -> Optional[float]
 
 
 def _execution_schema_version(profile_id: Optional[str]) -> str:
+    if profile_id == (
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        return TECHNICAL_RETRY_EXECUTION_SCHEMA_VERSION
     if profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
@@ -880,6 +1023,8 @@ class TeacherCompletion:
     finish_reason: Optional[str] = None
     finish_reason_raw: Optional[str] = None
     provider_sdk_response_json: Optional[str] = None
+    application_attempt_count: int = 1
+    technical_retry_count: int = 0
 
 
 def _jsonable(value: Any) -> Any:
@@ -1113,6 +1258,8 @@ class OpenAITeacherProvider:
         top_p: Optional[float] = None,
         top_k: Optional[int] = None,
         response_format: Optional[Mapping[str, Any]] = None,
+        application_max_attempts: int = 1,
+        retry_delays_seconds: Sequence[float] = (),
         request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
         hard_request_deadline_seconds: Optional[float] = None,
     ) -> None:
@@ -1158,6 +1305,28 @@ class OpenAITeacherProvider:
             )
         else:
             response_format_value = {"type": "json_object"}
+        if (
+            isinstance(application_max_attempts, bool)
+            or not isinstance(application_max_attempts, int)
+            or application_max_attempts < 1
+        ):
+            raise V2ProviderGuardError("application_max_attempts must be an integer >= 1")
+        try:
+            retry_delays_value = tuple(
+                float(value) for value in retry_delays_seconds
+            )
+        except (TypeError, ValueError) as error:
+            raise V2ProviderGuardError(
+                "retry_delays_seconds values must be finite and non-negative"
+            ) from error
+        if len(retry_delays_value) != application_max_attempts - 1:
+            raise V2ProviderGuardError(
+                "retry_delays_seconds must contain exactly max_attempts-1 values"
+            )
+        if any(not math.isfinite(value) or value < 0.0 for value in retry_delays_value):
+            raise V2ProviderGuardError(
+                "retry_delays_seconds values must be finite and non-negative"
+            )
         timeout_seconds = float(request_timeout_seconds)
         if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
             raise V2ProviderGuardError(
@@ -1203,6 +1372,8 @@ class OpenAITeacherProvider:
         self.top_p = top_p_value
         self.top_k = top_k_value
         self.response_format = response_format_value
+        self.application_max_attempts = int(application_max_attempts)
+        self.retry_delays_seconds = retry_delays_value
         self.request_timeout_seconds = timeout_seconds
         self.httpx_phase_inactivity_timeout_seconds = timeout_seconds
         self.hard_request_deadline_seconds = hard_deadline_seconds
@@ -1211,7 +1382,41 @@ class OpenAITeacherProvider:
         self.network_access = False
         self.request_count = 0
         self.response_count = 0
+        self.application_attempt_count = 0
+        self.retries_scheduled = 0
+        self.provider_exception_attempts = 0
+        self.logical_requests_with_retry = 0
+        self.application_attempt_audits: list[dict[str, Any]] = []
         self.batch_sizes: list[int] = []
+
+    @staticmethod
+    def _is_retryable_provider_exception(error: Exception) -> bool:
+        from openai import (
+            APIConnectionError,
+            APIStatusError,
+            APITimeoutError,
+            InternalServerError,
+            RateLimitError,
+        )
+
+        if isinstance(
+            error,
+            (
+                APIConnectionError,
+                APITimeoutError,
+                RateLimitError,
+                InternalServerError,
+                TimeoutError,
+                asyncio.TimeoutError,
+            ),
+        ):
+            return True
+        status_code = getattr(error, "status_code", None)
+        return (
+            isinstance(error, APIStatusError)
+            and isinstance(status_code, int)
+            and status_code >= 500
+        )
 
     async def _one(
         self,
@@ -1220,56 +1425,128 @@ class OpenAITeacherProvider:
         user: str,
         semaphore: asyncio.Semaphore,
         before_attempt: Optional[Callable[[int], None]],
+        on_application_attempt: Optional[
+            Callable[[int, Mapping[str, Any]], None]
+        ] = None,
     ) -> tuple[int, TeacherCompletion]:
         async with semaphore:
             if before_attempt is not None:
                 before_attempt(index)
             self.request_count += 1
             self.network_access = True
-            try:
-                request_kwargs: dict[str, Any] = {
-                    "model": self.model,
-                    "max_tokens": self.max_tokens,
-                    "temperature": self.temperature,
-                    "messages": [
-                        {"role": "system", "content": system},
-                        {"role": "user", "content": user},
-                    ],
+            request_kwargs: dict[str, Any] = {
+                "model": self.model,
+                "max_tokens": self.max_tokens,
+                "temperature": self.temperature,
+                "messages": [
+                    {"role": "system", "content": system},
+                    {"role": "user", "content": user},
+                ],
+            }
+            request_top_p = getattr(self, "top_p", None)
+            request_top_k = getattr(self, "top_k", None)
+            request_response_format = getattr(self, "response_format", None)
+            if request_top_p is not None:
+                request_kwargs["top_p"] = request_top_p
+            if request_top_k is not None:
+                request_kwargs["extra_body"] = {"top_k": request_top_k}
+            if request_response_format is not None:
+                request_kwargs["response_format"] = dict(
+                    request_response_format
+                )
+            max_attempts = int(getattr(self, "application_max_attempts", 1))
+            retry_delays = tuple(getattr(self, "retry_delays_seconds", ()))
+            application_attempt_audits = getattr(
+                self, "application_attempt_audits", None
+            )
+            if application_attempt_audits is None:
+                application_attempt_audits = []
+                self.application_attempt_audits = application_attempt_audits
+            logical_used_retry = False
+            for application_attempt_index in range(1, max_attempts + 1):
+                self.application_attempt_count = int(
+                    getattr(self, "application_attempt_count", 0)
+                ) + 1
+                try:
+                    request = self._client.chat.completions.create(
+                        **request_kwargs
+                    )
+                    hard_deadline = getattr(
+                        self, "hard_request_deadline_seconds", None
+                    )
+                    if hard_deadline is None:
+                        response = await request
+                    else:
+                        response = await asyncio.wait_for(
+                            request,
+                            timeout=hard_deadline,
+                        )
+                except Exception as error:
+                    self.provider_exception_attempts = int(
+                        getattr(self, "provider_exception_attempts", 0)
+                    ) + 1
+                    retryable = self._is_retryable_provider_exception(error)
+                    retry_scheduled = (
+                        retryable and application_attempt_index < max_attempts
+                    )
+                    retry_delay = (
+                        float(retry_delays[application_attempt_index - 1])
+                        if retry_scheduled
+                        else None
+                    )
+                    audit = {
+                        "logical_request_index": index,
+                        "application_attempt_index": application_attempt_index,
+                        "application_max_attempts": max_attempts,
+                        "status": "provider_exception",
+                        "provider_error_type": type(error).__name__,
+                        "provider_error_detail": "{}: {}".format(
+                            type(error).__name__, error
+                        ),
+                        "retryable": retryable,
+                        "retry_scheduled": retry_scheduled,
+                        "retry_delay_seconds": retry_delay,
+                    }
+                    application_attempt_audits.append(dict(audit))
+                    if on_application_attempt is not None:
+                        on_application_attempt(index, audit)
+                    if retry_scheduled:
+                        self.retries_scheduled = int(
+                            getattr(self, "retries_scheduled", 0)
+                        ) + 1
+                        if not logical_used_retry:
+                            self.logical_requests_with_retry = int(
+                                getattr(self, "logical_requests_with_retry", 0)
+                            ) + 1
+                            logical_used_retry = True
+                        await asyncio.sleep(retry_delay)
+                        continue
+                    return index, TeacherCompletion(
+                        raw_response=None,
+                        reported_model=None,
+                        input_tokens=None,
+                        output_tokens=None,
+                        response_id=None,
+                        error_type=type(error).__name__,
+                        error_detail="{}: {}".format(type(error).__name__, error),
+                        application_attempt_count=application_attempt_index,
+                        technical_retry_count=application_attempt_index - 1,
+                    )
+                audit = {
+                    "logical_request_index": index,
+                    "application_attempt_index": application_attempt_index,
+                    "application_max_attempts": max_attempts,
+                    "status": "response_received",
+                    "provider_error_type": None,
+                    "provider_error_detail": None,
+                    "retryable": False,
+                    "retry_scheduled": False,
+                    "retry_delay_seconds": None,
                 }
-                request_top_p = getattr(self, "top_p", None)
-                request_top_k = getattr(self, "top_k", None)
-                request_response_format = getattr(self, "response_format", None)
-                if request_top_p is not None:
-                    request_kwargs["top_p"] = request_top_p
-                if request_top_k is not None:
-                    request_kwargs["extra_body"] = {"top_k": request_top_k}
-                if request_response_format is not None:
-                    request_kwargs["response_format"] = dict(
-                        request_response_format
-                    )
-                request = self._client.chat.completions.create(
-                    **request_kwargs
-                )
-                hard_deadline = getattr(
-                    self, "hard_request_deadline_seconds", None
-                )
-                if hard_deadline is None:
-                    response = await request
-                else:
-                    response = await asyncio.wait_for(
-                        request,
-                        timeout=hard_deadline,
-                    )
-            except Exception as error:
-                return index, TeacherCompletion(
-                    raw_response=None,
-                    reported_model=None,
-                    input_tokens=None,
-                    output_tokens=None,
-                    response_id=None,
-                    error_type=type(error).__name__,
-                    error_detail="{}: {}".format(type(error).__name__, error),
-                )
+                application_attempt_audits.append(dict(audit))
+                if on_application_attempt is not None:
+                    on_application_attempt(index, audit)
+                break
             self.response_count += 1
             provider_sdk_response_json = None
             dump_response = getattr(response, "model_dump_json", None)
@@ -1326,6 +1603,8 @@ class OpenAITeacherProvider:
                     provider_sdk_response_json=provider_sdk_response_json,
                     error_type="ProviderResponseShapeError",
                     error_detail="ProviderResponseShapeError: {}".format(error),
+                    application_attempt_count=application_attempt_index,
+                    technical_retry_count=application_attempt_index - 1,
                 )
             return index, TeacherCompletion(
                 raw_response=content,
@@ -1341,6 +1620,8 @@ class OpenAITeacherProvider:
                     else None
                 ),
                 provider_sdk_response_json=provider_sdk_response_json,
+                application_attempt_count=application_attempt_index,
+                technical_retry_count=application_attempt_index - 1,
             )
 
     async def complete_many(
@@ -1349,6 +1630,9 @@ class OpenAITeacherProvider:
         *,
         before_attempt: Optional[Callable[[int], None]] = None,
         on_completion: Optional[Callable[[int, TeacherCompletion], None]] = None,
+        on_application_attempt: Optional[
+            Callable[[int, Mapping[str, Any]], None]
+        ] = None,
         strict_sequential: bool = False,
     ) -> list[TeacherCompletion]:
         self.batch_sizes.append(len(prompts))
@@ -1358,7 +1642,12 @@ class OpenAITeacherProvider:
             index: int, system: str, user: str
         ) -> tuple[int, TeacherCompletion]:
             pair = await self._one(
-                index, system, user, semaphore, before_attempt
+                index,
+                system,
+                user,
+                semaphore,
+                before_attempt,
+                on_application_attempt,
             )
             if on_completion is not None:
                 on_completion(pair[0], pair[1])
@@ -1530,6 +1819,19 @@ def _validate_args(args: argparse.Namespace) -> int:
         raise V2ProtocolError(
             'frozen response_format must be exactly {"type":"json_object"}'
         )
+    application_max_attempts = _application_max_attempts(args.pilot_profile)
+    application_retry_delays = _application_retry_delays_seconds(
+        args.pilot_profile
+    )
+    if (
+        application_max_attempts < 1
+        or len(application_retry_delays) != application_max_attempts - 1
+        or any(
+            not math.isfinite(value) or value < 0.0
+            for value in application_retry_delays
+        )
+    ):
+        raise V2ProtocolError("frozen application retry policy is invalid")
     planned_requests = int(args.states) * int(args.replicates)
     pilot = pilot_profile_descriptor(args.pilot_profile)
     if pilot is not None:
@@ -1545,6 +1847,8 @@ def _validate_args(args: argparse.Namespace) -> int:
             "top_p": request_top_p,
             "top_k": request_top_k,
             "response_format": request_response_format,
+            "application_max_attempts": application_max_attempts,
+            "application_retry_delays_seconds": list(application_retry_delays),
             "workers": args.workers,
             "training_epochs": args.training_epochs,
             "market_agents": args.market_agents,
@@ -1618,6 +1922,12 @@ def _build_openai_provider(args: argparse.Namespace) -> OpenAITeacherProvider:
         provider_kwargs["top_k"] = request_top_k
     if request_response_format is not None:
         provider_kwargs["response_format"] = request_response_format
+    application_max_attempts = _application_max_attempts(args.pilot_profile)
+    if application_max_attempts > 1:
+        provider_kwargs["application_max_attempts"] = application_max_attempts
+        provider_kwargs["retry_delays_seconds"] = (
+            _application_retry_delays_seconds(args.pilot_profile)
+        )
     return OpenAITeacherProvider(**provider_kwargs)
 
 
@@ -1968,7 +2278,7 @@ def _sample_plan(observations: Sequence[Any], replicates: int) -> list[dict[str,
         for replicate_index in range(replicates):
             sample_id = v2_attention.sha256_hex(
                 {
-                    # Sample identity remains frozen across the v1-v8 pilot
+                    # Sample identity remains frozen across the v1-v10 pilot
                     # succession.  Later request/row projections add explicit
                     # provenance, but must not reorder or otherwise redefine
                     # the 162 planned samples.
@@ -2102,6 +2412,7 @@ def run_teacher_phase(
             MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
             MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
             MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+            MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         }:
             runtime_details.update(
                 {
@@ -2125,6 +2436,16 @@ def run_teacher_phase(
             request_response_format = _request_response_format(args.pilot_profile)
             if request_response_format is not None:
                 runtime_details["response_format"] = request_response_format
+            if (
+                request_schema_version
+                == TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION
+            ):
+                runtime_details["application_max_attempts"] = (
+                    _application_max_attempts(args.pilot_profile)
+                )
+                runtime_details["application_retry_delays_seconds"] = list(
+                    _application_retry_delays_seconds(args.pilot_profile)
+                )
         else:
             runtime_details.update(
                 {
@@ -2147,6 +2468,55 @@ def run_teacher_phase(
     manager.active_llm = provider
     manager.llm_mode = "record"
     manager.network_access = False
+    if request_schema_version == TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION:
+        original_sync_llm_accounting = manager.sync_llm_accounting
+
+        def sync_retry_aware_llm_accounting(
+            llm: Any = None, tracker: Any = None
+        ) -> None:
+            original_sync_llm_accounting(llm, tracker)
+            active_provider = llm or provider
+            physical_attempted = int(
+                getattr(active_provider, "application_attempt_count", 0)
+            )
+            physical_exceptions = int(
+                getattr(active_provider, "provider_exception_attempts", 0)
+            )
+            manager.manifest["completion"]["provider_calls"].update(
+                {
+                    "unit": "physical_provider_attempts_after_cache_and_replay",
+                    "coverage": (
+                        "application adapter physical attempts; SDK-internal "
+                        "retries disabled"
+                    ),
+                    "attempted": physical_attempted,
+                    "succeeded": max(
+                        0, physical_attempted - physical_exceptions
+                    ),
+                    "failed": physical_exceptions,
+                }
+            )
+            manager.manifest["llm"].setdefault("runtime", {}).update(
+                {
+                    "provider_calls": physical_attempted,
+                    "provider_calls_succeeded": max(
+                        0, physical_attempted - physical_exceptions
+                    ),
+                    "provider_calls_failed": physical_exceptions,
+                    "application_attempt_count": physical_attempted,
+                    "retries_scheduled": int(
+                        getattr(active_provider, "retries_scheduled", 0)
+                    ),
+                    "provider_exception_attempts": physical_exceptions,
+                    "logical_requests_with_retry": int(
+                        getattr(
+                            active_provider, "logical_requests_with_retry", 0
+                        )
+                    ),
+                }
+            )
+
+        manager.sync_llm_accounting = sync_retry_aware_llm_accounting
     manager.register_llm_runtime(
         mode=RUN_KIND,
         cache_enabled=False,
@@ -2227,6 +2597,41 @@ def run_teacher_phase(
             },
         )
 
+    def record_application_attempt(
+        index: int, audit: Mapping[str, Any]
+    ) -> None:
+        item = plan[index]
+        private_error_detail = _safe_private_detail(
+            manager,
+            (
+                str(audit.get("provider_error_detail"))
+                if audit.get("provider_error_detail") is not None
+                else None
+            ),
+        )
+        manager.events.emit(
+            "V2ProviderApplicationAttemptRecorded",
+            agent_id=item["observation"].state_id,
+            data={
+                "run_kind": RUN_KIND,
+                "sample_id": item["sample_id"],
+                "application_attempt_index": audit[
+                    "application_attempt_index"
+                ],
+                "application_max_attempts": audit[
+                    "application_max_attempts"
+                ],
+                "status": audit["status"],
+                "retryable": audit["retryable"],
+                "retry_scheduled": audit["retry_scheduled"],
+                "retry_delay_seconds": audit["retry_delay_seconds"],
+            },
+            private_data={
+                "provider_error_type": audit.get("provider_error_type"),
+                "provider_error_detail": private_error_detail,
+            },
+        )
+
     def refresh_accounting() -> None:
         valid = sum(row["status"] == "valid" for row in public_rows)
         resolved_failures = len(public_rows) - valid
@@ -2255,13 +2660,39 @@ def run_teacher_phase(
         manager.sync_llm_accounting(provider)
         completion_accounting = manager.manifest["completion"]
         if args.provider == "openai":
+            physical_attempted = int(
+                getattr(provider, "application_attempt_count", attempted)
+            )
+            physical_exceptions = int(
+                getattr(
+                    provider,
+                    "provider_exception_attempts",
+                    provider_exception_count,
+                )
+            )
             completion_accounting["provider_calls"].update(
                 {
-                    "attempted": attempted,
-                    "succeeded": max(0, attempted - provider_exception_count),
-                    "failed": provider_exception_count,
+                    "attempted": physical_attempted,
+                    "succeeded": max(0, physical_attempted - physical_exceptions),
+                    "failed": physical_exceptions,
                 }
             )
+            if request_schema_version == TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION:
+                manager.register_llm_runtime(
+                    provider_calls=physical_attempted,
+                    provider_calls_succeeded=max(
+                        0, physical_attempted - physical_exceptions
+                    ),
+                    provider_calls_failed=physical_exceptions,
+                    application_attempt_count=physical_attempted,
+                    retries_scheduled=int(
+                        getattr(provider, "retries_scheduled", 0)
+                    ),
+                    provider_exception_attempts=physical_exceptions,
+                    logical_requests_with_retry=int(
+                        getattr(provider, "logical_requests_with_retry", 0)
+                    ),
+                )
         completion_accounting["agent_decisions"].update(
             {
                 "planned": len(plan),
@@ -2306,14 +2737,20 @@ def run_teacher_phase(
             ]
             visible_attempts.update(
                 {
-                    "attempted": attempted,
+                    "attempted": int(
+                        getattr(provider, "application_attempt_count", attempted)
+                    ),
                     "responses_received": int(
                         getattr(provider, "response_count", 0)
                     ),
                     "parse_failed_responses": parse_failures,
                     "provider_exceptions": provider_exceptions,
-                    "retries_scheduled": 0,
-                    "logical_requests_with_retry": 0,
+                    "retries_scheduled": int(
+                        getattr(provider, "retries_scheduled", 0)
+                    ),
+                    "logical_requests_with_retry": int(
+                        getattr(provider, "logical_requests_with_retry", 0)
+                    ),
                     "exhausted_logical_requests": resolved_failures + unresolved,
                     "reported_models": sorted(reported_models)[:16],
                     "reported_models_truncated": len(reported_models) > 16,
@@ -2322,6 +2759,14 @@ def run_teacher_phase(
                     ),
                 }
             )
+            if request_schema_version == TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION:
+                visible_attempts["provider_exception_attempts"] = int(
+                    getattr(
+                        provider,
+                        "provider_exception_attempts",
+                        provider_exceptions,
+                    )
+                )
             if _uses_finish_audit_request_schema(request_schema_version):
                 visible_attempts.update(
                     {
@@ -2505,6 +2950,13 @@ def run_teacher_phase(
         request_response_format = _request_response_format(args.pilot_profile)
         if request_response_format is not None:
             public_row["response_format"] = request_response_format
+        if request_schema_version == TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION:
+            public_row["application_attempt_count"] = int(
+                completion.application_attempt_count
+            )
+            public_row["technical_retry_count"] = int(
+                completion.technical_retry_count
+            )
         private_row = {
             **public_row,
             "system_prompt": prompt.system,
@@ -2597,6 +3049,13 @@ def run_teacher_phase(
                     }
                     if pilot is not None:
                         call_kwargs["strict_sequential"] = True
+                    if (
+                        request_schema_version
+                        == TECHNICAL_RETRY_REQUEST_SCHEMA_VERSION
+                    ):
+                        call_kwargs["on_application_attempt"] = (
+                            record_application_attempt
+                        )
                     return await provider.complete_many(
                         [
                             (item["prompt"].system, item["prompt"].user)
@@ -3430,6 +3889,7 @@ def build_v2_identities(
         MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT,
     }:
         execution.update(
             {
@@ -3441,6 +3901,29 @@ def build_v2_identities(
                 ),
                 "connect_timeout_seconds": PROVIDER_CONNECT_TIMEOUT_SECONDS,
                 "provider_retry_count": 0,
+            }
+        )
+    if args.pilot_profile == (
+        MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+    ):
+        execution.update(
+            {
+                "application_max_attempts": _application_max_attempts(
+                    args.pilot_profile
+                ),
+                "application_retry_delays_seconds": list(
+                    _application_retry_delays_seconds(args.pilot_profile)
+                ),
+                "application_retryable_error_types": [
+                    "APIConnectionError",
+                    "APITimeoutError",
+                    "RateLimitError",
+                    "InternalServerError",
+                    "APIStatusError(status_code>=500)",
+                    "TimeoutError(asyncio hard deadline)",
+                ],
+                "response_content_failures_are_never_retried": True,
+                "provider_sdk_max_retries": 0,
             }
         )
     scientific_hash = stable_hash(scientific)
@@ -4125,38 +4608,43 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_paths["v2_teacher_pilot_protocol"] = (
             repo_root
             / (
-                "docs/V2_TEACHER_PILOT_V9.md"
+                "docs/V2_TEACHER_PILOT_V10.md"
                 if args.pilot_profile
-                == MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+                == MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
                 else (
-                    "docs/V2_TEACHER_PILOT_V8.md"
+                    "docs/V2_TEACHER_PILOT_V9.md"
                     if args.pilot_profile
-                    == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
+                    == MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
                     else (
-                        "docs/V2_TEACHER_PILOT_V7.md"
+                        "docs/V2_TEACHER_PILOT_V8.md"
                         if args.pilot_profile
-                        == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
+                        == MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT
                         else (
-                            "docs/V2_TEACHER_PILOT_V6.md"
+                            "docs/V2_TEACHER_PILOT_V7.md"
                             if args.pilot_profile
-                            == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
+                            == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
                             else (
-                                "docs/V2_TEACHER_PILOT_V5.md"
+                                "docs/V2_TEACHER_PILOT_V6.md"
                                 if args.pilot_profile
-                                == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
+                                == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
                                 else (
-                                    "docs/V2_TEACHER_PILOT_V4.md"
+                                    "docs/V2_TEACHER_PILOT_V5.md"
                                     if args.pilot_profile
-                                    == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+                                    == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
                                     else (
-                                        "docs/V2_TEACHER_PILOT_V3.md"
+                                        "docs/V2_TEACHER_PILOT_V4.md"
                                         if args.pilot_profile
-                                        == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                                        == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
                                         else (
-                                            "docs/V2_TEACHER_PILOT_V2.md"
+                                            "docs/V2_TEACHER_PILOT_V3.md"
                                             if args.pilot_profile
-                                            == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-                                            else "docs/V2_TEACHER_PILOT.md"
+                                            == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                                            else (
+                                                "docs/V2_TEACHER_PILOT_V2.md"
+                                                if args.pilot_profile
+                                                == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                                                else "docs/V2_TEACHER_PILOT.md"
+                                            )
                                         )
                                     )
                                 )
@@ -4341,6 +4829,7 @@ __all__ = [
     "MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_JSON_OBJECT_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT",
+    "MINIMAX_M27_HIGGSAI_JSON_OBJECT_RETRY5_T1_P095_K40_TIMEOUT7200_OUTPUT190000_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",
