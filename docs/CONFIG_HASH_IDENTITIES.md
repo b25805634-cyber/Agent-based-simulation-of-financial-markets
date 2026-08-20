@@ -13,8 +13,8 @@ secret-free identity，不得简称为“V2 Config hash”：
 | Identity | Schema | 绑定范围 |
 |---|---|---|
 | `v2_scientific_config_hash` | `v2_attention_market/0.1` | 固定日频 state/action/prompt 合同、状态设计、family-grouped split 的显式阈值/分配/回退规则、train-only OOD 几何与 `abs(z)>3.0` 规则、Student/baseline 架构与损失、整数清算/信用设施规则及 budget x behavior 四格参数 |
-| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3 为 `v2_teacher_request/0.2` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；v3 还绑定 termination provenance/验收合同；不包含 credential |
-| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5 为 `v2_attention_execution/0.2` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5 还显式绑定 hard wall-clock request deadline、HTTPX phase-inactivity timeout、connect timeout 与 retry policy |
+| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3-v6 为 `v2_teacher_request/0.2` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；v3-v6 还绑定 termination provenance/验收合同；不包含 credential |
+| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5-v6 为 `v2_attention_execution/0.2` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5-v6 还显式绑定 hard wall-clock request deadline、HTTPX phase-inactivity timeout、connect timeout 与 retry policy |
 | `v2_full_effective_config_hash` | `v2_attention_full_effective_config/0.1` | 显式 envelope，绑定上述 scientific/model-request/execution 三个 identity 及各自 schema |
 
 每次报告这些值时，还必须标出实际 managed run 目录/执行上下文与
@@ -66,6 +66,26 @@ deadline，不能从其 HTTPX phase timeout 反推一个。该变更使
 prompt、model、temperature、token cap、state plan 或 termination contract
 改变。具体 a4 失败证据、v5 非复用边界和冻结命令见
 `docs/V2_TEACHER_PILOT_V5.md`。
+
+Larger-output-cap successor v6 保持 v5 的科学设计、prompt、
+state/sample plan、exact-`stop` gate、Student/market 与全部 transport
+policy，但明确把唯一的 model-generation request 字段
+`max_tokens` 从 4096 改为 16384。这是 request-semantic change，
+不得误报为 execution-only change；它使
+`v2_model_request_config_hash` 必须与 v5 不同。v6 继续使用
+`v2_teacher_request/0.2` request/row schema，但 sample identity 仍使用
+`v2_teacher_request/0.1` 的
+`state_id + prompt_hash + replicate_index`，因此保留计划中的
+sample ID、顺序和 canary 不等于允许复用历史 Provider
+response。v6 仍使用 `v2_attention_execution/0.2`：600 秒 hard
+wall-clock deadline、600 秒 HTTPX read/write/pool phase-inactivity
+timeouts、10 秒 connect timeout 与零 retry 全部不变。新的
+run/profile 身份仍要求独立的 `v2_execution_config_hash` 与
+`v2_full_effective_config_hash`。a5 在第七个 response 保存的
+`finish_reason=length` 与 `output_tokens=4096` 是提高 cap 的运行证据，
+但不是 v6 成功、端点连续稳定或更长 response 必然有效的
+声明。具体 a5 失败证据、v6 非复用边界和冻结命令见
+`docs/V2_TEACHER_PILOT_V6.md`。
 
 V2 的 real-provider request 明确不发送 seed：
 `request_seed=null` 且
