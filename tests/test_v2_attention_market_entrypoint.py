@@ -182,6 +182,19 @@ def _pilot_args(
                 ),
             ]
         )
+    elif profile == entrypoint.MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT:
+        if "max_tokens" not in explicit_overrides:
+            argv[argv.index("--max-tokens") + 1] = "4096"
+        argv.extend(
+            [
+                "--run-id",
+                (
+                    "v2-teacher-pilot-live-20260813-a5"
+                    if live
+                    else "v2-teacher-pilot-v5-dry-20260813-a1"
+                ),
+            ]
+        )
     return argv
 
 
@@ -1051,6 +1064,13 @@ class V2ConfirmedGatewayAliasPilotTests(unittest.TestCase):
         self.assertEqual(
             entrypoint.stable_hash(v3),
             "c042e41f2263f7c3ee093f7c6b258ee8972edb3a4db44bcae725cc6e0e00aa3e",
+        )
+        v4 = entrypoint.pilot_profile_descriptor(
+            entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+        )
+        self.assertEqual(
+            entrypoint.stable_hash(v4),
+            "5851865c1a22ec2d772524db55e2f57d9bd7e101a02eb7be692bd5f42da5f9b5",
         )
 
     def test_v1_and_v2_have_distinct_named_config_identities(self):
@@ -2095,6 +2115,584 @@ class V4ExternalExecutionSuccessorTests(unittest.TestCase):
                 self.assertEqual(
                     sorted(path.name for path in run_dir.iterdir()),
                     before_entries,
+                )
+
+
+class V5LongTimeoutExecutionSuccessorTests(unittest.TestCase):
+    ENDPOINT_ENV = V2FrozenTeacherPilotTests.ENDPOINT_ENV
+    PROFILE = entrypoint.MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
+    V4_PROFILE = (
+        entrypoint.MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+    )
+
+    def setUp(self) -> None:
+        self._temporary = tempfile.TemporaryDirectory(dir="/tmp")
+        self.addCleanup(self._temporary.cleanup)
+        self.root = Path(self._temporary.name)
+
+    def _identities(self, profile: str, out_name: str) -> dict:
+        from nmsim import v2_attention
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / out_name, profile=profile)
+        )
+        entrypoint._validate_args(args)
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        return entrypoint.build_v2_identities(
+            args,
+            observations,
+            repo_root=Path(entrypoint.__file__).resolve().parents[1],
+        )
+
+    def test_v5_descriptor_and_dry_run_are_frozen_and_zero_network(self):
+        out = self.root / "v5-dry"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint,
+            "_build_openai_provider",
+            side_effect=AssertionError("v5 dry-run constructed provider"),
+        ) as provider, mock.patch.object(
+            socket,
+            "create_connection",
+            side_effect=AssertionError("v5 dry-run opened socket"),
+        ) as network, redirect_stdout(io.StringIO()):
+            entrypoint.main(_pilot_args(out, profile=self.PROFILE))
+        provider.assert_not_called()
+        network.assert_not_called()
+
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        summary = _read_json(run_dir / "dry_run_summary.json")
+        profile = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(
+            entrypoint.stable_hash(profile),
+            "5be40a9f4ed6ea858d8997360512d6ba5587813d9a1d81460af65960289a1c03",
+        )
+        self.assertEqual(profile["schema_version"], "v2_teacher_pilot_profile/0.5")
+        self.assertEqual(profile["successor_scope"], "execution_only")
+        self.assertEqual(profile["httpx_phase_inactivity_timeout_seconds"], 600)
+        self.assertEqual(profile["hard_request_deadline_seconds"], 600)
+        self.assertEqual(profile["connect_timeout_seconds"], 10)
+        self.assertEqual(
+            profile["transport_release_policy"]["provider_retry_count"], 0
+        )
+        self.assertEqual(
+            profile["required_run_ids"],
+            {
+                "dry_run": "v2-teacher-pilot-v5-dry-20260813-a1",
+                "live": "v2-teacher-pilot-live-20260813-a5",
+            },
+        )
+        self.assertEqual(
+            [row["run_id"] for row in profile["predecessor_failed_runs"]],
+            [
+                "v2-teacher-pilot-live-20260812-a1",
+                "v2-teacher-pilot-live-20260812-a2",
+                "v2-teacher-pilot-live-20260813-a3",
+                "v2-teacher-pilot-live-20260813-a4",
+            ],
+        )
+        self.assertEqual(
+            profile["predecessor_failed_runs"][3]["run_manifest_sha256"],
+            "86c1deb28f85c2f49e9fd36c410c951f3fa27e8d8fa48b94cf3febf86d1f888e",
+        )
+        self.assertEqual(summary["provider_calls"], 0)
+        self.assertFalse(summary["network_access"])
+        self.assertEqual(summary["planned_teacher_requests"], 162)
+        self.assertEqual(summary["pilot_profile"], profile)
+
+        identities = manifest["v2_config_identities"]
+        self.assertEqual(
+            identities["model_request_config"]["schema_version"],
+            entrypoint.FINISH_AUDIT_REQUEST_SCHEMA_VERSION,
+        )
+        execution = identities["execution_config"]
+        self.assertEqual(execution["schema_version"], "v2_attention_execution/0.2")
+        self.assertEqual(
+            execution["httpx_phase_inactivity_timeout_seconds"], 600.0
+        )
+        self.assertEqual(execution["hard_request_deadline_seconds"], 600.0)
+        self.assertEqual(execution["connect_timeout_seconds"], 10.0)
+        self.assertEqual(execution["provider_retry_count"], 0)
+        pilot_input = next(
+            row
+            for row in manifest["inputs"]
+            if row["label"] == "v2_teacher_pilot_protocol"
+        )
+        self.assertTrue(pilot_input["path"].endswith("V2_TEACHER_PILOT_V5.md"))
+
+    def test_v5_changes_only_execution_timeout_not_wire_or_science_parameters(self):
+        from nmsim import v2_attention
+
+        with mock.patch.dict(os.environ, self.ENDPOINT_ENV, clear=False):
+            v4 = self._identities(self.V4_PROFILE, "v4-identities")
+            v5 = self._identities(self.PROFILE, "v5-identities")
+
+        v4_science = json.loads(json.dumps(v4["scientific_config"]))
+        v5_science = json.loads(json.dumps(v5["scientific_config"]))
+        self.assertEqual(
+            v4_science["teacher_sampling"].pop("pilot_profile_id"),
+            self.V4_PROFILE,
+        )
+        self.assertEqual(
+            v5_science["teacher_sampling"].pop("pilot_profile_id"), self.PROFILE
+        )
+        self.assertEqual(v5_science, v4_science)
+
+        v4_request = json.loads(json.dumps(v4["model_request_config"]))
+        v5_request = json.loads(json.dumps(v5["model_request_config"]))
+        self.assertEqual(v4_request.pop("pilot_profile_id"), self.V4_PROFILE)
+        self.assertEqual(v5_request.pop("pilot_profile_id"), self.PROFILE)
+        self.assertEqual(v5_request, v4_request)
+        self.assertEqual(
+            {
+                key: v5_request[key]
+                for key in (
+                    "model_requested",
+                    "temperature",
+                    "max_tokens",
+                    "request_seed",
+                    "provider_retry_count",
+                    "response_termination_contract",
+                )
+            },
+            {
+                "model_requested": "MiniMax-M2.7",
+                "temperature": 0.0,
+                "max_tokens": 4096,
+                "request_seed": None,
+                "provider_retry_count": 0,
+                "response_termination_contract": entrypoint.pilot_profile_descriptor(
+                    self.V4_PROFILE
+                )["response_termination_contract"],
+            },
+        )
+
+        v4_execution = v4["execution_config"]
+        v5_execution = v5["execution_config"]
+        self.assertEqual(
+            v4_execution["schema_version"], "v2_attention_execution/0.1"
+        )
+        self.assertEqual(
+            v5_execution["schema_version"], "v2_attention_execution/0.2"
+        )
+        self.assertNotIn("request_timeout_seconds", v4_execution)
+        self.assertNotIn("connect_timeout_seconds", v4_execution)
+        self.assertNotIn("provider_retry_count", v4_execution)
+        self.assertEqual(entrypoint._request_timeout_seconds(self.V4_PROFILE), 120.0)
+        self.assertIsNone(
+            entrypoint._hard_request_deadline_seconds(self.V4_PROFILE)
+        )
+        self.assertEqual(
+            v5_execution["httpx_phase_inactivity_timeout_seconds"], 600.0
+        )
+        self.assertEqual(v5_execution["hard_request_deadline_seconds"], 600.0)
+        self.assertEqual(v5_execution["connect_timeout_seconds"], 10.0)
+        self.assertEqual(v5_execution["provider_retry_count"], 0)
+        normalized_v4_execution = json.loads(json.dumps(v4_execution))
+        normalized_v5_execution = json.loads(json.dumps(v5_execution))
+        for execution in (normalized_v4_execution, normalized_v5_execution):
+            execution.pop("schema_version")
+            execution.pop("output_root_identity_sha256")
+            execution.pop("caller_run_id")
+            execution.pop("pilot_profile_id")
+        normalized_v5_execution.pop("httpx_phase_inactivity_timeout_seconds")
+        normalized_v5_execution.pop("hard_request_deadline_seconds")
+        normalized_v5_execution.pop("connect_timeout_seconds")
+        normalized_v5_execution.pop("provider_retry_count")
+        self.assertEqual(normalized_v5_execution, normalized_v4_execution)
+        self.assertNotEqual(
+            v5["v2_execution_config_hash"], v4["v2_execution_config_hash"]
+        )
+        self.assertNotEqual(
+            v5["v2_full_effective_config_hash"],
+            v4["v2_full_effective_config_hash"],
+        )
+        self.assertNotEqual(
+            v5["v2_scientific_config_hash"], v4["v2_scientific_config_hash"]
+        )
+        self.assertNotEqual(
+            v5["v2_model_request_config_hash"],
+            v4["v2_model_request_config_hash"],
+        )
+
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        rendered = [v2_attention.render_teacher_prompt(row) for row in observations]
+        prompt_hashes = [prompt.prompt_hash for prompt in rendered]
+        prompt_bytes_hash = entrypoint.stable_hash(
+            [prompt.to_messages() for prompt in rendered]
+        )
+        plan = entrypoint._sample_plan(observations, 3)
+        sample_ids = [row["sample_id"] for row in plan]
+        v4_profile = entrypoint.pilot_profile_descriptor(self.V4_PROFILE)
+        v5_profile = entrypoint.pilot_profile_descriptor(self.PROFILE)
+        self.assertEqual(
+            entrypoint.stable_hash(prompt_hashes),
+            "3a3431b90ee082ec87c32bf58f181523f9c203aeb911b30f58bd57553aea84bc",
+        )
+        self.assertEqual(
+            prompt_bytes_hash,
+            "201d981933acf51f5150525d2a3280c44f8022aa127fe0827247e248c6cbfe5f",
+        )
+        self.assertEqual(
+            entrypoint.stable_hash(sample_ids),
+            v4_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(
+            v5_profile["planned_sample_order_hash"],
+            v4_profile["planned_sample_order_hash"],
+        )
+        self.assertEqual(v5_profile["canary_sample_id"], sample_ids[0])
+        for key in (
+            "state_design_hash",
+            "planned_split_hash",
+            "planned_split_counts",
+            "planned_sample_order_hash",
+            "canary_sample_id",
+            "temperature",
+            "max_tokens",
+            "model_requested",
+            "required_reported_model",
+            "response_termination_contract",
+            "teacher_acceptance_gate",
+            "transport_release_policy",
+            "training_epochs",
+            "market_agents",
+            "market_rounds",
+            "market_seeds",
+        ):
+            with self.subTest(field=key):
+                self.assertEqual(v5_profile[key], v4_profile[key])
+
+    def test_v5_builds_600_second_zero_retry_transport_without_network(self):
+        import httpx
+
+        http_client = object()
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch(
+            "httpx.AsyncClient", return_value=http_client
+        ) as async_client, mock.patch("openai.AsyncOpenAI") as openai_client:
+            provider = entrypoint.OpenAITeacherProvider(
+                model="MiniMax-M2.7",
+                temperature=0.0,
+                max_tokens=4096,
+                workers=1,
+                request_timeout_seconds=600.0,
+                hard_request_deadline_seconds=600.0,
+            )
+
+        timeout = async_client.call_args.kwargs["timeout"]
+        self.assertIsInstance(timeout, httpx.Timeout)
+        self.assertEqual(timeout.connect, 10.0)
+        self.assertEqual(timeout.read, 600.0)
+        self.assertEqual(timeout.write, 600.0)
+        self.assertEqual(timeout.pool, 600.0)
+        self.assertFalse(async_client.call_args.kwargs["trust_env"])
+        client_kwargs = openai_client.call_args.kwargs
+        self.assertIs(client_kwargs["http_client"], http_client)
+        self.assertEqual(client_kwargs["max_retries"], 0)
+        self.assertEqual(provider.request_timeout_seconds, 600.0)
+        self.assertEqual(provider.hard_request_deadline_seconds, 600.0)
+        self.assertEqual(provider.connect_timeout_seconds, 10.0)
+        self.assertEqual(provider.provider_retry_count, 0)
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / "provider-build", profile=self.PROFILE)
+        )
+        sentinel = object()
+        with mock.patch.object(
+            entrypoint, "OpenAITeacherProvider", return_value=sentinel
+        ) as constructor:
+            built = entrypoint._build_openai_provider(args)
+        self.assertIs(built, sentinel)
+        self.assertEqual(
+            constructor.call_args.kwargs["request_timeout_seconds"], 600.0
+        )
+        self.assertEqual(
+            constructor.call_args.kwargs["hard_request_deadline_seconds"],
+            600.0,
+        )
+
+    def test_v5_hard_deadline_uses_wait_for_600_and_v4_has_no_wrapper(self):
+        class Completions:
+            def __init__(self):
+                self.calls = []
+
+            async def create(self, **kwargs):
+                self.calls.append(kwargs)
+                return SimpleNamespace(
+                    choices=[
+                        SimpleNamespace(
+                            finish_reason="stop",
+                            message=SimpleNamespace(content='{"ok":true}'),
+                        )
+                    ],
+                    model="HiggsAI",
+                    id="hard-deadline-test",
+                    usage=SimpleNamespace(
+                        prompt_tokens=1, completion_tokens=1
+                    ),
+                )
+
+        async def exercise(hard_deadline):
+            completions_api = Completions()
+            provider = object.__new__(entrypoint.OpenAITeacherProvider)
+            provider._client = SimpleNamespace(
+                chat=SimpleNamespace(completions=completions_api)
+            )
+            provider.model = "MiniMax-M2.7"
+            provider.temperature = 0.0
+            provider.max_tokens = 4096
+            provider.workers = 1
+            provider.request_timeout_seconds = 600.0
+            provider.hard_request_deadline_seconds = hard_deadline
+            provider.network_access = False
+            provider.request_count = 0
+            provider.response_count = 0
+            provider.batch_sizes = []
+            with mock.patch(
+                "experiments.v2_attention_market.asyncio.wait_for",
+                wraps=asyncio.wait_for,
+            ) as wait_for:
+                completion = (
+                    await provider.complete_many(
+                        [("system", "user")], strict_sequential=True
+                    )
+                )[0]
+            return provider, completion, wait_for, completions_api
+
+        v5_provider, v5_completion, v5_wait_for, v5_api = asyncio.run(
+            exercise(600.0)
+        )
+        self.assertEqual(v5_wait_for.call_count, 1)
+        self.assertEqual(v5_wait_for.call_args.kwargs["timeout"], 600.0)
+        self.assertEqual(v5_provider.response_count, 1)
+        self.assertEqual(v5_completion.raw_response, '{"ok":true}')
+        self.assertEqual(len(v5_api.calls), 1)
+
+        v4_provider, v4_completion, v4_wait_for, v4_api = asyncio.run(
+            exercise(None)
+        )
+        v4_wait_for.assert_not_called()
+        self.assertEqual(v4_provider.response_count, 1)
+        self.assertEqual(v4_completion.raw_response, '{"ok":true}')
+        self.assertEqual(len(v4_api.calls), 1)
+
+        for profile, expected in (
+            (self.V4_PROFILE, None),
+            (self.PROFILE, 600.0),
+        ):
+            with self.subTest(profile=profile):
+                args = entrypoint.build_argparser().parse_args(
+                    _pilot_args(self.root / profile, profile=profile)
+                )
+                sentinel = object()
+                with mock.patch.object(
+                    entrypoint, "OpenAITeacherProvider", return_value=sentinel
+                ) as constructor:
+                    self.assertIs(entrypoint._build_openai_provider(args), sentinel)
+                self.assertEqual(
+                    constructor.call_args.kwargs[
+                        "hard_request_deadline_seconds"
+                    ],
+                    expected,
+                )
+
+    def test_v5_hard_timeout_is_provider_exception_without_parse_or_release(self):
+        class NeverCompletes:
+            def __init__(self):
+                self.created = 0
+
+            async def create(self, **kwargs):
+                self.created += 1
+                await asyncio.Future()
+
+        api = NeverCompletes()
+        provider = object.__new__(entrypoint.OpenAITeacherProvider)
+        provider._client = SimpleNamespace(
+            chat=SimpleNamespace(completions=api),
+            close=mock.AsyncMock(),
+        )
+        provider.model = "MiniMax-M2.7"
+        provider.temperature = 0.0
+        provider.max_tokens = 4096
+        provider.workers = 1
+        provider.request_timeout_seconds = 600.0
+        provider.hard_request_deadline_seconds = 600.0
+        provider.network_access = False
+        provider.request_count = 0
+        provider.response_count = 0
+        provider.batch_sizes = []
+
+        real_wait_for = asyncio.wait_for
+
+        async def immediate_deadline(awaitable, *, timeout):
+            self.assertEqual(timeout, 600.0)
+            return await real_wait_for(awaitable, timeout=0.001)
+
+        out = self.root / "hard-timeout"
+        with mock.patch.dict(
+            os.environ, self.ENDPOINT_ENV, clear=False
+        ), mock.patch.object(
+            entrypoint, "_build_openai_provider", return_value=provider
+        ), mock.patch(
+            "experiments.v2_attention_market.asyncio.wait_for",
+            side_effect=immediate_deadline,
+        ) as wait_for, mock.patch.object(
+            entrypoint, "run_distillation_phase"
+        ) as distillation, mock.patch.object(
+            entrypoint, "run_market_phase"
+        ) as market, redirect_stdout(io.StringIO()), redirect_stderr(
+            io.StringIO()
+        ):
+            with self.assertRaises(SystemExit) as raised:
+                entrypoint.main(
+                    _pilot_args(out, live=True, profile=self.PROFILE)
+                )
+        self.assertEqual(raised.exception.code, 1)
+        self.assertEqual(wait_for.call_count, 1)
+        self.assertEqual(api.created, 1)
+        self.assertEqual(provider.request_count, 1)
+        self.assertEqual(provider.response_count, 0)
+        distillation.assert_not_called()
+        market.assert_not_called()
+
+        run_dir = _single_run(out)
+        manifest = _read_json(run_dir / "run_manifest.json")
+        rows = _read_jsonl(run_dir / "teacher_samples.jsonl")
+        private_rows = _read_jsonl(run_dir / "private_teacher_records.jsonl")
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "failed")
+        self.assertEqual(rows[0]["failure_code"], "provider_exception")
+        self.assertIsNone(rows[0]["response_hash"])
+        self.assertIsNone(rows[0]["decision"])
+        self.assertEqual(private_rows[0]["provider_error_type"], "TimeoutError")
+        teacher = manifest["v2_attention_market"]["teacher_samples"]
+        gate = manifest["v2_attention_market"]["teacher_acceptance_gate"]
+        self.assertEqual(teacher["attempted"], 1)
+        self.assertEqual(teacher["valid"], 0)
+        self.assertEqual(teacher["skipped"], 161)
+        self.assertEqual(teacher["failure_counts"], {"provider_exception": 1})
+        self.assertEqual(manifest["honest_n_teacher_samples"], 0)
+        self.assertEqual(manifest["completion"]["parsing"]["attempted"], 0)
+        self.assertEqual(manifest["completion"]["parsing"]["succeeded"], 0)
+        self.assertEqual(
+            manifest["completion"]["application_provider_attempts"][
+                "provider_exceptions"
+            ],
+            1,
+        )
+        self.assertEqual(gate["status"], "failed")
+        self.assertEqual(gate["reason_codes"], ["provider_exception"])
+        self.assertFalse(gate["student_and_market_released"])
+        self.assertFalse((run_dir / "aggregated_dataset.json").exists())
+        self.assertFalse((run_dir / "market_2x2_summary.json").exists())
+
+    def test_v5_wrong_a4_and_a6_ids_fail_before_provider_and_gate_is_inherited(self):
+        for run_id in (
+            "v2-teacher-pilot-live-20260813-a4",
+            "v2-teacher-pilot-live-20260813-a6",
+        ):
+            with self.subTest(run_id=run_id):
+                out = self.root / run_id
+                argv = _pilot_args(out, live=True, profile=self.PROFILE)
+                argv[argv.index("--run-id") + 1] = run_id
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError("invalid v5 built provider"),
+                ) as provider, redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises(SystemExit) as raised:
+                        entrypoint.main(argv)
+                self.assertEqual(raised.exception.code, 2)
+                provider.assert_not_called()
+                manifest = _read_json(_single_run(out) / "run_manifest.json")
+                self.assertEqual(manifest["failure_stage"], "config_validation")
+                self.assertEqual(
+                    manifest["completion"]["provider_calls"]["attempted"], 0
+                )
+
+        from nmsim import v2_attention
+
+        args = entrypoint.build_argparser().parse_args(
+            _pilot_args(self.root / "gate", profile=self.PROFILE)
+        )
+        observations = v2_attention.generate_state_design(
+            54, 20260811, study_id="v2-attention-market"
+        )
+        plan = entrypoint._sample_plan(observations, 3)
+        rows = [
+            {
+                "state_id": item["observation"].state_id,
+                "status": "valid",
+                "model_requested": "MiniMax-M2.7",
+                "reported_model": "HiggsAI",
+                "finish_reason": "stop",
+            }
+            for item in plan
+        ]
+        passed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=rows,
+            reported_models=["HiggsAI"] * 162,
+            attempted_samples=162,
+        )
+        self.assertEqual(passed["status"], "passed")
+        self.assertTrue(passed["student_and_market_released"])
+        rows[0]["finish_reason"] = "length"
+        failed = entrypoint._teacher_gate_result(
+            args=args,
+            plan=plan,
+            public_rows=rows,
+            reported_models=["HiggsAI"] * 162,
+            attempted_samples=162,
+        )
+        self.assertEqual(failed["status"], "failed")
+        self.assertFalse(failed["student_and_market_released"])
+
+    def test_v5_a4_and_a5_directories_are_o_excl_immutable(self):
+        for run_id in (
+            "v2-teacher-pilot-live-20260813-a4",
+            "v2-teacher-pilot-live-20260813-a5",
+        ):
+            with self.subTest(run_id=run_id):
+                out = self.root / run_id
+                run_dir = out / "runs" / run_id
+                run_dir.mkdir(parents=True)
+                sentinel = run_dir / "immutable-sentinel.bin"
+                sentinel.write_bytes(b"immutable-v5-boundary\x00")
+                before_hash = _sha256(sentinel)
+                before_entries = sorted(path.name for path in run_dir.iterdir())
+                argv = _pilot_args(out, live=True, profile=self.PROFILE)
+                argv[argv.index("--run-id") + 1] = run_id
+                with mock.patch.dict(
+                    os.environ, self.ENDPOINT_ENV, clear=False
+                ), mock.patch.object(
+                    entrypoint,
+                    "_build_openai_provider",
+                    side_effect=AssertionError("O_EXCL path built provider"),
+                ) as provider, redirect_stdout(io.StringIO()), redirect_stderr(
+                    io.StringIO()
+                ):
+                    with self.assertRaises((SystemExit, FileExistsError)) as raised:
+                        entrypoint.main(argv)
+                if isinstance(raised.exception, SystemExit):
+                    self.assertEqual(raised.exception.code, 2)
+                provider.assert_not_called()
+                self.assertEqual(_sha256(sentinel), before_hash)
+                self.assertEqual(
+                    sorted(path.name for path in run_dir.iterdir()), before_entries
                 )
 
 

@@ -14,7 +14,7 @@ secret-free identity，不得简称为“V2 Config hash”：
 |---|---|---|
 | `v2_scientific_config_hash` | `v2_attention_market/0.1` | 固定日频 state/action/prompt 合同、状态设计、family-grouped split 的显式阈值/分配/回退规则、train-only OOD 几何与 `abs(z)>3.0` 规则、Student/baseline 架构与损失、整数清算/信用设施规则及 budget x behavior 四格参数 |
 | `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3 为 `v2_teacher_request/0.2` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；v3 还绑定 termination provenance/验收合同；不包含 credential |
-| `v2_execution_config_hash` | `v2_attention_execution/0.1` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1` |
+| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5 为 `v2_attention_execution/0.2` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5 还显式绑定 hard wall-clock request deadline、HTTPX phase-inactivity timeout、connect timeout 与 retry policy |
 | `v2_full_effective_config_hash` | `v2_attention_full_effective_config/0.1` | 显式 envelope，绑定上述 scientific/model-request/execution 三个 identity 及各自 schema |
 
 每次报告这些值时，还必须标出实际 managed run 目录/执行上下文与
@@ -42,6 +42,30 @@ successor-profile identity 的保守区分，不是请求载荷或科学
 权限是执行前提，不是 Provider 稳定性或模型权重身份声明。
 具体 v4 证据、非复用边界和冻结命令见
 `docs/V2_TEACHER_PILOT_V4.md`。
+
+Long-timeout execution successor v5 继续保持 v4 的科学设计、
+model-generation payload、`v2_teacher_request/0.2` finish gate 与
+`v2_teacher_request/0.1` sample identity。v5 新增每个 logical Provider
+request 的 600 秒 hard wall-clock deadline，并把 HTTPX read/write/pool
+各 phase-inactivity timeout 从 120 秒改为 600 秒；connect timeout 仍为
+10 秒，application retry 仍为零。hard deadline 限制整个 logical request
+的墙钟耗时；HTTPX phase timeout 只限制相应阶段的不活动时间，不能称为
+total timeout。上述 transport policy 必须以
+`hard_request_deadline_seconds=600`、
+`httpx_phase_inactivity_timeout_seconds=600`、
+`connect_timeout_seconds=10`、`provider_retry_count=0` 进入 v5 的
+`v2_attention_execution/0.2` 投影；v1-v4 保持原有
+`v2_attention_execution/0.1` 投影形状。这是 profile-specific additive
+schema successor，不是对旧运行的迁移：历史 v1-v4 manifest 不回填、
+不重写，也不得按 0.2 重新解释；v1-v4 没有 hard wall-clock request
+deadline，不能从其 HTTPX phase timeout 反推一个。该变更使
+`v2_execution_config_hash` 与 `v2_full_effective_config_hash`
+形成新 identity。两个 600 秒控制都只是执行上限，不是重试、端点稳定性
+声明或成功保证。由于 `pilot_profile_id` 仍被 model-request config 保守绑定，v5 的
+`v2_model_request_config_hash` 也预期与 v4 不同，但不得把该差异误报为
+prompt、model、temperature、token cap、state plan 或 termination contract
+改变。具体 a4 失败证据、v5 非复用边界和冻结命令见
+`docs/V2_TEACHER_PILOT_V5.md`。
 
 V2 的 real-provider request 明确不发送 seed：
 `request_seed=null` 且

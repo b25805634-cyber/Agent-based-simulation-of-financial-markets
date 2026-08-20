@@ -45,6 +45,7 @@ MODEL_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.1"
 FINISH_AUDIT_REQUEST_SCHEMA_VERSION = "v2_teacher_request/0.2"
 SAMPLE_IDENTITY_SCHEMA_VERSION = "v2_teacher_request/0.1"
 EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.1"
+TRANSPORT_AUDIT_EXECUTION_SCHEMA_VERSION = "v2_attention_execution/0.2"
 FULL_CONFIG_SCHEMA_VERSION = "v2_attention_full_effective_config/0.1"
 ALLOWED_PROVIDERS = frozenset({"fake_test_teacher", "fake_null_teacher", "openai"})
 MINIMAX_M27_JOINT54X3_PILOT = "minimax_m27_joint54x3_v1"
@@ -57,12 +58,19 @@ MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT = (
 MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT = (
     "minimax_m27_higgsai_finish_audit_external_joint54x3_v4"
 )
+MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT = (
+    "minimax_m27_higgsai_finish_audit_long_timeout_joint54x3_v5"
+)
+DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
+V5_REQUEST_TIMEOUT_SECONDS = 600.0
+PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PILOT_PROFILES = frozenset(
     {
         MINIMAX_M27_JOINT54X3_PILOT,
         MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
     }
 )
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
@@ -105,14 +113,19 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
     }
     finish_audit_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
     }
-    external_execution_successor_profile = (
-        profile_id
-        == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+    external_execution_successor_profile = profile_id in {
+        MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
+    }
+    long_timeout_execution_successor_profile = (
+        profile_id == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
     )
     required_reported_model = (
         "HiggsAI"
@@ -121,15 +134,19 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     )
     descriptor = {
         "schema_version": (
-            "v2_teacher_pilot_profile/0.4"
-            if external_execution_successor_profile
+            "v2_teacher_pilot_profile/0.5"
+            if long_timeout_execution_successor_profile
             else (
-                "v2_teacher_pilot_profile/0.3"
-                if finish_audit_profile
+                "v2_teacher_pilot_profile/0.4"
+                if external_execution_successor_profile
                 else (
-                    "v2_teacher_pilot_profile/0.2"
-                    if higgs_alias_profile
-                    else "v2_teacher_pilot_profile/0.1"
+                    "v2_teacher_pilot_profile/0.3"
+                    if finish_audit_profile
+                    else (
+                        "v2_teacher_pilot_profile/0.2"
+                        if higgs_alias_profile
+                        else "v2_teacher_pilot_profile/0.1"
+                    )
                 )
             )
         ),
@@ -220,6 +237,21 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
+            if long_timeout_execution_successor_profile:
+                descriptor["predecessor_failed_runs"].append(
+                    {
+                        "run_id": "v2-teacher-pilot-live-20260813-a4",
+                        "status": "failed",
+                        "attempted": 6,
+                        "responses": 5,
+                        "valid": 5,
+                        "skipped": 156,
+                        "failure_code": "provider_exception",
+                        "provider_error_type": "APITimeoutError",
+                        "run_manifest_sha256": "86c1deb28f85c2f49e9fd36c410c951f3fa27e8d8fa48b94cf3febf86d1f888e",
+                        "reuse_supplement_or_merge_forbidden": True,
+                    }
+                )
             descriptor["response_termination_contract"] = {
                 "finish_reason_source": "provider_sdk_choice_finish_reason",
                 "required_finish_reason": "stop",
@@ -230,18 +262,44 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             if external_execution_successor_profile:
                 descriptor["successor_scope"] = "execution_only"
                 descriptor["external_network_required"] = True
-                descriptor["engineering_change_from_v3"] = {
-                    "motivation": "a3 failed before any provider response because the endpoint was unreachable from its execution environment",
-                    "model_request_changed": False,
-                    "teacher_prompt_changed": False,
-                    "state_design_changed": False,
-                    "sample_identity_changed": False,
-                    "finish_reason_contract_changed": False,
-                }
-                descriptor["required_run_ids"] = {
-                    "dry_run": "v2-teacher-pilot-v4-dry-20260813-a1",
-                    "live": "v2-teacher-pilot-live-20260813-a4",
-                }
+                if long_timeout_execution_successor_profile:
+                    descriptor["httpx_phase_inactivity_timeout_seconds"] = 600
+                    descriptor["hard_request_deadline_seconds"] = 600
+                    descriptor["connect_timeout_seconds"] = 10
+                    descriptor["engineering_change_from_v4"] = {
+                        "httpx_phase_inactivity_timeout_seconds": {
+                            "from": 120,
+                            "to": 600,
+                        },
+                        "hard_request_deadline_seconds": {
+                            "from": None,
+                            "to": 600,
+                        },
+                        "motivation": "a4 request 6 produced APITimeoutError after the frozen 120-second client timeout",
+                        "model_request_changed": False,
+                        "teacher_prompt_changed": False,
+                        "state_design_changed": False,
+                        "sample_identity_changed": False,
+                        "finish_reason_contract_changed": False,
+                        "provider_retry_count_changed": False,
+                    }
+                    descriptor["required_run_ids"] = {
+                        "dry_run": "v2-teacher-pilot-v5-dry-20260813-a1",
+                        "live": "v2-teacher-pilot-live-20260813-a5",
+                    }
+                else:
+                    descriptor["engineering_change_from_v3"] = {
+                        "motivation": "a3 failed before any provider response because the endpoint was unreachable from its execution environment",
+                        "model_request_changed": False,
+                        "teacher_prompt_changed": False,
+                        "state_design_changed": False,
+                        "sample_identity_changed": False,
+                        "finish_reason_contract_changed": False,
+                    }
+                    descriptor["required_run_ids"] = {
+                        "dry_run": "v2-teacher-pilot-v4-dry-20260813-a1",
+                        "live": "v2-teacher-pilot-live-20260813-a4",
+                    }
             else:
                 descriptor["engineering_change_from_v2"] = {
                     "max_tokens": {"from": 1024, "to": 4096},
@@ -274,9 +332,28 @@ def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
     if profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
     }:
         return FINISH_AUDIT_REQUEST_SCHEMA_VERSION
     return MODEL_REQUEST_SCHEMA_VERSION
+
+
+def _request_timeout_seconds(profile_id: Optional[str]) -> float:
+    if profile_id == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT:
+        return V5_REQUEST_TIMEOUT_SECONDS
+    return DEFAULT_REQUEST_TIMEOUT_SECONDS
+
+
+def _hard_request_deadline_seconds(profile_id: Optional[str]) -> Optional[float]:
+    if profile_id == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT:
+        return V5_REQUEST_TIMEOUT_SECONDS
+    return None
+
+
+def _execution_schema_version(profile_id: Optional[str]) -> str:
+    if profile_id == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT:
+        return TRANSPORT_AUDIT_EXECUTION_SCHEMA_VERSION
+    return EXECUTION_SCHEMA_VERSION
 
 
 def split_regime_descriptor() -> dict[str, Any]:
@@ -582,17 +659,39 @@ class OpenAITeacherProvider:
         temperature: float,
         max_tokens: int,
         workers: int,
+        request_timeout_seconds: float = DEFAULT_REQUEST_TIMEOUT_SECONDS,
+        hard_request_deadline_seconds: Optional[float] = None,
     ) -> None:
         import httpx
         from openai import AsyncOpenAI
 
+        timeout_seconds = float(request_timeout_seconds)
+        if not math.isfinite(timeout_seconds) or timeout_seconds <= 0.0:
+            raise V2ProviderGuardError(
+                "request_timeout_seconds must be finite and positive"
+            )
+        hard_deadline_seconds = (
+            None
+            if hard_request_deadline_seconds is None
+            else float(hard_request_deadline_seconds)
+        )
+        if hard_deadline_seconds is not None and (
+            not math.isfinite(hard_deadline_seconds)
+            or hard_deadline_seconds <= 0.0
+        ):
+            raise V2ProviderGuardError(
+                "hard_request_deadline_seconds must be finite and positive"
+            )
         base_url = os.environ.get("OPENAI_BASE_URL")
         if not base_url:
             raise V2ProviderGuardError("OPENAI_BASE_URL is required for --provider openai")
         api_key = os.environ.get("OPENAI_API_KEY") or "EMPTY"
         self._http = httpx.AsyncClient(
             trust_env=False,
-            timeout=httpx.Timeout(120.0, connect=10.0),
+            timeout=httpx.Timeout(
+                timeout_seconds,
+                connect=PROVIDER_CONNECT_TIMEOUT_SECONDS,
+            ),
             limits=httpx.Limits(
                 max_connections=workers,
                 max_keepalive_connections=workers,
@@ -608,6 +707,11 @@ class OpenAITeacherProvider:
         self.temperature = float(temperature)
         self.max_tokens = int(max_tokens)
         self.workers = int(workers)
+        self.request_timeout_seconds = timeout_seconds
+        self.httpx_phase_inactivity_timeout_seconds = timeout_seconds
+        self.hard_request_deadline_seconds = hard_deadline_seconds
+        self.connect_timeout_seconds = PROVIDER_CONNECT_TIMEOUT_SECONDS
+        self.provider_retry_count = 0
         self.network_access = False
         self.request_count = 0
         self.response_count = 0
@@ -627,7 +731,7 @@ class OpenAITeacherProvider:
             self.request_count += 1
             self.network_access = True
             try:
-                response = await self._client.chat.completions.create(
+                request = self._client.chat.completions.create(
                     model=self.model,
                     max_tokens=self.max_tokens,
                     temperature=self.temperature,
@@ -636,6 +740,16 @@ class OpenAITeacherProvider:
                         {"role": "user", "content": user},
                     ],
                 )
+                hard_deadline = getattr(
+                    self, "hard_request_deadline_seconds", None
+                )
+                if hard_deadline is None:
+                    response = await request
+                else:
+                    response = await asyncio.wait_for(
+                        request,
+                        timeout=hard_deadline,
+                    )
             except Exception as error:
                 return index, TeacherCompletion(
                     raw_response=None,
@@ -904,6 +1018,13 @@ def _validate_args(args: argparse.Namespace) -> int:
             "market_agents": args.market_agents,
             "market_rounds": args.market_rounds,
             "market_seeds": args.market_seeds,
+            "httpx_phase_inactivity_timeout_seconds": _request_timeout_seconds(
+                args.pilot_profile
+            ),
+            "hard_request_deadline_seconds": _hard_request_deadline_seconds(
+                args.pilot_profile
+            ),
+            "connect_timeout_seconds": PROVIDER_CONNECT_TIMEOUT_SECONDS,
         }
         mismatches = [
             key for key, expected in pilot.items()
@@ -951,6 +1072,10 @@ def _build_openai_provider(args: argparse.Namespace) -> OpenAITeacherProvider:
         temperature=args.temperature,
         max_tokens=args.max_tokens,
         workers=args.workers,
+        request_timeout_seconds=_request_timeout_seconds(args.pilot_profile),
+        hard_request_deadline_seconds=_hard_request_deadline_seconds(
+            args.pilot_profile
+        ),
     )
 
 
@@ -1429,6 +1554,29 @@ def run_teacher_phase(
             "application_concurrency_limit": args.workers,
             "provider_connection_limit": args.workers,
         }
+        if args.pilot_profile == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT:
+            runtime_details.update(
+                {
+                    "httpx_phase_inactivity_timeout_seconds": (
+                        _request_timeout_seconds(args.pilot_profile)
+                    ),
+                    "hard_request_deadline_seconds": (
+                        _hard_request_deadline_seconds(args.pilot_profile)
+                    ),
+                    "connect_timeout_seconds": PROVIDER_CONNECT_TIMEOUT_SECONDS,
+                    "provider_retry_count": 0,
+                }
+            )
+        else:
+            runtime_details.update(
+                {
+                    "request_timeout_seconds": _request_timeout_seconds(
+                        args.pilot_profile
+                    ),
+                    "connect_timeout_seconds": PROVIDER_CONNECT_TIMEOUT_SECONDS,
+                    "provider_retry_count": 0,
+                }
+            )
     else:
         provider = FakeTeacherProvider(args.provider)
         runtime_details = {
@@ -2672,7 +2820,7 @@ def build_v2_identities(
             "response_termination_contract"
         ]
     execution = {
-        "schema_version": EXECUTION_SCHEMA_VERSION,
+        "schema_version": _execution_schema_version(args.pilot_profile),
         "identity": "v2_execution_config",
         "worker_count": args.workers,
         "dry_run": bool(args.dry_run),
@@ -2696,6 +2844,19 @@ def build_v2_identities(
         "fail_fast_after_any_resolved_teacher_failure": pilot is not None,
         "v2_execution_component_fingerprint": execution_component_fingerprint,
     }
+    if args.pilot_profile == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT:
+        execution.update(
+            {
+                "httpx_phase_inactivity_timeout_seconds": _request_timeout_seconds(
+                    args.pilot_profile
+                ),
+                "hard_request_deadline_seconds": _hard_request_deadline_seconds(
+                    args.pilot_profile
+                ),
+                "connect_timeout_seconds": PROVIDER_CONNECT_TIMEOUT_SECONDS,
+                "provider_retry_count": 0,
+            }
+        )
     scientific_hash = stable_hash(scientific)
     request_hash = stable_hash(model_request)
     execution_hash = stable_hash(execution)
@@ -3378,18 +3539,23 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_paths["v2_teacher_pilot_protocol"] = (
             repo_root
             / (
-                "docs/V2_TEACHER_PILOT_V4.md"
+                "docs/V2_TEACHER_PILOT_V5.md"
                 if args.pilot_profile
-                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+                == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
                 else (
-                    "docs/V2_TEACHER_PILOT_V3.md"
+                    "docs/V2_TEACHER_PILOT_V4.md"
                     if args.pilot_profile
-                    == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                    == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
                     else (
-                        "docs/V2_TEACHER_PILOT_V2.md"
+                        "docs/V2_TEACHER_PILOT_V3.md"
                         if args.pilot_profile
-                        == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-                        else "docs/V2_TEACHER_PILOT.md"
+                        == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                        else (
+                            "docs/V2_TEACHER_PILOT_V2.md"
+                            if args.pilot_profile
+                            == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                            else "docs/V2_TEACHER_PILOT.md"
+                        )
                     )
                 )
             )
@@ -3564,6 +3730,7 @@ __all__ = [
     "MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT",
+    "MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",
