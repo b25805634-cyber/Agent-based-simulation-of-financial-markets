@@ -13,8 +13,8 @@ secret-free identity，不得简称为“V2 Config hash”：
 | Identity | Schema | 绑定范围 |
 |---|---|---|
 | `v2_scientific_config_hash` | `v2_attention_market/0.1` | 固定日频 state/action/prompt 合同、状态设计、family-grouped split 的显式阈值/分配/回退规则、train-only OOD 几何与 `abs(z)>3.0` 规则、Student/baseline 架构与损失、整数清算/信用设施规则及 budget x behavior 四格参数 |
-| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3-v6 为 `v2_teacher_request/0.2` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；v3-v6 还绑定 termination provenance/验收合同；不包含 credential |
-| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5-v6 为 `v2_attention_execution/0.2` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5-v6 还显式绑定 hard wall-clock request deadline、HTTPX phase-inactivity timeout、connect timeout 与 retry policy |
+| `v2_model_request_config_hash` | `v2_teacher_request/0.1`；finish-audit v3-v7 为 `v2_teacher_request/0.2` | Teacher provider、请求 model、temperature、token cap、state/replicate 请求计划；v3-v7 还绑定 termination provenance/验收合同；不包含 credential |
+| `v2_execution_config_hash` | `v2_attention_execution/0.1`；long-timeout v5-v7 为 `v2_attention_execution/0.2` | worker 数、dry/live 执行模式、output/run-id 执行身份与 `v2_execution_component_fingerprint/0.1`；v5-v7 还显式绑定 hard wall-clock request deadline、HTTPX phase-inactivity timeout、connect timeout 与 retry policy |
 | `v2_full_effective_config_hash` | `v2_attention_full_effective_config/0.1` | 显式 envelope，绑定上述 scientific/model-request/execution 三个 identity 及各自 schema |
 
 每次报告这些值时，还必须标出实际 managed run 目录/执行上下文与
@@ -86,6 +86,26 @@ run/profile 身份仍要求独立的 `v2_execution_config_hash` 与
 但不是 v6 成功、端点连续稳定或更长 response 必然有效的
 声明。具体 a5 失败证据、v6 非复用边界和冻结命令见
 `docs/V2_TEACHER_PILOT_V6.md`。
+
+Documented-cap and extended-timeout successor v7 继续使用
+`v2_teacher_request/0.2` request/row schema 和
+`v2_teacher_request/0.1` sample identity，但把唯一的
+model-generation request 字段 `max_tokens` 从 16384 改为
+65536。这是明确的 request-semantic change，必须使
+`v2_model_request_config_hash` 与 v6 不同；不得把它误报为仅
+profile identity 或 execution change。v7 同时保持
+`v2_attention_execution/0.2` schema，但把 hard wall-clock deadline
+和 HTTPX read/write/pool phase-inactivity timeout 各从 600 秒改为
+1800 秒；connect timeout 仍为 10 秒，retry 仍为零。因此
+`v2_execution_config_hash` 与 `v2_full_effective_config_hash` 也必须
+与 v6 不同。temperature 仍为 0，`top_p`/`top_k` 仍不发送；
+prompt、state、sample ID/顺序、exact-`stop` gate、Student/market 与
+privacy boundary 不变。官方 MiniMax 文档对非 M3 模型推荐
+65536 且明确 M2.x thinking 不能关闭，以及当前部署的
+vLLM/OpenAPI/tokenization 诊断，都只是新 successor 的运行依据；
+它们不是端点稳定、模型行为或 v7 成功的证据。具体 a6 失败
+证据、a1-a6 非复用边界、官方链接和冻结命令见
+`docs/V2_TEACHER_PILOT_V7.md`。
 
 V2 的 real-provider request 明确不发送 seed：
 `request_seed=null` 且

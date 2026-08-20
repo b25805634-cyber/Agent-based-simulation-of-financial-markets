@@ -64,8 +64,12 @@ MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT = (
 MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT = (
     "minimax_m27_higgsai_finish_audit_timeout600_output16384_joint54x3_v6"
 )
+MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT = (
+    "minimax_m27_higgsai_finish_audit_timeout1800_output65536_joint54x3_v7"
+)
 DEFAULT_REQUEST_TIMEOUT_SECONDS = 120.0
 V5_REQUEST_TIMEOUT_SECONDS = 600.0
+V7_REQUEST_TIMEOUT_SECONDS = 1800.0
 PROVIDER_CONNECT_TIMEOUT_SECONDS = 10.0
 PILOT_PROFILES = frozenset(
     {
@@ -75,6 +79,7 @@ PILOT_PROFILES = frozenset(
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }
 )
 SPLIT_FRACTIONS = (0.70, 0.15, 0.15)
@@ -119,24 +124,31 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }
     finish_audit_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }
     external_execution_successor_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }
     long_timeout_execution_successor_profile = profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }
     output_budget_successor_profile = (
         profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
+    )
+    expanded_output_budget_and_timeout_successor_profile = (
+        profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
     )
     required_reported_model = (
         "HiggsAI"
@@ -145,21 +157,25 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
     )
     descriptor = {
         "schema_version": (
-            "v2_teacher_pilot_profile/0.6"
-            if output_budget_successor_profile
+            "v2_teacher_pilot_profile/0.7"
+            if expanded_output_budget_and_timeout_successor_profile
             else (
-                "v2_teacher_pilot_profile/0.5"
-                if long_timeout_execution_successor_profile
+                "v2_teacher_pilot_profile/0.6"
+                if output_budget_successor_profile
                 else (
-                    "v2_teacher_pilot_profile/0.4"
-                    if external_execution_successor_profile
+                    "v2_teacher_pilot_profile/0.5"
+                    if long_timeout_execution_successor_profile
                     else (
-                        "v2_teacher_pilot_profile/0.3"
-                        if finish_audit_profile
+                        "v2_teacher_pilot_profile/0.4"
+                        if external_execution_successor_profile
                         else (
-                            "v2_teacher_pilot_profile/0.2"
-                            if higgs_alias_profile
-                            else "v2_teacher_pilot_profile/0.1"
+                            "v2_teacher_pilot_profile/0.3"
+                            if finish_audit_profile
+                            else (
+                                "v2_teacher_pilot_profile/0.2"
+                                if higgs_alias_profile
+                                else "v2_teacher_pilot_profile/0.1"
+                            )
                         )
                     )
                 )
@@ -177,9 +193,13 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
         "seed": 20260811,
         "temperature": 0.0,
         "max_tokens": (
-            16384
-            if output_budget_successor_profile
-            else (4096 if finish_audit_profile else 1024)
+            65536
+            if expanded_output_budget_and_timeout_successor_profile
+            else (
+                16384
+                if output_budget_successor_profile
+                else (4096 if finish_audit_profile else 1024)
+            )
         ),
         "workers": 1,
         "training_epochs": 400,
@@ -271,7 +291,10 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
-            if output_budget_successor_profile:
+            if (
+                output_budget_successor_profile
+                or expanded_output_budget_and_timeout_successor_profile
+            ):
                 descriptor["predecessor_failed_runs"].append(
                     {
                         "run_id": "v2-teacher-pilot-live-20260813-a5",
@@ -290,6 +313,26 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
                         "reuse_supplement_or_merge_forbidden": True,
                     }
                 )
+            if expanded_output_budget_and_timeout_successor_profile:
+                descriptor["predecessor_failed_runs"].append(
+                    {
+                        "run_id": "v2-teacher-pilot-live-20260820-a6",
+                        "status": "failed",
+                        "attempted": 33,
+                        "responses": 33,
+                        "valid": 32,
+                        "honest_n": 32,
+                        "skipped": 129,
+                        "failure_code": "provider_response_shape_invalid",
+                        "finish_reason": "length",
+                        "output_tokens": 16384,
+                        "parsing_succeeded": 32,
+                        "student_runs": 0,
+                        "market_runs": 0,
+                        "run_manifest_sha256": "341033808a8c15f02282100ab56b05edd14838fec004f7e65be7737a970fcfbb",
+                        "reuse_supplement_or_merge_forbidden": True,
+                    }
+                )
             descriptor["response_termination_contract"] = {
                 "finish_reason_source": "provider_sdk_choice_finish_reason",
                 "required_finish_reason": "stop",
@@ -299,7 +342,54 @@ def pilot_profile_descriptor(profile_id: Optional[str]) -> Optional[dict[str, An
             }
             if external_execution_successor_profile:
                 descriptor["external_network_required"] = True
-                if output_budget_successor_profile:
+                if expanded_output_budget_and_timeout_successor_profile:
+                    descriptor["successor_scope"] = (
+                        "output_budget_and_execution_timeout"
+                    )
+                    descriptor["httpx_phase_inactivity_timeout_seconds"] = 1800
+                    descriptor["hard_request_deadline_seconds"] = 1800
+                    descriptor["connect_timeout_seconds"] = 10
+                    descriptor["engineering_change_from_v6"] = {
+                        "max_tokens": {"from": 16384, "to": 65536},
+                        "httpx_phase_inactivity_timeout_seconds": {
+                            "from": 600,
+                            "to": 1800,
+                        },
+                        "hard_request_deadline_seconds": {
+                            "from": 600,
+                            "to": 1800,
+                        },
+                        "motivation": (
+                            "a6 request 33 resolved with finish_reason=length at "
+                            "output_tokens=16384 after about 202 seconds; the larger "
+                            "output allowance requires a matching non-streaming "
+                            "transport and hard-deadline budget"
+                        ),
+                        "model_request_change_scope": ["max_tokens"],
+                        "model_request_changed": True,
+                        "execution_change_scope": [
+                            "httpx_phase_inactivity_timeout_seconds",
+                            "hard_request_deadline_seconds",
+                        ],
+                        "execution_contract_changed": True,
+                        "temperature_changed": False,
+                        "top_p_sent": False,
+                        "top_k_sent": False,
+                        "connect_timeout_changed": False,
+                        "teacher_prompt_changed": False,
+                        "state_design_changed": False,
+                        "sample_identity_changed": False,
+                        "sample_order_changed": False,
+                        "finish_reason_contract_changed": False,
+                        "provider_retry_count_changed": False,
+                        "student_changed": False,
+                        "market_changed": False,
+                    }
+                    descriptor["required_run_ids"] = {
+                        "dry_run": "v2-teacher-pilot-v7-dry-20260820-a1",
+                        "live": "v2-teacher-pilot-live-20260820-a7",
+                    }
+                elif output_budget_successor_profile:
                     descriptor["successor_scope"] = (
                         "output_budget_model_request_only"
                     )
@@ -406,12 +496,15 @@ def _teacher_request_schema_version(profile_id: Optional[str]) -> str:
         MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }:
         return FINISH_AUDIT_REQUEST_SCHEMA_VERSION
     return MODEL_REQUEST_SCHEMA_VERSION
 
 
 def _request_timeout_seconds(profile_id: Optional[str]) -> float:
+    if profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT:
+        return V7_REQUEST_TIMEOUT_SECONDS
     if profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
@@ -421,6 +514,8 @@ def _request_timeout_seconds(profile_id: Optional[str]) -> float:
 
 
 def _hard_request_deadline_seconds(profile_id: Optional[str]) -> Optional[float]:
+    if profile_id == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT:
+        return V7_REQUEST_TIMEOUT_SECONDS
     if profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
@@ -433,6 +528,7 @@ def _execution_schema_version(profile_id: Optional[str]) -> str:
     if profile_id in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }:
         return TRANSPORT_AUDIT_EXECUTION_SCHEMA_VERSION
     return EXECUTION_SCHEMA_VERSION
@@ -1639,6 +1735,7 @@ def run_teacher_phase(
         if args.pilot_profile in {
             MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
             MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+            MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
         }:
             runtime_details.update(
                 {
@@ -2932,6 +3029,7 @@ def build_v2_identities(
     if args.pilot_profile in {
         MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT,
         MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT,
+        MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT,
     }:
         execution.update(
             {
@@ -3627,26 +3725,31 @@ def main(argv: Optional[Sequence[str]] = None) -> None:
         input_paths["v2_teacher_pilot_protocol"] = (
             repo_root
             / (
-                "docs/V2_TEACHER_PILOT_V6.md"
+                "docs/V2_TEACHER_PILOT_V7.md"
                 if args.pilot_profile
-                == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
+                == MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT
                 else (
-                    "docs/V2_TEACHER_PILOT_V5.md"
+                    "docs/V2_TEACHER_PILOT_V6.md"
                     if args.pilot_profile
-                    == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
+                    == MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT
                     else (
-                        "docs/V2_TEACHER_PILOT_V4.md"
+                        "docs/V2_TEACHER_PILOT_V5.md"
                         if args.pilot_profile
-                        == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
+                        == MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT
                         else (
-                            "docs/V2_TEACHER_PILOT_V3.md"
+                            "docs/V2_TEACHER_PILOT_V4.md"
                             if args.pilot_profile
-                            == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                            == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT
                             else (
-                                "docs/V2_TEACHER_PILOT_V2.md"
+                                "docs/V2_TEACHER_PILOT_V3.md"
                                 if args.pilot_profile
-                                == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
-                                else "docs/V2_TEACHER_PILOT.md"
+                                == MINIMAX_M27_HIGGSAI_FINISH_AUDIT_JOINT54X3_PILOT
+                                else (
+                                    "docs/V2_TEACHER_PILOT_V2.md"
+                                    if args.pilot_profile
+                                    == MINIMAX_M27_REQUEST_HIGGSAI_REPORTED_JOINT54X3_PILOT
+                                    else "docs/V2_TEACHER_PILOT.md"
+                                )
                             )
                         )
                     )
@@ -3825,6 +3928,7 @@ __all__ = [
     "MINIMAX_M27_HIGGSAI_FINISH_AUDIT_EXTERNAL_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_LONG_TIMEOUT_JOINT54X3_PILOT",
     "MINIMAX_M27_HIGGSAI_TIMEOUT600_OUTPUT16384_JOINT54X3_PILOT",
+    "MINIMAX_M27_HIGGSAI_TIMEOUT1800_OUTPUT65536_JOINT54X3_PILOT",
     "PILOT_PROFILES",
     "PROTOCOL_VERSION",
     "TeacherCompletion",
