@@ -1,0 +1,1564 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="智能体金融市场项目个人详解与架构工作手册：包含大白话解释、科学边界、代码架构、执行清单与证据索引。">
+  <meta name="color-scheme" content="light">
+  <title>智能体金融市场｜个人详解与架构工作手册</title>
+  <style>
+    :root {
+      --ink: #162531;
+      --ink-soft: #314552;
+      --muted: #667883;
+      --paper: #fffefb;
+      --canvas: #edf2f2;
+      --card: #ffffff;
+      --line: #d9e2e3;
+      --line-strong: #b7c7c9;
+      --teal: #0b6770;
+      --teal-2: #16818a;
+      --teal-soft: #e8f4f3;
+      --blue: #315f8c;
+      --blue-soft: #eaf1f8;
+      --amber: #956313;
+      --amber-soft: #fff5df;
+      --red: #9a433e;
+      --red-soft: #fcebea;
+      --green: #26705c;
+      --green-soft: #e8f4ee;
+      --violet: #69588d;
+      --violet-soft: #f0edf7;
+      --shadow: 0 16px 50px rgba(28, 57, 64, .08);
+      --radius: 18px;
+      --sidebar: 244px;
+    }
+
+    * { box-sizing: border-box; }
+    html { scroll-behavior: smooth; }
+    body {
+      margin: 0;
+      color: var(--ink);
+      background:
+        radial-gradient(circle at 8% 2%, rgba(11,103,112,.09), transparent 28rem),
+        linear-gradient(180deg, #f4f7f6 0, var(--canvas) 45rem);
+      font-family: "Noto Sans CJK SC", "Source Han Sans SC", "PingFang SC",
+        "Microsoft YaHei", system-ui, -apple-system, sans-serif;
+      font-size: 16px;
+      line-height: 1.72;
+    }
+    a { color: var(--teal); text-underline-offset: 3px; }
+    a:hover { color: var(--teal-2); }
+    code, .mono {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", monospace;
+    }
+    code {
+      padding: .08em .3em;
+      border-radius: 5px;
+      background: #eef3f3;
+      font-size: .9em;
+    }
+    pre {
+      margin: 16px 0;
+      padding: 16px 18px;
+      overflow-x: auto;
+      border: 1px solid var(--line);
+      border-radius: 12px;
+      color: var(--ink-soft);
+      background: #f5f8f8;
+      font: 12px/1.65 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+        "Liberation Mono", monospace;
+      white-space: pre;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: var(--sidebar) minmax(0, 1fr);
+      gap: 28px;
+      width: min(1440px, calc(100% - 36px));
+      margin: 18px auto 70px;
+      align-items: start;
+    }
+    .sidebar {
+      position: sticky;
+      top: 18px;
+      max-height: calc(100vh - 36px);
+      overflow: auto;
+      padding: 22px 18px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: rgba(255,255,255,.9);
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(12px);
+    }
+    .brand {
+      display: flex;
+      gap: 10px;
+      align-items: center;
+      margin-bottom: 18px;
+      font-weight: 760;
+      line-height: 1.3;
+    }
+    .brand-mark {
+      display: grid;
+      place-items: center;
+      width: 34px;
+      height: 34px;
+      flex: 0 0 auto;
+      border-radius: 11px;
+      color: white;
+      background: linear-gradient(135deg, var(--teal), #254d70);
+      font-size: 13px;
+      letter-spacing: -.04em;
+    }
+    .sidebar small { color: var(--muted); }
+    .nav-label {
+      margin: 17px 9px 6px;
+      color: var(--muted);
+      font-size: 11px;
+      font-weight: 760;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .sidebar nav a {
+      display: block;
+      padding: 7px 9px;
+      border-radius: 8px;
+      color: var(--ink-soft);
+      text-decoration: none;
+      font-size: 13px;
+      line-height: 1.35;
+    }
+    .sidebar nav a:hover { background: var(--teal-soft); color: var(--teal); }
+    .print-button {
+      width: 100%;
+      margin-top: 18px;
+      padding: 9px 12px;
+      border: 1px solid var(--line-strong);
+      border-radius: 10px;
+      color: var(--ink);
+      background: #fff;
+      cursor: pointer;
+      font: inherit;
+      font-size: 13px;
+      font-weight: 680;
+    }
+    .print-button:hover { border-color: var(--teal); color: var(--teal); }
+    main {
+      min-width: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 24px;
+      background: var(--paper);
+      box-shadow: var(--shadow);
+    }
+    .hero {
+      position: relative;
+      overflow: hidden;
+      padding: 72px clamp(28px, 6vw, 80px) 60px;
+      color: white;
+      background:
+        linear-gradient(118deg, rgba(8,61,68,.98), rgba(24,70,96,.95)),
+        #0b5962;
+    }
+    .hero::after {
+      content: "";
+      position: absolute;
+      right: -90px;
+      bottom: -170px;
+      width: 440px;
+      height: 440px;
+      border: 1px solid rgba(255,255,255,.13);
+      border-radius: 50%;
+      box-shadow: 0 0 0 45px rgba(255,255,255,.03), 0 0 0 100px rgba(255,255,255,.025);
+    }
+    .eyebrow {
+      position: relative;
+      z-index: 1;
+      margin: 0 0 12px;
+      color: #9ed6d7;
+      font-size: 12px;
+      font-weight: 780;
+      letter-spacing: .18em;
+      text-transform: uppercase;
+    }
+    h1 {
+      position: relative;
+      z-index: 1;
+      max-width: 900px;
+      margin: 0;
+      font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", Georgia, serif;
+      font-size: clamp(2.35rem, 5.4vw, 4.7rem);
+      font-weight: 760;
+      letter-spacing: -.045em;
+      line-height: 1.08;
+    }
+    .hero-subtitle {
+      position: relative;
+      z-index: 1;
+      max-width: 860px;
+      margin: 22px 0 0;
+      color: #dceced;
+      font-size: clamp(1rem, 1.8vw, 1.22rem);
+      line-height: 1.65;
+    }
+    .meta-row {
+      position: relative;
+      z-index: 1;
+      display: flex;
+      flex-wrap: wrap;
+      gap: 9px;
+      margin-top: 28px;
+    }
+    .hero-badge {
+      padding: 7px 11px;
+      border: 1px solid rgba(255,255,255,.22);
+      border-radius: 999px;
+      color: #e8f5f5;
+      background: rgba(255,255,255,.07);
+      font-size: 12px;
+    }
+    .content { padding: 44px clamp(24px, 5vw, 68px) 80px; }
+    section { scroll-margin-top: 24px; }
+    h2 {
+      margin: 72px 0 22px;
+      font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", Georgia, serif;
+      font-size: clamp(1.75rem, 3vw, 2.45rem);
+      line-height: 1.25;
+      letter-spacing: -.025em;
+    }
+    h2:first-child { margin-top: 0; }
+    h3 {
+      margin: 32px 0 12px;
+      font-size: 1.17rem;
+      line-height: 1.45;
+    }
+    h4 { margin: 22px 0 8px; font-size: 1rem; }
+    p { margin: 10px 0; }
+    .section-kicker {
+      margin: 0 0 6px;
+      color: var(--teal);
+      font-size: 12px;
+      font-weight: 780;
+      letter-spacing: .14em;
+      text-transform: uppercase;
+    }
+    .lede { max-width: 900px; color: var(--ink-soft); font-size: 1.08rem; }
+    .summary-panel {
+      display: grid;
+      grid-template-columns: 1.3fr .9fr;
+      gap: 18px;
+      margin: 26px 0 10px;
+    }
+    .quote-card, .card, .status-card, .metric-card, .paper-card, .road-card {
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: var(--card);
+    }
+    .quote-card {
+      padding: 27px 29px;
+      background: linear-gradient(145deg, var(--teal-soft), #f8fbfa 70%);
+      border-color: #c7dfdd;
+    }
+    .quote-card blockquote {
+      margin: 0;
+      font-family: "Noto Serif CJK SC", "Source Han Serif SC", "Songti SC", Georgia, serif;
+      font-size: 1.35rem;
+      font-weight: 660;
+      line-height: 1.6;
+    }
+    .quote-card footer { margin-top: 14px; color: var(--muted); font-size: 13px; }
+    .analogy-card {
+      padding: 25px 27px;
+      color: #fff;
+      background: linear-gradient(150deg, #2b5072, #4b5a83);
+      border: 0;
+      border-radius: var(--radius);
+    }
+    .analogy-card strong { display: block; margin-bottom: 7px; color: #c8e7ef; }
+    .gate-grid {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 13px;
+      margin: 24px 0;
+    }
+    .status-card { position: relative; padding: 19px 20px 18px 52px; min-height: 120px; }
+    .status-card::before {
+      content: "";
+      position: absolute;
+      top: 23px;
+      left: 20px;
+      width: 18px;
+      height: 18px;
+      border-radius: 50%;
+      box-shadow: 0 0 0 5px currentColor inset;
+    }
+    .status-card.go { color: var(--green); background: var(--green-soft); border-color: #bcd9cc; }
+    .status-card.no { color: var(--red); background: var(--red-soft); border-color: #e4c1be; }
+    .status-card.pending { color: var(--amber); background: var(--amber-soft); border-color: #ead3a7; }
+    .status-card h3 { margin: 0 0 5px; color: inherit; font-size: 1rem; }
+    .status-card p { margin: 0; color: var(--ink-soft); font-size: 13px; line-height: 1.55; }
+    .status-tag {
+      display: inline-block;
+      margin-bottom: 7px;
+      font-size: 10px;
+      font-weight: 800;
+      letter-spacing: .12em;
+      text-transform: uppercase;
+    }
+    .notice {
+      margin: 22px 0;
+      padding: 17px 20px;
+      border-left: 4px solid var(--amber);
+      border-radius: 0 12px 12px 0;
+      background: var(--amber-soft);
+    }
+    .notice.danger { border-left-color: var(--red); background: var(--red-soft); }
+    .notice.info { border-left-color: var(--blue); background: var(--blue-soft); }
+    .notice strong { color: var(--ink); }
+    .metric-grid {
+      display: grid;
+      grid-template-columns: repeat(6, 1fr);
+      gap: 11px;
+      margin: 24px 0;
+    }
+    .metric-card { padding: 17px 15px; }
+    .metric-card b {
+      display: block;
+      margin-bottom: 5px;
+      color: var(--teal);
+      font-size: clamp(1.35rem, 2.3vw, 2rem);
+      letter-spacing: -.04em;
+      line-height: 1.1;
+    }
+    .metric-card span { color: var(--muted); font-size: 11px; line-height: 1.35; text-transform: uppercase; letter-spacing: .05em; }
+    .flow {
+      display: grid;
+      grid-template-columns: 1fr 28px 1fr 28px 1fr 28px 1fr 28px 1fr;
+      gap: 7px;
+      align-items: stretch;
+      margin: 26px 0 14px;
+    }
+    .flow-node {
+      display: flex;
+      min-height: 124px;
+      flex-direction: column;
+      justify-content: center;
+      padding: 15px;
+      border: 1px solid var(--line);
+      border-radius: 15px;
+      background: #fff;
+      text-align: center;
+    }
+    .flow-node b { color: var(--teal); font-size: 1.02rem; }
+    .flow-node span { margin-top: 5px; color: var(--muted); font-size: 12px; line-height: 1.45; }
+    .flow-arrow { display: grid; place-items: center; color: var(--line-strong); font-size: 25px; }
+    .privacy-line {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin: 14px 0 0;
+      padding: 12px 15px;
+      border: 1px dashed #9fc7c5;
+      border-radius: 12px;
+      color: var(--teal);
+      background: var(--teal-soft);
+      font-size: 13px;
+      font-weight: 650;
+    }
+    .two-col { display: grid; grid-template-columns: 1fr 1fr; gap: 17px; margin: 20px 0; }
+    .three-col { display: grid; grid-template-columns: repeat(3, 1fr); gap: 14px; margin: 20px 0; }
+    .card { padding: 21px 22px; }
+    .card h3 { margin-top: 0; }
+    .card > :last-child { margin-bottom: 0; }
+    .plain { border-top: 4px solid var(--blue); }
+    .technical { border-top: 4px solid var(--violet); }
+    .plain h3::before { content: "大白话\00a0"; color: var(--blue); font-size: .72em; letter-spacing: .08em; }
+    .technical h3::before { content: "专业\00a0"; color: var(--violet); font-size: .72em; letter-spacing: .08em; }
+    table {
+      width: 100%;
+      margin: 20px 0 26px;
+      border-collapse: separate;
+      border-spacing: 0;
+      overflow: hidden;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: #fff;
+      font-size: 13px;
+    }
+    th, td { padding: 11px 12px; border-bottom: 1px solid var(--line); vertical-align: top; }
+    tr:last-child td, tr:last-child th { border-bottom: 0; }
+    th { color: var(--ink); background: #f0f5f5; text-align: left; font-weight: 720; }
+    tbody tr:hover { background: #fafcfc; }
+    .num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+    .bad-cell { color: var(--red); background: var(--red-soft); font-weight: 760; }
+    .best-cell { color: var(--blue); background: var(--blue-soft); font-weight: 760; }
+    .muted { color: var(--muted); }
+    .small { font-size: 12px; }
+    .chart-card {
+      margin: 23px 0;
+      padding: 22px;
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      background: #fff;
+    }
+    .chart-head { display: flex; justify-content: space-between; gap: 16px; align-items: baseline; margin-bottom: 18px; }
+    .chart-head h3 { margin: 0; }
+    .chart-head span { color: var(--muted); font-size: 12px; }
+    .bar-row {
+      display: grid;
+      grid-template-columns: 92px minmax(0, 1fr) 72px;
+      gap: 12px;
+      align-items: center;
+      margin: 11px 0;
+      font-size: 13px;
+    }
+    .bar-track { height: 16px; overflow: hidden; border-radius: 999px; background: #edf2f2; }
+    .bar-fill { height: 100%; border-radius: inherit; background: var(--blue); }
+    .bar-fill.hold { background: #8798a4; }
+    .bar-fill.sell { background: #a05f58; }
+    .bar-fill.prior { background: #7a8b95; }
+    .bar-fill.linear { background: var(--blue); }
+    .bar-fill.mlp { background: var(--red); }
+    .bar-value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 720; }
+    .ce-group { margin: 16px 0 23px; }
+    .ce-label { display: flex; justify-content: space-between; margin-bottom: 6px; font-size: 12px; }
+    .ce-track { display: grid; gap: 5px; }
+    .ce-bar { position: relative; height: 19px; border-radius: 6px; background: #edf2f2; overflow: hidden; }
+    .ce-bar i { display: block; height: 100%; border-radius: inherit; }
+    .ce-bar span { position: absolute; inset: 0 8px; display: flex; align-items: center; color: var(--ink); font-size: 10px; font-style: normal; font-weight: 700; }
+    .ce-bar.validation i { background: #d7e1e7; }
+    .ce-bar.test i { background: #7192af; }
+    .ce-bar.mlp-test i { background: #d99a95; }
+    .range-chart { margin: 24px 0; }
+    .axis-labels { position: relative; height: 24px; margin-left: 155px; margin-right: 34px; color: var(--muted); font-size: 10px; }
+    .axis-labels span { position: absolute; transform: translateX(-50%); }
+    .range-row { display: grid; grid-template-columns: 145px minmax(0, 1fr) 52px; gap: 10px; align-items: center; margin: 15px 0; }
+    .range-name { font-size: 12px; font-weight: 700; }
+    .range-axis { position: relative; height: 30px; border-radius: 6px; background: linear-gradient(90deg, #f5f7f7, #edf2f4); }
+    .range-axis::before { content: ""; position: absolute; top: 0; bottom: 0; left: 23.077%; width: 1px; background: #71818b; }
+    .range-axis::after { content: "0"; position: absolute; left: 23.077%; bottom: -18px; transform: translateX(-50%); color: var(--muted); font-size: 9px; }
+    .seed-dot {
+      position: absolute;
+      top: 50%;
+      width: 11px;
+      height: 11px;
+      transform: translate(-50%, -50%);
+      border: 2px solid white;
+      border-radius: 50%;
+      background: var(--blue);
+      box-shadow: 0 0 0 1px rgba(25,54,75,.35);
+    }
+    .seed-dot.distilled { background: var(--violet); }
+    .seed-dot.credit { width: 13px; height: 13px; }
+    .range-mean { color: var(--ink-soft); text-align: right; font-size: 12px; font-weight: 720; }
+    .evidence-ladder { display: grid; gap: 8px; margin: 23px 0; }
+    .evidence-row { display: grid; grid-template-columns: 54px 160px 120px 1fr; gap: 11px; align-items: center; padding: 12px 14px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+    .evidence-level { color: var(--teal); font-weight: 800; }
+    .pill { display: inline-flex; justify-content: center; padding: 4px 8px; border-radius: 999px; font-size: 10px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
+    .pill.go { color: var(--green); background: var(--green-soft); }
+    .pill.no { color: var(--red); background: var(--red-soft); }
+    .pill.partial { color: var(--amber); background: var(--amber-soft); }
+    .timeline { position: relative; margin: 28px 0 12px; padding-left: 28px; }
+    .timeline::before { content: ""; position: absolute; top: 8px; bottom: 8px; left: 8px; width: 2px; background: var(--line); }
+    .timeline-item { position: relative; padding: 0 0 24px 22px; }
+    .timeline-item::before { content: ""; position: absolute; left: -26px; top: 7px; width: 12px; height: 12px; border: 3px solid var(--paper); border-radius: 50%; background: var(--teal); box-shadow: 0 0 0 1px var(--line-strong); }
+    .timeline-item.fail::before { background: var(--red); }
+    .timeline-item h3 { margin: 0 0 4px; font-size: 1rem; }
+    .timeline-item p { margin: 0; color: var(--ink-soft); font-size: 13px; }
+    .roadmap { display: grid; gap: 13px; margin: 24px 0; }
+    .road-card { display: grid; grid-template-columns: 82px 1fr 170px; gap: 18px; padding: 21px 22px; }
+    .road-num { color: var(--teal); font-family: Georgia, serif; font-size: 2rem; font-weight: 760; line-height: 1; }
+    .road-card h3 { margin: 0 0 5px; }
+    .road-card p { margin: 5px 0; color: var(--ink-soft); font-size: 13px; }
+    .road-gate { padding-left: 16px; border-left: 1px solid var(--line); font-size: 12px; }
+    .road-gate strong { display: block; color: var(--teal); }
+    .paper-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 14px; margin: 24px 0; }
+    .paper-card { padding: 22px; }
+    .paper-card h3 { margin: 5px 0 9px; }
+    .paper-no { color: var(--teal); font-size: 11px; font-weight: 800; letter-spacing: .12em; }
+    .paper-card p { color: var(--ink-soft); font-size: 13px; }
+    .review-badge { display: inline-block; padding: 3px 7px; border-radius: 999px; color: var(--green); background: var(--green-soft); font-size: 10px; font-weight: 780; }
+    .preprint-badge { display: inline-block; padding: 3px 7px; border-radius: 999px; color: var(--amber); background: var(--amber-soft); font-size: 10px; font-weight: 780; }
+    .glossary { columns: 2; column-gap: 24px; margin: 22px 0; }
+    .term { break-inside: avoid; margin: 0 0 10px; padding: 13px 14px; border: 1px solid var(--line); border-radius: 11px; background: #fff; }
+    .term dt { color: var(--teal); font-weight: 760; }
+    .term dd { margin: 3px 0 0; color: var(--ink-soft); font-size: 12px; }
+    .hash-list { display: grid; gap: 10px; margin: 18px 0; }
+    .hash-item { padding: 12px 14px; border: 1px solid var(--line); border-radius: 10px; background: #f7f9f9; overflow-wrap: anywhere; font-size: 11px; }
+    details { margin: 15px 0; padding: 13px 15px; border: 1px solid var(--line); border-radius: 12px; background: #fff; }
+    summary { cursor: pointer; color: var(--teal); font-weight: 720; }
+    .source-list li { margin: 7px 0; }
+    .footer {
+      margin-top: 72px;
+      padding-top: 24px;
+      border-top: 1px solid var(--line);
+      color: var(--muted);
+      font-size: 12px;
+    }
+    .page-break { break-before: page; }
+
+    @media (max-width: 1120px) {
+      .shell { grid-template-columns: 1fr; width: min(980px, calc(100% - 24px)); }
+      .sidebar {
+        position: static;
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px 18px;
+        max-height: none;
+        padding: 13px 17px;
+      }
+      .brand { margin: 0; }
+      .sidebar nav {
+        display: flex;
+        grid-column: 1 / -1;
+        grid-row: 2;
+        gap: 3px;
+        overflow-x: auto;
+        padding-top: 5px;
+        border-top: 1px solid var(--line);
+        scrollbar-width: thin;
+      }
+      .sidebar nav a { flex: 0 0 auto; white-space: nowrap; }
+      .nav-label { display: none; }
+      .print-button {
+        grid-column: 2;
+        grid-row: 1;
+        width: auto;
+        margin: 0;
+        align-self: center;
+        justify-self: end;
+      }
+      .metric-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+    @media (max-width: 780px) {
+      body { font-size: 15px; }
+      .shell { width: 100%; margin: 0; }
+      main, .sidebar { border-radius: 0; border-left: 0; border-right: 0; }
+      .hero { padding-top: 50px; }
+      .summary-panel, .two-col, .three-col, .paper-grid { grid-template-columns: 1fr; }
+      .gate-grid { grid-template-columns: 1fr; }
+      .metric-grid { grid-template-columns: repeat(2, 1fr); }
+      .flow { grid-template-columns: 1fr; }
+      .flow-arrow { transform: rotate(90deg); height: 22px; }
+      .evidence-row { grid-template-columns: 46px 1fr 98px; }
+      .evidence-row > :last-child { grid-column: 1 / -1; }
+      .road-card { grid-template-columns: 55px 1fr; }
+      .road-gate { grid-column: 1 / -1; padding: 12px 0 0; border-left: 0; border-top: 1px solid var(--line); }
+      .glossary { columns: 1; }
+      .range-row { grid-template-columns: 105px minmax(0, 1fr) 45px; }
+      .axis-labels { margin-left: 115px; }
+    }
+
+    @media print {
+      @page { size: A4; margin: 12mm; }
+      body { background: white; font-size: 10.5pt; }
+      .shell { display: block; width: 100%; margin: 0; }
+      .sidebar { display: none; }
+      main { border: 0; border-radius: 0; box-shadow: none; }
+      .hero { padding: 34px 34px 30px; print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+      .content { padding: 26px 34px 40px; }
+      h2 { margin-top: 38px; }
+      .card, .chart-card, .status-card, .metric-card, .paper-card, .road-card, table { break-inside: avoid; }
+      tr, .timeline-item, .term { break-inside: avoid; }
+      .gate-grid, .metric-grid, .two-col, .three-col, .paper-grid { break-inside: avoid; }
+      a { color: inherit; text-decoration: none; }
+      a[href^="http"]::after { content: ""; }
+      .print-button { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <aside class="sidebar" aria-label="报告导航">
+      <div class="brand">
+        <span class="brand-mark">ABM</span>
+        <span>智能体金融市场<br><small>个人架构工作手册</small></span>
+      </div>
+      <nav>
+        <div class="nav-label">结论</div>
+        <a href="#executive">01｜三层总判断</a>
+        <a href="#where">02｜目前做到哪里</a>
+        <a href="#history">03｜项目发展脉络</a>
+        <div class="nav-label">a10 审计</div>
+        <a href="#architecture">04｜当前研究架构</a>
+        <a href="#a10">05｜a10 完整运行</a>
+        <a href="#teacher">06｜Teacher 行为</a>
+        <a href="#student">07｜Student 结果</a>
+        <a href="#ood">08｜OOD 与闭环</a>
+        <a href="#market">09｜2×2 市场</a>
+        <a href="#claims">10｜能说与不能说</a>
+        <div class="nav-label">未来</div>
+        <a href="#direction">11｜未来研究方向</a>
+        <a href="#implementation">12｜架构实施建议</a>
+        <a href="#roadmap">13｜分阶段路线</a>
+        <a href="#papers">14｜论文规划</a>
+        <a href="#literature">15｜核心文献地图</a>
+        <a href="#onboarding">16｜新同学上手</a>
+        <a href="#appendix">17｜证据与术语</a>
+      </nav>
+      <button class="print-button" type="button" onclick="window.print()">打印 / 导出 PDF</button>
+    </aside>
+
+    <main>
+      <header class="hero">
+        <p class="eyebrow">Research briefing · 2026-08-22 · Asia/Shanghai</p>
+        <h1>智能体金融市场<br>个人详解与架构工作手册</h1>
+        <p class="hero-subtitle">
+          供项目负责人和执行者使用：保留大白话解释、完整证据、工程风险、
+          软件架构拆分、科学门槛、执行顺序与论文路线，不作为正式投屏稿。
+        </p>
+        <div class="meta-row">
+          <span class="hero-badge">活跃分支 feat/v2-teacher-pilot</span>
+          <span class="hero-badge">HEAD b9919c4</span>
+          <span class="hero-badge">最新正式运行 a10</span>
+          <span class="hero-badge">个人详解版 · 含大白话与执行细节</span>
+        </div>
+      </header>
+
+      <div class="content">
+        <section id="executive">
+          <p class="section-kicker">Executive summary</p>
+          <h2>一页先讲明白：工程跑通，核心科学假设尚未通过</h2>
+          <div class="notice info">
+            <strong>版本用途：</strong>这一版是个人工作手册，故意保留类比、大白话、路径、hash、风险和实施细节。
+            给导师和新同学投屏时，请使用单独的
+            <a href="智能体市场项目阶段汇报_导师与新同学版_20260822.html">导师与新同学汇报版</a>。
+          </div>
+          <div class="summary-panel">
+            <div class="quote-card">
+              <blockquote>
+                a10 已完整跑通 Teacher → Student → 守恒市场，
+                但固定 MLP 在未见状态上输给 prior 与 linear，
+                因此“成功蒸馏”“像人”“产生泡沫”目前都不能成立。
+              </blockquote>
+              <footer>这是本次汇报的主结论，也是接下来所有工作的决策边界。</footer>
+            </div>
+            <div class="analogy-card">
+              <strong>给第一次接触项目的同学</strong>
+              实验室、采集仪器和会计账本已经造好，而且第一次完整采到了真实模型数据；
+              但装进市场的“小脑 Student”目前只会背训练题。下一步不是把实验跑得更大，
+              而是先校准行为、补真人对照、重做 Student，再谈市场机制。
+            </div>
+          </div>
+
+          <div class="gate-grid" aria-label="当前三层研究门">
+            <article class="status-card go">
+              <span class="status-tag">Engineering · GO</span>
+              <h3>采集、审计与守恒通过</h3>
+              <p>162/162 Teacher；12/12 市场；720/720 轮；42/42 注册产物重新哈希一致。</p>
+            </article>
+            <article class="status-card no">
+              <span class="status-tag">Distillation · NO-GO</span>
+              <h3>固定 MLP 未击败基线</h3>
+              <p>Test CE：MLP 1.0215，prior 0.6253，linear 0.5024；明显过拟合。</p>
+            </article>
+            <article class="status-card no">
+              <span class="status-tag">Science · NO-GO</span>
+              <h3>人类与市场结论未通过</h3>
+              <p>无人类标签、无 fundamental、每格仅 3 seeds、尚未做闭环等价与正式功效设计。</p>
+            </article>
+          </div>
+
+          <div class="notice danger">
+            <strong>最紧急的操作风险：</strong>a10 约 193 MiB，目前只找到一份，位于被
+            <code>.gitignore</code> 排除的 worktree 结果目录；Git commit 不能恢复它。
+            在继续开发前应先做不可变备份并验证恢复哈希。
+          </div>
+          <details>
+            <summary>建议的 20 分钟口头汇报节奏</summary>
+            <ol class="small">
+              <li><strong>2 分钟：</strong>一句话研究问题与“工程 GO / 蒸馏 NO-GO / 科学 NO-GO”。</li>
+              <li><strong>4 分钟：</strong>V1 的识别问题，以及为什么转向 V2。</li>
+              <li><strong>6 分钟：</strong>a10 Teacher、Student 和四格市场；重点解释负结果。</li>
+              <li><strong>5 分钟：</strong>未来九阶段路线与真正可发表的创新空位。</li>
+              <li><strong>3 分钟：</strong>请导师拍板目标人群、Paper 1 优先级和人类实验资源。</li>
+            </ol>
+          </details>
+        </section>
+
+        <section id="where">
+          <p class="section-kicker">Current position</p>
+          <h2>目前做到哪里：代码现场、正式运行与证据等级</h2>
+          <div class="two-col">
+            <article class="card plain">
+              <h3>当前现场</h3>
+              <ul>
+                <li>正式施工线：<code>.worktrees/v2-teacher-pilot</code></li>
+                <li>分支：<code>feat/v2-teacher-pilot</code></li>
+                <li>HEAD：<code>b9919c4</code>，工作树 clean，远端已核验同步</li>
+                <li>相对 <code>origin/main@369fa82</code> 领先 10 个提交</li>
+                <li>最新正式运行：<code>v2-teacher-pilot-live-20260820-a10</code></li>
+                <li>a10 之后没有新 V2 commit、run、analysis 或后台进程</li>
+              </ul>
+            </article>
+            <article class="card technical">
+              <h3>仓库拓扑风险</h3>
+              <ul>
+                <li>根目录仍在旧分支 <code>phase1.2b-codex-runtime-compat@0adf199</code>。</li>
+                <li>同目录还存在独立 nested clone，其 <code>main@ad8b520</code> 落后远端。</li>
+                <li>多个 worktree 分属两个不同 Git 仓库，普通根目录 <code>git status</code> 看不到全部状态。</li>
+                <li>Teacher pilot 分支尚未列出 PR；main 只包含早期 V2 prototype。</li>
+              </ul>
+            </article>
+          </div>
+
+          <div class="metric-grid" aria-label="a10核心计数">
+            <div class="metric-card"><b>162/162</b><span>valid Teacher samples</span></div>
+            <div class="metric-card"><b>54</b><span>aggregated states</span></div>
+            <div class="metric-card"><b>163</b><span>physical attempts</span></div>
+            <div class="metric-card"><b>12/12</b><span>market runs</span></div>
+            <div class="metric-card"><b>720/720</b><span>settled rounds</span></div>
+            <div class="metric-card"><b>42/42</b><span>artifact hashes verified</span></div>
+          </div>
+
+          <div class="evidence-ladder" aria-label="研究证据等级">
+            <div class="evidence-row">
+              <span class="evidence-level">E0</span><strong>工程完整性</strong><span class="pill go">GO</span>
+              <span>采集、解析、私密分层、manifest、账本和产物完整工作。</span>
+            </div>
+            <div class="evidence-row">
+              <span class="evidence-level">E1</span><strong>Endpoint policy</strong><span class="pill partial">部分</span>
+              <span>只识别了这一模型请求、这一 prompt 下的经验行为分布。</span>
+            </div>
+            <div class="evidence-row">
+              <span class="evidence-level">E2</span><strong>Student fidelity</strong><span class="pill no">FAILED</span>
+              <span>固定 MLP 没有击败 prior 或 linear。</span>
+            </div>
+            <div class="evidence-row">
+              <span class="evidence-level">E3</span><strong>人类有效性</strong><span class="pill no">未开始</span>
+              <span>没有同任务人类标签，不能把模型输出当真人样本。</span>
+            </div>
+            <div class="evidence-row">
+              <span class="evidence-level">E4</span><strong>闭环机制因果</strong><span class="pill no">NO-GO</span>
+              <span>每格 3 seeds 只够 smoke test，且缺 prior/linear/Teacher 闭环对照。</span>
+            </div>
+            <div class="evidence-row">
+              <span class="evidence-level">E5</span><strong>外部有效性</strong><span class="pill no">未开始</span>
+              <span>尚不能推广到真人、其他模型或真实金融市场。</span>
+            </div>
+          </div>
+
+          <div class="notice info">
+            <strong>不要混淆两种“完成”：</strong>manifest 的 <code>status=finished</code>
+            表示预定计算完整终止，不表示研究假设得到支持。a10 是“完整运行、负面科学结果”。
+          </div>
+        </section>
+
+        <section id="history">
+          <p class="section-kicker">Project history</p>
+          <h2>项目发展脉络：从叙事市场到行为蒸馏</h2>
+          <div class="timeline">
+            <div class="timeline-item">
+              <h3>V1｜Persona、新闻与社交传染</h3>
+              <p>用散户、趋势、价值、量化、influencer、contrarian 等 persona 研究叙事如何进入订单与价格；历史报告提出过“社交条件性减震”“influencer 是 spark”等探索性发现。</p>
+            </div>
+            <div class="timeline-item fail">
+              <h3>V1 审计｜历史结论降级</h3>
+              <p>真实 LLM 路径中正的 <code>social_weight</code> 只控制 feed 有无，数值强弱不进 prompt；fundamental 也未进入真实 prompt；旧市场允许不平衡双方全额 fill，隐含无限做市商。</p>
+            </div>
+            <div class="timeline-item">
+              <h3>Wave 0｜端点随机性</h3>
+              <p>1,082/1,082 获得响应，1,081 成功解析；同 seed 两次原始输出不相同。结论：真实 Provider 不得声称严格确定。</p>
+            </div>
+            <div class="timeline-item fail">
+              <h3>Wave 1｜多事件验证未闭合</h3>
+              <p>冻结 144 个运行，只有 53 个 honest-N，91 个失败或拒绝，完整 paired seed 数为 0；不能支持跨事件 confirmatory inference。</p>
+            </div>
+            <div class="timeline-item">
+              <h3>V2 prototype｜Teacher → Student → 守恒市场</h3>
+              <p>去 persona、去新闻、去社交，改为 14 维量价与账户状态；Fake Teacher 480/480 跑通工程链，但 MLP 已输给 linear。</p>
+            </div>
+            <div class="timeline-item fail">
+              <h3>a1–a9｜真实 Teacher 失败链</h3>
+              <p>经历响应形状、timeout、4K/16K/65K 截断、人工中断和连接异常；所有失败均保留且未拼接旧样本，下游正确 fail-closed。</p>
+            </div>
+            <div class="timeline-item">
+              <h3>a10｜第一次完整真实端点运行</h3>
+              <p>162/162 Teacher、54 聚合状态、Student 训练、12/12 市场与 720/720 轮全部完成；工程 GO，蒸馏和科学解释 NO-GO。</p>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <article class="card plain">
+              <h3>为什么 V2 转向是对的</h3>
+              <p>过去一句“你是散户”同时混入财富、风险偏好、信息来源、期限和情绪，结果变化时无法知道是哪项因素导致。V2 改为显式状态和可单独开关的机制，才有可证伪性。</p>
+            </article>
+            <article class="card technical">
+              <h3>方法论变化</h3>
+              <p>从 <em>identity-labelled generative agents</em> 转向可版本化的条件政策
+                <span class="mono">π(a,q|s)</span>；从在线 LLM 市场转向离线监督蒸馏；从 reduced-form impact clearing 转向显式约束、集合竞价与资产负债守恒。</p>
+            </article>
+          </div>
+        </section>
+        <section id="architecture" class="page-break">
+          <p class="section-kicker">Research architecture</p>
+          <h2>当前 V2 架构：大模型只负责离线标注，市场由数值政策运行</h2>
+          <div class="flow" aria-label="V2 Teacher Student Market流程">
+            <div class="flow-node">
+              <b>54 个状态</b>
+              <span>9 anchors + 45 LHS<br>14 维量价与私有账户</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+              <b>Teacher × 3</b>
+              <span>162 个独立请求<br>buy / hold / sell + intensity</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+              <b>54 个软标签</b>
+              <span>family split<br>36 train / 9 val / 9 test</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+              <b>Student 与基线</b>
+              <span>prior / linear / fixed MLP<br>Teacher 不再在线调用</span>
+            </div>
+            <div class="flow-arrow">→</div>
+            <div class="flow-node">
+              <b>2×2 市场</b>
+              <span>finite / credit ×<br>distilled / momentum</span>
+            </div>
+          </div>
+          <div class="privacy-line">
+            <span aria-hidden="true">🔒</span>
+            Private reasoning 只进入 mode-0600 私有审计文件；不进入公开样本、Student 特征、社交信息或市场状态。
+          </div>
+
+          <h3>Teacher 看见的 14 个变量</h3>
+          <table>
+            <thead><tr><th>层次</th><th>变量</th><th>研究含义</th></tr></thead>
+            <tbody>
+              <tr><th>量价路径</th><td>1/5/20 日收益、20 日波动率、20 日回撤、成交量 z-score</td><td>趋势、风险、距近期高点和市场活跃度</td></tr>
+              <tr><th>账户状态</th><td>仓位比例、对数财富</td><td>当前风险暴露和可执行能力</td></tr>
+              <tr><th>参考点</th><td>浮盈亏、卖出后收益</td><td>成本参考、处置与后悔候选机制</td></tr>
+              <tr><th>交易记忆</th><td>距上次交易的缩放天数</td><td>近期交易经验与时间距离</td></tr>
+              <tr><th>缺失语义</th><td>浮盈亏、交易时间、卖出后收益各自的 mask</td><td>用显式 0/1 区分“值为零”和“没有定义”</td></tr>
+            </tbody>
+          </table>
+
+          <div class="two-col">
+            <article class="card plain">
+              <h3>一轮市场怎么走</h3>
+              <p>每天收盘时，所有人同时看同一段市场历史和各自账户，然后互相看不到订单地做决定。系统先检查钱和股票够不够，再统一撮合，最后一次性结算并生成下一天价格。</p>
+            </article>
+            <article class="card technical">
+              <h3>清算与守恒</h3>
+              <p>候选价来自上一收盘与所有有效限价；依次最大化 matched volume、最小化 imbalance、最小化距上一价、固定较低价破最后平局。超额一侧按比例分配；总现金、股份、借款人债务与 facility loan asset 逐轮闭合。</p>
+            </article>
+          </div>
+        </section>
+
+        <section id="a10">
+          <p class="section-kicker">Authoritative run</p>
+          <h2>a10：第一次完整、不可拼接的真实端点运行</h2>
+          <p class="lede">
+            运行开始于 2026-08-20 18:37:29（北京时间），结束于 19:41:56。
+            Manifest 同时标记 <code>managed_run_completed=true</code>、
+            <code>outputs_complete=true</code>、<code>simulation_computation_completed=true</code>。
+          </p>
+
+          <div class="three-col">
+            <article class="card">
+              <h3>Teacher gate</h3>
+              <p><strong>54 × 3 = 162</strong> 个逻辑样本全部获得、解析并通过动作可行性；每个状态恰好 3 次有效重复。</p>
+            </article>
+            <article class="card">
+              <h3>技术请求</h3>
+              <p>163 个物理 attempts 对应 162 个逻辑请求；1 次瞬态连接异常后按冻结规则重试成功，SDK 内部重试保持 0。</p>
+            </article>
+            <article class="card">
+              <h3>下游释放</h3>
+              <p>只有 162/162 gate 全通过后，才生成 54 行数据、训练三个模型并运行 12 个市场；不存在部分样本训练。</p>
+            </article>
+          </div>
+
+          <table>
+            <thead><tr><th>项目</th><th class="num">结果</th><th>解释边界</th></tr></thead>
+            <tbody>
+              <tr><td>逻辑 Teacher 请求</td><td class="num">162 / 162</td><td>honest-N 是有效公开提交样本，不是物理 attempt</td></tr>
+              <tr><td>物理 Provider attempts</td><td class="num">163</td><td>一次合规技术重试仍只贡献一个逻辑样本</td></tr>
+              <tr><td>Finish reason</td><td class="num">162 stop</td><td>没有 length、missing 或 parser fallback</td></tr>
+              <tr><td>Tokens</td><td class="num">119,463 in / 314,904 out</td><td>最大单条输出 8,307，输出上限已不是当前瓶颈</td></tr>
+              <tr><td>请求/报告模型</td><td class="num">MiniMax-M2.7 / HiggsAI</td><td>SDK alias 不是底层 weights 的独立证明</td></tr>
+              <tr><td>正式产物</td><td class="num">43 files</td><td>42 个注册 artifact + manifest；约 193 MiB</td></tr>
+              <tr><td>完整性复核</td><td class="num">42 / 42</td><td>2026-08-22 重新 SHA-256：0 missing、0 mismatch</td></tr>
+            </tbody>
+          </table>
+
+          <div class="notice info">
+            <strong>关于之前的“输出上限”争议：</strong>a10 的单条输出中位数约 1,770、P95 3,728、最大 8,307 tokens，
+            远低于 190,000 上限。但 a8–a10 同时改变了官方采样参数、JSON object 格式和技术重试策略，
+            因此不能把成功单独归因于“把上限调大”。
+          </div>
+        </section>
+
+        <section id="teacher">
+          <p class="section-kicker">Teacher policy audit</p>
+          <h2>Teacher 的真实行为：高度偏向卖出，但并非完全无状态反应</h2>
+          <div class="chart-card">
+            <div class="chart-head">
+              <h3>162 条有效决策的动作分布</h3>
+              <span>当前 prompt 与 endpoint 条件下的描述，不是人类人口分布</span>
+            </div>
+            <div class="bar-row"><strong>Buy</strong><div class="bar-track"><div class="bar-fill" style="width:8.02%"></div></div><span class="bar-value">13 · 8.0%</span></div>
+            <div class="bar-row"><strong>Hold</strong><div class="bar-track"><div class="bar-fill hold" style="width:15.43%"></div></div><span class="bar-value">25 · 15.4%</span></div>
+            <div class="bar-row"><strong>Sell</strong><div class="bar-track"><div class="bar-fill sell" style="width:76.54%"></div></div><span class="bar-value">124 · 76.5%</span></div>
+          </div>
+
+          <div class="metric-grid">
+            <div class="metric-card"><b>38/54</b><span>三次动作完全一致</span></div>
+            <div class="metric-card"><b>15/54</b><span>2:1 分裂状态</span></div>
+            <div class="metric-card"><b>1/54</b><span>1:1:1 状态</span></div>
+            <div class="metric-card"><b>0.1358</b><span>mean action Gini</span></div>
+            <div class="metric-card"><b>0.0122</b><span>conditional intensity variance</span></div>
+            <div class="metric-card"><b>K=3</b><span>每状态重复次数</span></div>
+          </div>
+
+          <div class="two-col">
+            <article class="card plain">
+              <h3>这说明什么</h3>
+              <p>模型确实会根据仓位和市场路径改变答案，例如上涨、现金较多时更可能买；下跌且持仓高时几乎都卖。但总体上它像一个“卖出机器”，买入样本太少。</p>
+            </article>
+            <article class="card technical">
+              <h3>为什么还不能叫稳定政策</h3>
+              <p>K=3 让动作软标签只能取 0、1/3、2/3、1；buy 仅有 13 条、覆盖 6 个状态。没有 prompt counterbalancing、人类基准和冻结阈值，无法区分模型偏好、提示结构偏差与目标行为机制。</p>
+            </article>
+          </div>
+
+          <div class="notice danger">
+            <strong>必须避免的表述：</strong>76.5% sell 不能解释为“真人悲观”“处置效应”或“MiniMax 普遍行为”；
+            它只是一条 endpoint-conditional empirical distribution。
+          </div>
+        </section>
+
+        <section id="student" class="page-break">
+          <p class="section-kicker">Student audit</p>
+          <h2>决定性负结果：固定 MLP 把训练题背熟了，却没有泛化</h2>
+          <p class="lede">
+            数据按 family 预先冻结为 36 train / 9 validation / 9 test。固定 MLP 约 325 个参数，
+            但只有 36 个聚合训练状态；它因协议预先指定而部署，不是评估后胜出的模型。
+          </p>
+
+          <table>
+            <thead>
+              <tr><th>模型</th><th class="num">Train CE</th><th class="num">Validation CE</th><th class="num">Test CE ↓</th><th class="num">Test Brier ↓</th><th class="num">Test Accuracy</th><th class="num">Intensity MAE ↓</th></tr>
+            </thead>
+            <tbody>
+              <tr><th>Prior</th><td class="num">0.752</td><td class="num best-cell">0.588</td><td class="num">0.625</td><td class="num">0.257</td><td class="num">0.889</td><td class="num best-cell">0.194</td></tr>
+              <tr><th>Linear</th><td class="num">0.352</td><td class="num">1.257</td><td class="num best-cell">0.502</td><td class="num best-cell">0.218</td><td class="num">0.778</td><td class="num">0.232</td></tr>
+              <tr><th>Fixed MLP</th><td class="num">0.244</td><td class="num bad-cell">1.626</td><td class="num bad-cell">1.022</td><td class="num bad-cell">0.403</td><td class="num">0.778</td><td class="num bad-cell">0.259</td></tr>
+            </tbody>
+          </table>
+
+          <div class="chart-card">
+            <div class="chart-head"><h3>Validation / Test cross entropy</h3><span>越短越好；统一按 0–1.7 映射</span></div>
+            <div class="ce-group">
+              <div class="ce-label"><strong>Prior</strong><span>val 0.588 · test 0.625</span></div>
+              <div class="ce-track">
+                <div class="ce-bar validation"><i style="width:34.6%"></i><span>validation</span></div>
+                <div class="ce-bar test"><i style="width:36.8%"></i><span>test</span></div>
+              </div>
+            </div>
+            <div class="ce-group">
+              <div class="ce-label"><strong>Linear</strong><span>val 1.257 · test 0.502</span></div>
+              <div class="ce-track">
+                <div class="ce-bar validation"><i style="width:73.9%"></i><span>validation</span></div>
+                <div class="ce-bar test"><i style="width:29.5%"></i><span>test</span></div>
+              </div>
+            </div>
+            <div class="ce-group">
+              <div class="ce-label"><strong>Fixed MLP</strong><span>val 1.626 · test 1.022</span></div>
+              <div class="ce-track">
+                <div class="ce-bar validation"><i style="width:95.6%"></i><span>validation</span></div>
+                <div class="ce-bar mlp-test"><i style="width:60.1%"></i><span>test</span></div>
+              </div>
+            </div>
+          </div>
+
+          <div class="two-col">
+            <article class="card plain">
+              <h3>为什么 accuracy 会骗人</h3>
+              <p>Test 的 9 个状态里，8 个多数标签是 sell。Prior 不看状态、一直偏向 sell，也能得到 88.9% accuracy。看起来“最准”，却不代表学到了状态条件关系。</p>
+            </article>
+            <article class="card technical">
+              <h3>过拟合证据</h3>
+              <p>MLP train CE 0.2439 几乎贴住训练软标签熵下限约 0.2427，但 validation/test 急剧恶化。应优先看 CE、Brier、calibration、per-class recall 与强度误差，而非总体 accuracy。</p>
+            </article>
+          </div>
+
+          <div class="notice danger">
+            <strong>科学门：FAILED。</strong>不能把当前 MLP 称为“成功蒸馏的交易策略”；也不能事后改选 linear，
+            再继续使用已经看过的同一个 test 宣称成功。模型选择后必须建立全新的 confirmatory family set。
+          </div>
+        </section>
+
+        <section id="ood">
+          <p class="section-kicker">Distribution shift</p>
+          <h2>OOD：Student 进入市场后，会遇到训练时没见过的状态</h2>
+          <div class="three-col">
+            <article class="card"><h3>Validation</h3><p><strong>5/9</strong> 行超出训练逐特征 min/max；最大 <span class="mono">|z|=3.79</span>。</p></article>
+            <article class="card"><h3>Frozen test</h3><p><strong>5/9</strong> 行超出训练逐特征 min/max；最大 <span class="mono">|z|=4.99</span>。</p></article>
+            <article class="card"><h3>市场全四格</h3><p><strong>3,929 / 34,560</strong> agent-round 至少一维超出训练边际范围，即 11.37%。</p></article>
+          </div>
+          <table>
+            <thead><tr><th>Market cell</th><th class="num">超训练边际范围</th><th>解释</th></tr></thead>
+            <tbody>
+              <tr><td>finite × distilled</td><td class="num">0.31%</td><td>主要为 post-sale return；消费全部 Student 特征</td></tr>
+              <tr><td>credit × distilled</td><td class="num">9.18%</td><td>主要为 position fraction；消费全部 Student 特征</td></tr>
+              <tr><td>finite × momentum</td><td class="num">16.76%</td><td>为可比性记录完整状态，但 momentum 不消费全部特征</td></tr>
+              <tr><td>credit × momentum</td><td class="num">19.22%</td><td>同上，不能直接算成 Student 的外推失败</td></tr>
+            </tbody>
+          </table>
+          <div class="two-col">
+            <article class="card plain"><h3>直觉</h3><p>Student 的动作会改变价格和账户；新的价格和账户又成为它下一轮输入。只要第一轮略有偏差，后面就可能走进训练集从未覆盖的区域。</p></article>
+            <article class="card technical"><h3>边界</h3><p>现有 OOD 只是 per-feature rectangular support diagnostic。超界不等于状态无效；当前尚未评估 joint support、manifold、density shift 或在这些状态上的行为正确性。</p></article>
+          </div>
+        </section>
+
+        <section id="market" class="page-break">
+          <p class="section-kicker">Budget × behavior market</p>
+          <h2>2×2 市场：必须看全部 seed，而不是只看均值</h2>
+          <p class="lede">
+            四格共享配对初始化和随机流，区别只有融资制度与行为政策。每格仅 3 个 seeds；
+            横轴是最终价格收益，圆点是三个独立程序 seed。正收益使用中性蓝色，不代表科学成功。
+          </p>
+
+          <div class="chart-card">
+            <div class="chart-head"><h3>每个 seed 的最终收益</h3><span>坐标范围 -60% 至 +200%</span></div>
+            <div class="axis-labels">
+              <span style="left:0%">−60%</span><span style="left:42.3%">+50%</span><span style="left:61.5%">+100%</span><span style="left:80.8%">+150%</span><span style="left:100%">+200%</span>
+            </div>
+            <div class="range-chart">
+              <div class="range-row">
+                <span class="range-name">finite · distilled</span>
+                <div class="range-axis">
+                  <i class="seed-dot distilled" style="left:17.75%" title="-13.86%"></i>
+                  <i class="seed-dot distilled" style="left:19.42%" title="-9.51%"></i>
+                  <i class="seed-dot distilled" style="left:16.21%" title="-17.86%"></i>
+                </div><span class="range-mean">−13.75%</span>
+              </div>
+              <div class="range-row">
+                <span class="range-name">credit · distilled</span>
+                <div class="range-axis">
+                  <i class="seed-dot distilled credit" style="left:19.30%" title="-9.81%"></i>
+                  <i class="seed-dot distilled credit" style="left:20.44%" title="-6.85%"></i>
+                  <i class="seed-dot distilled credit" style="left:18.73%" title="-11.29%"></i>
+                </div><span class="range-mean">−9.32%</span>
+              </div>
+              <div class="range-row">
+                <span class="range-name">finite · momentum</span>
+                <div class="range-axis">
+                  <i class="seed-dot" style="left:21.21%" title="-4.86%"></i>
+                  <i class="seed-dot" style="left:2.52%" title="-53.44%"></i>
+                  <i class="seed-dot" style="left:57.72%" title="+90.07%"></i>
+                </div><span class="range-mean">+10.59%</span>
+              </div>
+              <div class="range-row">
+                <span class="range-name">credit · momentum</span>
+                <div class="range-axis">
+                  <i class="seed-dot credit" style="left:64.48%" title="+107.66%"></i>
+                  <i class="seed-dot credit" style="left:69.64%" title="+121.07%"></i>
+                  <i class="seed-dot credit" style="left:96.94%" title="+192.05%"></i>
+                </div><span class="range-mean">+140.26%</span>
+              </div>
+            </div>
+          </div>
+
+          <table>
+            <thead><tr><th>Cell</th><th class="num">Mean final return</th><th class="num">Max drawdown</th><th class="num">Turnover</th><th class="num">Locked rounds</th><th class="num">Ending debt (cents)</th></tr></thead>
+            <tbody>
+              <tr><th>finite · distilled</th><td class="num">−13.75%</td><td class="num">−13.81%</td><td class="num">3,497.67</td><td class="num">43.0 / 60</td><td class="num">0</td></tr>
+              <tr><th>credit · distilled</th><td class="num">−9.32%</td><td class="num">−9.65%</td><td class="num">5,713.00</td><td class="num">44.0 / 60</td><td class="num">4,592,500.67</td></tr>
+              <tr><th>finite · momentum</th><td class="num">+10.59%</td><td class="num">−33.39%</td><td class="num">18,850.00</td><td class="num">10.67 / 60</td><td class="num">0</td></tr>
+              <tr><th>credit · momentum</th><td class="num">+140.26%</td><td class="num">−6.60%</td><td class="num">20,341.67</td><td class="num">9.67 / 60</td><td class="num">26,419,596.33</td></tr>
+            </tbody>
+          </table>
+
+          <div class="three-col">
+            <article class="card">
+              <h3>Distilled 两格</h3>
+              <p>MLP 延续强 sell 倾向，买卖难以 crossing，平均 43–44 轮锁市。尚未跑 prior/linear 闭环，不能证明是 Teacher 特有状态依赖所致。</p>
+            </article>
+            <article class="card">
+              <h3>Finite momentum</h3>
+              <p>三个 seed 从 −53.44% 到 +90.07%，均值 +10.59% 掩盖极高 between-seed variance，方向根本不稳定。</p>
+            </article>
+            <article class="card">
+              <h3>Credit momentum</h3>
+              <p>信用零息、零费用、期内不还本，期末债务等于累计信用使用；三条路径都在最后一轮达到峰值，没有完整反转。</p>
+            </article>
+          </div>
+
+          <div class="notice danger">
+            <strong>绝不能把 +140.26% 写成“收益”或“泡沫证据”。</strong>
+            系统没有独立 fundamental value；credit arm 是特殊的零成本购买力扩张；价格上涨没有扣除未偿债务，
+            也没有福利或可持续性含义。当前只能称为 3-seed exploratory simulator diagnostic。
+          </div>
+        </section>
+
+        <section id="claims">
+          <p class="section-kicker">Claim boundary</p>
+          <h2>汇报时能说、不能说，以及下一道门</h2>
+          <div class="three-col">
+            <article class="card" style="border-top:4px solid var(--green)">
+              <h3 style="color:var(--green)">可以说</h3>
+              <ul class="small">
+                <li>a10 在冻结请求和重试协议下获得完整 Teacher 数据。</li>
+                <li>Teacher 对当前状态设计表现出强烈卖出偏斜和有限状态反应。</li>
+                <li>数据、训练、模型 lineage、市场和报告端到端运行。</li>
+                <li>12 个市场、720 轮现金/股份/信用账本守恒。</li>
+                <li>工程失败与负面模型结果都被保留，没有静默改成成功。</li>
+              </ul>
+            </article>
+            <article class="card" style="border-top:4px solid var(--red)">
+              <h3 style="color:var(--red)">不能说</h3>
+              <ul class="small">
+                <li>Teacher 代表真人、散户或普遍 LLM 行为。</li>
+                <li>固定 MLP 已成功蒸馏 Teacher。</li>
+                <li>已识别处置效应、后悔、注意力或预算独立因果效应。</li>
+                <li>出现泡沫、盈利、社会福利或现实市场预测。</li>
+                <li>3 seeds/cell 足以支持显著性和外推。</li>
+                <li><code>HiggsAI</code> alias 独立确认了 MiniMax weights。</li>
+              </ul>
+            </article>
+            <article class="card" style="border-top:4px solid var(--amber)">
+              <h3 style="color:var(--amber)">下一道门</h3>
+              <ul class="small">
+                <li>Prompt multiverse 与高重复 Teacher qualification。</li>
+                <li>同任务、激励相容的人类行为锚点。</li>
+                <li>全新 confirmatory family 上胜过 prior 与 linear。</li>
+                <li>Teacher/Student/prior/linear 闭环等价与 OOD。</li>
+                <li>有 fundamental、经功效设计的融资机制实验。</li>
+              </ul>
+            </article>
+          </div>
+        </section>
+        <section id="direction" class="page-break">
+          <p class="section-kicker">Strategic direction</p>
+          <h2>整个项目未来方向：不是“更大的 LLM 市场”，而是可识别的实验金融平台</h2>
+          <div class="summary-panel">
+            <div class="quote-card">
+              <blockquote>
+                先识别人类或模型的条件交易政策，再研究它与预算、信息可见性、交易制度和公共传播如何共同形成市场动力学。
+              </blockquote>
+              <footer>目标是可证伪、可复查、可重复的机制研究，不是价格预测器或实盘交易系统。</footer>
+            </div>
+            <div class="card">
+              <h3>项目的真正“护城河”</h3>
+              <ul class="small">
+                <li>Teacher → Student 的全链路 provenance 与失败可见性</li>
+                <li>未见 family 与闭环 rollout 的双重验收</li>
+                <li>显式账户、融资与清算守恒</li>
+                <li>私人理由与公共传播的形式化隔离</li>
+                <li>人类、LLM、Student 在同一可执行状态任务上的直接比较</li>
+              </ul>
+            </div>
+          </div>
+
+          <h3>与最新相邻工作相比，哪些已经不新了</h3>
+          <table>
+            <thead><tr><th>能力</th><th>文献现状</th><th>本项目判断</th></tr></thead>
+            <tbody>
+              <tr><td>LLM 根据市场状态决定买卖</td><td>FCLAgent、Henning–Camerer 等已覆盖</td><td>不能作为创新主张</td></tr>
+              <tr><td>LLM 方向 + 规则执行/订单簿</td><td>FCLAgent 已用混合 LLM–rule agent 接入 1,000-agent LOB</td><td>只能作为工程基础</td></tr>
+              <tr><td>多模型与重复市场</td><td>Machine Spirits 已覆盖 15 模型和 50 次混合市场重复</td><td>扩大模型数不是核心贡献</td></tr>
+              <tr><td>Persona、新闻、记忆、社交</td><td>LLM-agent 文献已大量使用</td><td>若无正交处理与人类验证，只是 prompt 设计</td></tr>
+              <tr><td>Teacher→Student + 未见 family</td><td>金融 LLM 市场中仍不常见</td><td><strong>核心创新候选</strong></td></tr>
+              <tr><td>Student 闭环等价与诱导分布漂移</td><td>多数工作只看单步或在线 LLM</td><td><strong>核心创新候选</strong></td></tr>
+              <tr><td>同政策下融资机制因果拆分</td><td>实验金融有信用证据，但与可审计数字政策连接不足</td><td><strong>核心创新候选</strong></td></tr>
+              <tr><td>人类—LLM—Student 同任务校准</td><td>现有市场论文通常缺同一状态任务的人类标签</td><td><strong>最高价值方向</strong></td></tr>
+            </tbody>
+          </table>
+
+          <h3>本次建议请导师拍板的五件事</h3>
+          <div class="three-col">
+            <article class="card"><h3>1｜研究对象</h3><p>近期主张限定为“模型条件政策”，还是明确投入人类实验、以真人行为为目标？</p></article>
+            <article class="card"><h3>2｜目标人群</h3><p>普通成人、有交易经验的个人投资者、还是专业交易者？三者的 ground truth 不相同。</p></article>
+            <article class="card"><h3>3｜第一篇主论文</h3><p>是否优先做人类—LLM 条件交易行为基准，而不是继续扩张大市场？</p></article>
+            <article class="card"><h3>4｜市场基准</h3><p>MarketCore 首先采用恒定 FV、SSW 递减 FV，还是同时支持两种冻结场景？</p></article>
+            <article class="card"><h3>5｜资源与伦理</h3><p>人类 54-state vignette 的样本来源、激励预算、伦理审批与时间表由谁负责？</p></article>
+            <article class="card"><h3>会后立即执行</h3><p>无论上述选择如何，a10 备份、分支 PR、post-run audit 与 ODD 都应先完成。</p></article>
+          </div>
+        </section>
+
+        <section id="implementation" class="page-break">
+          <p class="section-kicker">Architecture implementation</p>
+          <h2>架构实施建议：不重写，先把单体入口按职责机械拆开</h2>
+          <div class="notice danger">
+            <strong>第一优先级仍是 a10 备份。</strong>当前入口重构前，必须先建立至少两份内容寻址副本并完成恢复演练；
+            在此之前禁止 <code>git clean -fdx</code>、删除 worktree 或整理 nested clone。
+          </div>
+
+          <div class="two-col">
+            <article class="card plain">
+              <h3>为什么现在必须拆</h3>
+              <p><code>experiments/v2_attention_market.py</code> 已有约 4,850 行，
+                同时负责 profile、Provider、重试、Teacher、训练、市场、hash、manifest 和报告；
+                对应测试文件也有约 7,429 行。继续追加会让任何改动都像在改整个实验。</p>
+            </article>
+            <article class="card technical">
+              <h3>拆分原则</h3>
+              <p>先做 characterization，再移动纯函数；旧 CLI 和 <code>__all__</code> 保持兼容；
+                每次只拆一个职责，不同时改 prompt、Student、market、retry 或 schema。
+                源文件变化应升级 component fingerprint，绝不能冒充与 a10 身份相同。</p>
+            </article>
+          </div>
+
+          <h3>目标领域分层</h3>
+          <pre>LatentState
+    ↓
+ObservationPolicy        # 只在这里改变可见信息、mask、精度与干扰
+    ↓
+DecisionPolicy           # Human / Teacher / prior / linear / tree / MLP / ZI
+    ↓                     # 只输出动作概率、条件强度和OOD标记
+Explicit RNG sampler     # common random numbers，策略本身不负责掷骰子
+    ↓
+ExecutionConstraint      # Intent → AcceptedOrder / RejectedOrder
+    ↓
+MarketCore               # 集合竞价、分配、结算、账本；完全不认识LLM
+    ↓
+PublicTape + PrivateAccounts
+
+FinancingFacility        # 限额、利息、还款、margin/default，独立于MarketCore
+PublicChannel            # 只收上一轮显式公开消息，永不接收private rationale</pre>
+
+          <h3>建议新增的轻量编排包</h3>
+          <pre>experiments/
+  v2_attention_market.py       # 保留为50–100行兼容facade
+
+nmsim/v2_pipeline/
+  contracts.py                 # schema、Errors、PhaseResult
+  profiles.py                  # V1–V10冻结profile，纯函数
+  identity.py                  # sample / endpoint / config / component identities
+  provider_openai.py           # wire、auth、response、retry分类
+  teacher.py                   # sample plan、gate、attempt/honest-N记账
+  student.py                   # split、训练样本、候选模型编排
+  market.py                    # 实验cell编排；数学继续留在v2_market*
+  reporting.py                 # Markdown/HTML/summary纯渲染
+  cli.py                       # parser、guard、ManagedRunContext、phase sequencing
+
+nmsim/run_artifacts.py         # 通用不可变ArtifactSpec/ArtifactRef和rehash</pre>
+
+          <h3>新的运行结构</h3>
+          <pre>StudyRun
+├── HumanDatasetRun
+├── TeacherQualificationRun
+├── TeacherDatasetRun
+├── StudentSelectionRun
+├── StudentConfirmatoryRun
+├── ClosedLoopQualificationRun
+├── MarketFactorialRun
+└── ReportRun</pre>
+          <p class="small muted">每个阶段独立走 ManagedRunContext，只允许消费
+            <code>finished + identity match + artifact integrity verified</code> 的上游。
+            这样重新比较 Student、市场或报告时，不需要再次调用 Provider。</p>
+
+          <h3>四类顶层身份继续保留，但下一 schema 要正交</h3>
+          <table>
+            <thead><tr><th>身份</th><th>应该包含</th><th>不应该包含</th></tr></thead>
+            <tbody>
+              <tr><th>scientific_config_hash</th><td>状态、观察、动作、sample plan、split、模型选择规则、MarketSpec、estimand与阈值</td><td>CSS、报告模板、timeout、路径、profile名称</td></tr>
+              <tr><th>model_request_config_hash</th><td>prompt bytes、provider、requested model、sampling、response schema、wire request</td><td>市场规则、输出目录、重试等待</td></tr>
+              <tr><th>execution_config_hash</th><td>worker、timeout、retry、live/dry、路径和执行源代码</td><td>人类假设和市场estimand</td></tr>
+              <tr><th>full_effective_config_hash</th><td>绑定前三种精确身份</td><td>不新增含义模糊的“默认Config hash”</td></tr>
+            </tbody>
+          </table>
+
+          <h3>建议的小提交顺序</h3>
+          <ol>
+            <li><strong>P0：</strong>a10 两份备份、receipt、restore drill；源码不动。</li>
+            <li><strong>P1：</strong>ADR、post-run audit、golden/characterization fixtures。</li>
+            <li><strong>P2：</strong>先抽 <code>reporting.py</code>，旧入口保留同名 wrapper，要求字节输出一致。</li>
+            <li><strong>P3：</strong>抽 <code>contracts.py + profiles.py</code>，冻结 V1–V10 descriptor。</li>
+            <li><strong>P4：</strong>抽 <code>identity.py</code>，冻结 sample/order/canary 与四类身份投影。</li>
+            <li><strong>P5：</strong>抽 Provider/Teacher，再抽 Student/market orchestration。</li>
+            <li><strong>P6：</strong>新协议版本引入父子运行和 PolicyQualificationResult。</li>
+          </ol>
+
+          <div class="two-col">
+            <article class="card">
+              <h3>正式市场的资格门</h3>
+              <p>未来 confirmatory market 只能接受带 <code>qualified</code> 状态的 PolicyEnvelope。
+                未合格政策可以进入明确标记的 engineering diagnostic，但不能与正式入口混用。</p>
+            </article>
+            <article class="card">
+              <h3>最容易出错的迁移点</h3>
+              <p>旧测试 monkeypatch 路径、JSON dict/float 序列化、repo root 推断、logical/physical计数、
+                raw-before-honest-N 顺序和 private SDK envelope 穿越模块边界。</p>
+            </article>
+          </div>
+
+          <div class="notice info">
+            <strong>第一轮重构的正确声明：</strong>“无科学机制变化；CLI/schema兼容；历史a10不变；
+            source/component identity明确升级。”不要在重构分支上运行正式 endpoint 实验。
+          </div>
+        </section>
+
+        <section id="roadmap">
+          <p class="section-kicker">Roadmap</p>
+          <h2>建议实施路线：每一步都有交付物与 Go / No-Go</h2>
+          <div class="roadmap">
+            <article class="road-card">
+              <div class="road-num">00</div>
+              <div><h3>封存证据与统一仓库</h3><p><strong>大白话：</strong>先把已经花钱跑出来的唯一数据保住。</p><p><strong>专业任务：</strong>a10 public/private 分层不可变备份、恢复演练、全量 SHA-256；Teacher pilot 建 PR；明确唯一 canonical repo/worktree；只做 append-only post-run audit。</p></div>
+              <div class="road-gate"><strong>GO</strong>独立介质恢复后 hash 全一致。<br><strong>NO-GO</strong>仍只有 ignored worktree 单副本。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">01</div>
+              <div><h3>冻结研究对象与声明矩阵</h3><p><strong>大白话：</strong>先说清楚到底要证明“模型怎么交易”，还是“人怎么交易”。</p><p><strong>专业任务：</strong>estimand registry、E0–E5 claim ladder、V1/V2 分离的 ODD、calibration/validation/confirmatory 数据边界、每项机制的 null 与失败判据。</p></div>
+              <div class="road-gate"><strong>GO</strong>每条结论都能指向代码、配置、测试与数据。<br><strong>NO-GO</strong>继续使用“更真实”这类不可证伪目标。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">02A</div>
+              <div><h3>独立 MarketCore 1.0</h3><p><strong>大白话：</strong>先造一个不用 LLM 也能被实验经济学检验的市场。</p><p><strong>专业任务：</strong>constant/declining fundamental、dividend、terminal redemption、interest；uniform-price closed-book call；ZI、prior、fundamentalist、momentum、state-shuffled null；整数账本。</p></div>
+              <div class="road-gate"><strong>GO</strong>理论 null、账本与人类实验场景都可复现。<br><strong>NO-GO</strong>价格仍依赖隐藏流动性或无对手方成交。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">02B</div>
+              <div><h3>建立人类证据库</h3><p><strong>大白话：</strong>先准备真人到底怎么选的参照答案，而不是让 LLM 自己证明自己像人。</p><p><strong>专业任务：</strong>LtF、SSW 后继、ZTS 数据的版本/许可/hash；定义目标人群；冻结 54-state vignette、激励与伦理审批。</p></div>
+              <div class="road-gate"><strong>GO</strong>目标人群、任务映射和数据用途明确。<br><strong>NO-GO</strong>把普通学生、散户与专业交易员混成一个总体。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">03</div>
+              <div><h3>Teacher 与 Prompt 资格</h3><p><strong>大白话：</strong>同一道题换个等价说法，答案不能大幅翻转。</p><p><strong>专业任务：</strong>10–20 个关键 anchors × K20–30；平衡 6 种动作顺序、字段/enum 顺序、人称、单位、system/user 放置；多个 model families；所有失败保留。</p></div>
+              <div class="road-gate"><strong>GO</strong>状态效应明显大于 prompt-position 效应。<br><strong>NO-GO</strong>结论依赖单一措辞或单一模型。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">04</div>
+              <div><h3>人类微型实验与行为锚定</h3><p><strong>大白话：</strong>让真人和模型做完全同一道题，比较的不只是平均答案，还包括人和人之间有多不一样。</p><p><strong>专业任务：</strong>激励相容 choice、成对反事实、action distribution、variance、calibration、disposition/recency/reference-point treatment effects。</p></div>
+              <div class="road-gate"><strong>GO</strong>预注册分布与处理效应达到目标阈值。<br><strong>NO-GO</strong>只能研究模型政策，不能称人类行为。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">05</div>
+              <div><h3>Student V2 与全新 confirmatory set</h3><p><strong>大白话：</strong>先让简单模型参加，再决定神经网络有没有必要。</p><p><strong>专业任务：</strong>prior、regularized linear、GAM、小树、极小 MLP；soft targets；family-grouped validation；class balance；新冻结 test；CE/Brier/calibration/rare-action 指标。</p></div>
+              <div class="road-gate"><strong>GO</strong>新 family 上同时稳定胜 prior 与 linear。<br><strong>NO-GO</strong>仍只在训练集拟合，或靠反复看 test 调参。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">06</div>
+              <div><h3>闭环等价与监督式补点</h3><p><strong>大白话：</strong>Student 自己行动后走到新地方，仍要做得像 Teacher。</p><p><strong>专业任务：</strong>少量 Teacher rollout vs Student/prior/linear；equivalence margins；状态访问分布与机制统计；收集高频/OOD 状态重新标注，再以全新 rollout 验收。</p></div>
+              <div class="road-gate"><strong>GO</strong>单步与闭环指标同时等价。<br><strong>NO-GO</strong>静态 test 好、闭环却持续漂移。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">07</div>
+              <div><h3>融资机制正式实验</h3><p><strong>大白话：</strong>把“多了钱”和“真的借了债”分开。</p><p><strong>专业任务：</strong>finite cash、等额外生现金、zero-cost facility、有息且可偿还的 credit；合格政策 × matched controls；common random numbers、DiD、simulation-based power。</p></div>
+              <div class="road-gate"><strong>GO</strong>足够 seeds、预注册区间、机制方向稳定。<br><strong>NO-GO</strong>继续用 3 seeds 和零成本债务做信用因果结论。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">08</div>
+              <div><h3>有限注意力与信息负荷</h3><p><strong>大白话：</strong>先研究给不给相关信息、有没有干扰信息，而不是靠多写几段文字假装“注意力不同”。</p><p><strong>专业任务：</strong>relevant、masked、equal-length irrelevant、multi-message distraction；单资产称 information visibility，多资产后再研究 attention selection。</p></div>
+              <div class="road-gate"><strong>GO</strong>通道效应超过等长度 sham。<br><strong>NO-GO</strong>处理同时改变信息量、格式与显著性却不拆分。</div>
+            </article>
+            <article class="road-card">
+              <div class="road-num">09</div>
+              <div><h3>公共传播、同质化与外部验证</h3><p><strong>大白话：</strong>最后才让 Agent 互相影响，并证明不是“多问一次模型”自己造成的漂移。</p><p><strong>专业任务：</strong>no-feed、same-call no-social、sham/permuted/frozen public feed、independent-before-social、topology/model heterogeneity；人类市场、第二 Teacher、stylized facts 与 post-cutoff 数据。</p></div>
+              <div class="road-gate"><strong>GO</strong>社会效应超过全部调用与信息量对照。<br><strong>NO-GO</strong>从同向交易或高价格直接推断群体智慧/合谋。</div>
+            </article>
+          </div>
+        </section>
+
+        <section id="papers" class="page-break">
+          <p class="section-kicker">Publication plan</p>
+          <h2>建议论文规划：先行为基准，再闭环融资，最后注意力与社交</h2>
+          <div class="paper-grid">
+            <article class="paper-card">
+              <span class="paper-no">PAPER 0 · 方法/负结果</span>
+              <h3>Auditable Acquisition and Closed-Loop Deployment of LLM Trading Policies</h3>
+              <p><strong>现有基础：</strong>provenance、honest-N、技术重试、private/public 边界、不可覆盖运行、整数账本，以及“完整数据但固定 MLP 输基线”的负结果。</p>
+              <p><strong>不声称：</strong>人类行为、注意力、泡沫或因果市场效应。</p>
+            </article>
+            <article class="paper-card">
+              <span class="paper-no">PAPER 1 · 第一优先级</span>
+              <h3>Human-Calibrated Conditional Trading Policies</h3>
+              <p><strong>核心问题：</strong>相同量价/账户状态下，真人、多个 LLM 与 Student 的动作分布、反事实方向、方差和校准是否一致？</p>
+              <p><strong>最小证据：</strong>激励相容人类样本、prompt multiverse、多模型、独立 family/OOD。</p>
+            </article>
+            <article class="paper-card">
+              <span class="paper-no">PAPER 2 · 市场机制</span>
+              <h3>Behavioral Policies and Financing Constraints in Conserving Markets</h3>
+              <p><strong>核心问题：</strong>经人类验证的条件政策，与 finite、额外现金、零成本 facility、真实 credit 如何交互？</p>
+              <p><strong>最小证据：</strong>fundamental、ZI/prior/linear/human-policy controls、足够 seeds、闭环补点。</p>
+            </article>
+            <article class="paper-card">
+              <span class="paper-no">PAPER 3 · 信息与社会</span>
+              <h3>Limited Attention and Public Communication in Agent Markets</h3>
+              <p><strong>核心问题：</strong>相关/无关信息、公共 feed、网络结构和模型同质性如何改变微观选择与群体动力学？</p>
+              <p><strong>最小证据：</strong>equal-length controls、same-call no-social、sham/permuted feed、independent-before-social。</p>
+            </article>
+          </div>
+          <div class="notice info">
+            <strong>合谋建议另立第四篇。</strong>必须另建重复定价/竞价环境，预注册竞争价格、消费者福利、
+            punishment path 与 communication treatment；不能在资产价格共同上涨时顺带声称 collusion。
+          </div>
+        </section>
+
+        <section id="literature">
+          <p class="section-kicker">Literature map</p>
+          <h2>核心论文地图：每篇到底教会我们什么</h2>
+          <p class="lede">标签“同行评审”与“预印本”反映证据成熟度；链接指向论文或权威出版页面。</p>
+          <table>
+            <thead><tr><th>文献</th><th>状态</th><th>大白话</th><th>对本项目的专业用途与边界</th></tr></thead>
+            <tbody>
+              <tr><th><a href="https://doi.org/10.2307/1911361">Smith, Suchanek &amp; Williams, 1988</a></th><td><span class="review-badge">同行评审 · Econometrica</span></td><td>大家都知道资产值多少钱，真人市场仍可能先涨后崩。</td><td>提供实验 bubble/crash 基准；当前 V2 无 fundamental，不能套用 bubble 标签。</td></tr>
+              <tr><th><a href="https://doi.org/10.1086/261868">Gode &amp; Sunder, 1993</a></th><td><span class="review-badge">同行评审 · JPE</span></td><td>市场有秩序，未必因为交易者聪明，也可能是规则约束得好。</td><td>要求 ZI/null control；原文是私人价值 double auction，不等于当前 call market。</td></tr>
+              <tr><th><a href="https://www.aeaweb.org/articles?id=10.1257/mic.20150201">Plott &amp; Pogorelskiy, 2017</a></th><td><span class="review-badge">同行评审 · AEJ Micro</span></td><td>集合竞价有严肃的价格发现基础，不是简化玩具。</td><td>支持单价 call market；原实验的公开订单流、频率与真人制度不同。</td></tr>
+              <tr><th><a href="https://pubmed.ncbi.nlm.nih.gov/11038619/">Caginalp, Porter &amp; Smith, 1998</a></th><td><span class="review-badge">同行评审 · PNAS</span></td><td>市场里初始现金相对股票多，价格往往更高。</td><td>为 cash/asset ratio 和购买力处理提供直接依据；不验证 LLM 行为。</td></tr>
+              <tr><th><a href="https://doi.org/10.1016/j.jebo.2020.10.024">Capital Constraints and Asset Bubbles</a></th><td><span class="review-badge">同行评审 · JEBO</span></td><td>放松信用约束会让实验泡沫更大。</td><td>支持融资处理；当前零息、不还本 facility 只能称购买力放松。</td></tr>
+              <tr><th><a href="https://doi.org/10.1111/0022-1082.00072">Odean, 1998</a></th><td><span class="review-badge">同行评审 · Journal of Finance</span></td><td>真实投资者更愿卖掉赚钱仓、抱住亏钱仓。</td><td>支持成本价与浮盈亏特征；特征进入 prompt 不等于 LLM 已复现处置效应。</td></tr>
+              <tr><th><a href="https://doi.org/10.1093/rfs/hhm079">Barber &amp; Odean, 2008</a></th><td><span class="review-badge">同行评审 · RFS</span></td><td>散户更容易买到那些最能吸引注意力的股票。</td><td>完整机制需要多资产选择集；单资产只能研究信息可见性与 distraction。</td></tr>
+              <tr><th><a href="https://link.springer.com/article/10.1007/s42001-026-00465-4">Hashimoto et al., 2026 · FCLAgent</a></th><td><span class="review-badge">同行评审 · JCSS</span></td><td>LLM 决定买卖方向、规则决定价量，已经能接入 1,000-agent 订单簿。</td><td>最近竞争者；说明“LLM + 规则市场 + 大规模 agent”已不是创新。</td></tr>
+              <tr><th><a href="https://arxiv.org/abs/2502.15800">Henning et al. · LLM Agents Do Not Replicate Human Traders</a></th><td><span class="preprint-badge">预印本</span></td><td>LLM 市场往往比真人更理性、更整齐，泡沫更弱。</td><td>警告不能把 LLM-only 市场当人类市场；需要同任务人类对照。</td></tr>
+              <tr><th><a href="https://arxiv.org/abs/2604.18602">Machine Spirits, 2026</a></th><td><span class="preprint-badge">预印本</span></td><td>15 个模型表现不同，混合市场即使配置相同也可能走出完全不同路径。</td><td>多模型与重复市场已被覆盖；项目应聚焦蒸馏、闭环与机制识别。</td></tr>
+              <tr><th><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC12184514/">Gao et al., 2025</a></th><td><span class="review-badge">同行评审 · PNAS</span></td><td>大量重复问 LLM，仍不能可靠得到真人行为分布。</td><td>直接否定“模型重复输出 = 独立人类样本”；要求人类锚定。</td></tr>
+              <tr><th><a href="https://doi.org/10.1017/pan.2024.5">Bisbee et al., 2024</a></th><td><span class="review-badge">同行评审 · Political Analysis</span></td><td>平均答案可以像真人，但方差和条件关系可能完全不对。</td><td>要求比较完整分布、协方差与时间/prompt 稳定性，不只看均值。</td></tr>
+              <tr><th><a href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/515c62809e0a29729d7eec26e2916fc0-Abstract-Conference.html">Questioning Survey Responses, 2024</a></th><td><span class="review-badge">同行评审 · NeurIPS Oral</span></td><td>选项摆前面还是后面、叫 A 还是 B，都会改变模型回答。</td><td>支持平衡 action/enum/字段顺序的 prompt multiverse。</td></tr>
+              <tr><th><a href="https://aclanthology.org/2025.coling-main.360/">Do LLMs Play Dice?, 2025</a></th><td><span class="review-badge">同行评审 · COLING</span></td><td>模型能描述概率，不代表它能按那个概率稳定抽样。</td><td>Provider randomness 不能自动解释为校准的人口异质性。</td></tr>
+              <tr><th><a href="https://research.google/pubs/distilling-the-knowledge-in-a-neural-network/">Hinton, Vinyals &amp; Dean, 2015</a></th><td><span class="preprint-badge">Workshop / preprint</span></td><td>大模型的软输出可以压缩给小模型。</td><td>支持 soft targets；不证明 Teacher 正确，也不证明 Student 闭环有效。</td></tr>
+              <tr><th><a href="https://proceedings.mlr.press/v15/ross11a.html">Ross, Gordon &amp; Bagnell, 2011</a></th><td><span class="review-badge">同行评审 · AISTATS</span></td><td>Student 自己行动后会走到训练集没见过的地方，错误越滚越大。</td><td>解释 closed-loop covariate shift；支持 rollout 补点与独立复验。</td></tr>
+              <tr><th><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC3107299/">Lorenz et al., 2011</a></th><td><span class="review-badge">同行评审 · PNAS</span></td><td>大家互相看答案会更一致，但不一定更准确。</td><td>社会处理必须报告多样性，并设置 independent/no-social/sham controls。</td></tr>
+              <tr><th><a href="https://aclanthology.org/2024.findings-naacl.211/">Chuang et al., 2024</a></th><td><span class="review-badge">同行评审 · Findings NAACL</span></td><td>就算不互动，反复问模型也可能自己漂移；prompt 又能制造看似经典的碎片化。</td><td>要求 same-call-count、sham、permuted 和 frozen-message controls。</td></tr>
+              <tr><th><a href="https://arxiv.org/abs/2404.00806">Algorithmic Collusion by LLMs</a></th><td><span class="preprint-badge">完整论文为预印本</span></td><td>定价代理可能自行形成高价协调，轻微 prompt 变化也会影响结果。</td><td>合谋需独立竞争环境与福利基准；当前资产 call market不能顺带声称。</td></tr>
+              <tr><th><a href="https://pubs.usgs.gov/publication/70209554">ODD Protocol 2020</a> / <a href="https://pubs.usgs.gov/publication/70161783">Pattern-Oriented Modeling</a></th><td><span class="review-badge">同行评审 · JASSS / Science</span></td><td>先把模型是什么说清；不能因为像一条价格曲线就相信它。</td><td>要求目的、状态、调度、子模型和多尺度模式验证；代码全绿只是 verification。</td></tr>
+            </tbody>
+          </table>
+
+          <details>
+            <summary>可直接复用的人类实验资源</summary>
+            <ul class="source-list small">
+              <li><a href="https://www.openicpsr.org/openicpsr/project/198204/version/V1/view">A Unified Model of Learning to Forecast</a>：raw/clean data、代码与完整 oTree source；适合预期形成研究。</li>
+              <li><a href="https://www.openicpsr.org/openicpsr/project/114401/version/V1/view">经典 Learning-to-Forecast 数据 E114401</a>：适合个体 forecast 与价格反馈。</li>
+              <li><a href="https://github.com/Zurich-Trading-Simulator/OtreeZTS">Zurich Trading Simulator</a>：可复用 oTree 交易任务；<a href="https://doi.org/10.1016/j.jbef.2022.100762">工具论文</a>。</li>
+              <li>使用要求：精确记录 DOI/version/hash/license/privacy；外部数据只能作为显式输入，不能伪装成项目 child run。</li>
+            </ul>
+          </details>
+        </section>
+
+        <section id="onboarding" class="page-break">
+          <p class="section-kicker">New member onboarding</p>
+          <h2>新同学如何上手：先理解边界，再读代码</h2>
+          <div class="two-col">
+            <article class="card">
+              <h3>建议阅读顺序</h3>
+              <ol class="small">
+                <li>本报告的“三层判断”和“能说/不能说”。</li>
+                <li><a href="docs/V2_ATTENTION_DISTILLATION.md">V2 研究与实现协议</a>：理解研究动机、状态、动作、split 和市场。</li>
+                <li><a href="docs/V2_TEACHER_PILOT_V10.md">V10 Teacher Pilot 协议</a>：理解本次请求、技术重试和非复用边界。</li>
+                <li><a href="results_v2_teacher_pilot/runs/v2-teacher-pilot-live-20260820-a10/v2_attention_market_report.md">a10 本地原始报告</a>与 Student/market JSON。</li>
+                <li><a href="docs/ENTRYPOINTS.md">Entrypoint policy</a>、ManagedRunContext 与结果复用边界。</li>
+                <li>最后再读 V1 REPORT/PROJECT，且把历史结论视为需复核的探索结果。</li>
+              </ol>
+            </article>
+            <article class="card">
+              <h3>代码地图</h3>
+              <ul class="small">
+                <li><code>nmsim/v2_attention.py</code>：14 维状态、设计、prompt、严格 parser、聚合。</li>
+                <li><code>nmsim/v2_distillation.py</code>：family split、标准化、prior/linear/MLP、评估与 OOD。</li>
+                <li><code>nmsim/v2_market.py</code>：账户、信用设施、集合竞价、结算和守恒。</li>
+                <li><code>nmsim/v2_market_experiment.py</code>：特征构建、policy→order、四格实验。</li>
+                <li><code>experiments/v2_attention_market.py</code>：managed lifecycle、Teacher transport、gate、产物和报告。</li>
+                <li><code>nmsim/entrypoints.py</code>：哪些入口可声称正式研究 provenance。</li>
+              </ul>
+            </article>
+          </div>
+
+          <h3>任何新改动都必须回答的八个问题</h3>
+          <table>
+            <thead><tr><th>#</th><th>问题</th><th>为什么</th></tr></thead>
+            <tbody>
+              <tr><td>1</td><td>它改变的是 scientific、model request 还是 execution 语义？</td><td>决定哪个精确身份和 hash 必须变化。</td></tr>
+              <tr><td>2</td><td>参数从 CLI 到最终结果的 effect path 在哪里？</td><td>防止“配置存在但不起作用”。</td></tr>
+              <tr><td>3</td><td>对应 null/control/ablation 是什么？</td><td>没有对照就无法归因。</td></tr>
+              <tr><td>4</td><td>private rationale 是否可能泄漏？</td><td>私有推理永不进入 feed、Student 或市场。</td></tr>
+              <tr><td>5</td><td>失败会不会被改写成 hold 或静默丢弃？</td><td>必须保留失败与 honest-N。</td></tr>
+              <tr><td>6</td><td>历史 run 是否保持不可覆盖？</td><td>任何新实验都必须使用新 run identity。</td></tr>
+              <tr><td>7</td><td>数值、会计和隐私测试在哪里？</td><td>代码完成不以“能跑”为标准。</td></tr>
+              <tr><td>8</td><td>这项结果最终允许说到哪一层证据？</td><td>工程 verification 不能替代人类或外部 validation。</td></tr>
+            </tbody>
+          </table>
+
+          <div class="notice info">
+            <strong>新同学第一条原则：</strong>先读 manifest 和原始结果，再读报告；代码、测试、manifest、raw result
+            是事实源，文档描述的是设计意图和历史解释。
+          </div>
+        </section>
+
+        <section id="appendix">
+          <p class="section-kicker">Evidence appendix</p>
+          <h2>证据索引、精确身份与术语</h2>
+          <h3>本地权威证据</h3>
+          <ul class="source-list small">
+            <li><a href="results_v2_teacher_pilot/runs/v2-teacher-pilot-live-20260820-a10/run_manifest.json">a10 本地 run_manifest.json</a>：运行状态、计数、身份、输入与注册产物。</li>
+            <li><a href="results_v2_teacher_pilot/runs/v2-teacher-pilot-live-20260820-a10/student_evaluation.json">本地 student_evaluation.json</a>：prior/linear/MLP、Teacher disagreement 与 OOD。</li>
+            <li><a href="results_v2_teacher_pilot/runs/v2-teacher-pilot-live-20260820-a10/market_2x2_summary.json">本地 market_2x2_summary.json</a>：四格全部 seed、配对设计、锁市、债务和市场 OOD。</li>
+            <li><a href="results_v2_teacher_pilot/runs/v2-teacher-pilot-live-20260820-a10/v2_attention_market_report.html">本地原始 a10 HTML 报告</a>：由运行自动生成的工程报告。</li>
+            <li><a href="docs/V2_TEACHER_PILOT_V10.md">V10 冻结协议</a>：技术重试、非复用、请求与解释边界。</li>
+          </ul>
+
+          <h3>精确 V2 身份</h3>
+          <div class="hash-list">
+            <div class="hash-item"><strong>v2_scientific_config_hash</strong> · schema <code>v2_attention_market/0.1</code><br>a6c8f54c602259b821051b7fa5f4e2e83e0473a4f73de04a96ab5d69b70d58f2</div>
+            <div class="hash-item"><strong>v2_model_request_config_hash</strong> · schema <code>v2_teacher_request/0.5</code><br>47d957d8533be05703dd78289917ff5787e4020d1b100c40801d2607c2cd080c</div>
+            <div class="hash-item"><strong>v2_execution_config_hash</strong> · schema <code>v2_attention_execution/0.3</code><br>62deadb9e591c62c37156e838d355f67fd13149193e437dec6fb1bcde327b66c</div>
+            <div class="hash-item"><strong>v2_full_effective_config_hash</strong> · schema <code>v2_attention_full_effective_config/0.1</code><br>3f25383f0b5a4c2429aa99ad89ddea456f013ddcd0cb6b2a4cf2b804fcd67396</div>
+            <div class="hash-item"><strong>a10 manifest SHA-256</strong><br>33605f7c50424156fa77e2576cc915fedc1d0cbe9ffc49474be8df105c00bf6f</div>
+          </div>
+
+          <h3>2026-08-22 验证结果</h3>
+          <table>
+            <thead><tr><th>检查</th><th>结果</th><th>边界</th></tr></thead>
+            <tbody>
+              <tr><td>V10 专项</td><td><code>96 tests / OK</code></td><td>Teacher gate、retry、身份、私密边界与运行不可覆盖</td></tr>
+              <tr><td>完整 unittest</td><td><code>498 tests / OK</code></td><td>审计执行结果，不是持久化 CI badge</td></tr>
+              <tr><td>compileall</td><td><code>exit 0</code></td><td>语法/字节码检查</td></tr>
+              <tr><td>repro_check</td><td><code>PASS · 25 points · final 83.48</code></td><td>仅证明 Mock/local RNG 跨进程一致，不证明真实 Provider 确定</td></tr>
+              <tr><td>git diff --check</td><td><code>exit 0</code></td><td>工作树 clean、无空白错误</td></tr>
+              <tr><td>a10 artifact integrity</td><td><code>42/42 OK</code></td><td>注册文件逐一重算；不等于科学有效性</td></tr>
+            </tbody>
+          </table>
+
+          <h3>术语大白话</h3>
+          <dl class="glossary">
+            <div class="term"><dt>Teacher policy</dt><dd>大模型看到状态后会怎么选；专业上是条件动作/强度分布。</dd></div>
+            <div class="term"><dt>Student</dt><dd>把昂贵大模型行为压缩成便宜、可重复的数值模型。</dd></div>
+            <div class="term"><dt>Soft target</dt><dd>不只记多数答案，还记 buy/hold/sell 各自出现的比例。</dd></div>
+            <div class="term"><dt>Honest-N</dt><dd>真正合法获得、成功提交且可以进入分析的样本数。</dd></div>
+            <div class="term"><dt>Family split</dt><dd>相似题及其重复不能一部分进训练、一部分进测试。</dd></div>
+            <div class="term"><dt>Cross entropy</dt><dd>模型答错而且特别自信时会被重罚；概率模型的关键指标。</dd></div>
+            <div class="term"><dt>Brier score</dt><dd>预测概率与实际 one-hot/soft target 的平方距离。</dd></div>
+            <div class="term"><dt>Calibration</dt><dd>声称 70% 的选择，在同类情形中是否真约七成发生。</dd></div>
+            <div class="term"><dt>OOD</dt><dd>模型遇到训练时没覆盖的新状态或新状态组合。</dd></div>
+            <div class="term"><dt>Closed loop</dt><dd>Agent 改变市场，市场又成为 Agent 下一轮输入。</dd></div>
+            <div class="term"><dt>Covariate shift</dt><dd>模型上线后遇到的输入分布和训练时不同。</dd></div>
+            <div class="term"><dt>Null / control</dt><dd>用于判断现象是不是市场规则或总体动作比例自己制造的对照。</dd></div>
+            <div class="term"><dt>Ablation</dt><dd>有计划地拿掉一个机制，看结果是否还存在。</dd></div>
+            <div class="term"><dt>Fundamental value</dt><dd>根据股息、利息和终值定义的资产经济价值；没有它不宜称泡沫。</dd></div>
+            <div class="term"><dt>Call auction</dt><dd>所有人先同时报单，再用一个统一价格一次撮合。</dd></div>
+            <div class="term"><dt>Difference-in-Differences</dt><dd>比较两个因素的交互，不是只看某格涨没涨。</dd></div>
+            <div class="term"><dt>Common random numbers</dt><dd>不同处理使用配对随机流，减少无关随机噪声。</dd></div>
+            <div class="term"><dt>Power analysis</dt><dd>实验前根据方差和目标效应算需要多少独立运行。</dd></div>
+            <div class="term"><dt>Internal validity</dt><dd>在模拟器内部，效果是否真的由指定处理造成。</dd></div>
+            <div class="term"><dt>External validity</dt><dd>结果能否推广到目标人群、其他模型或真实市场。</dd></div>
+            <div class="term"><dt>Provenance</dt><dd>每个结果究竟由哪份代码、配置、输入和请求产生。</dd></div>
+          </dl>
+
+          <details>
+            <summary>本报告的数据与隐私边界</summary>
+            <p class="small">本报告只使用 manifest、公有 Teacher projection、聚合数据、Student evaluation、market summary 与公开论文。没有读取或嵌入 private reasoning 内容、API key 或原始 endpoint URL。Requested <code>MiniMax-M2.7</code> 与 reported <code>HiggsAI</code> 始终分开呈现。</p>
+          </details>
+
+          <div class="notice danger">
+            <strong>单点备份风险重申：</strong>a10 结果不在 Git 中，也未在 <code>private_backups/</code>
+            找到副本。删除或重建该 worktree 可能永久丢失唯一正式 V2 endpoint 数据。
+          </div>
+        </section>
+
+        <footer class="footer">
+          <p><strong>报告版本：</strong>1.0 · 2026-08-22 · 面向导师与项目新成员</p>
+          <p><strong>科学定位：</strong>Research-grade agent-based market simulator；非实盘、非券商系统、非投资建议。</p>
+          <p><strong>一句话收束：</strong>我们已经造出“可审计、会守恒、失败不造假”的实验机器；下一阶段的核心不是继续堆 LLM 请求，而是让行为政策通过人类、基线、OOD 与闭环四道门。</p>
+        </footer>
+      </div>
+    </main>
+  </div>
+</body>
+</html>

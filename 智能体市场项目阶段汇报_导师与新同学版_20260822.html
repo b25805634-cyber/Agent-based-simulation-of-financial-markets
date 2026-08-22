@@ -1,0 +1,480 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="description" content="智能体金融市场研究项目阶段汇报：a10探索性运行、科学边界与下一阶段研究计划。">
+  <meta name="color-scheme" content="light">
+  <title>智能体金融市场｜导师与新同学阶段汇报</title>
+  <style>
+    :root {
+      --ink:#132633;
+      --muted:#607481;
+      --paper:#fffefb;
+      --canvas:#e9efef;
+      --line:#d6e0e1;
+      --teal:#075f68;
+      --teal2:#11808a;
+      --navy:#274f73;
+      --blue:#486f97;
+      --violet:#74618d;
+      --green:#2d725e;
+      --green-bg:#e7f3ed;
+      --red:#99453f;
+      --red-bg:#fbeae8;
+      --amber:#936014;
+      --amber-bg:#fff3d8;
+      --shadow:0 24px 80px rgba(31,54,62,.12);
+    }
+    *{box-sizing:border-box}
+    html{scroll-behavior:smooth;scroll-snap-type:y mandatory}
+    body{
+      margin:0;
+      color:var(--ink);
+      background:var(--canvas);
+      font-family:"Noto Sans CJK SC","Source Han Sans SC","PingFang SC","Microsoft YaHei",system-ui,-apple-system,sans-serif;
+      font-size:clamp(15px,1.25vw,21px);
+      line-height:1.55;
+    }
+    a{color:var(--teal);text-underline-offset:3px}
+    code,.mono{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,monospace}
+    .controls{
+      position:fixed;
+      z-index:30;
+      top:16px;
+      left:50%;
+      display:flex;
+      align-items:center;
+      gap:8px;
+      width:min(780px,calc(100% - 28px));
+      padding:8px 10px;
+      transform:translateX(-50%);
+      border:1px solid rgba(190,207,208,.92);
+      border-radius:999px;
+      background:rgba(255,255,255,.9);
+      box-shadow:0 8px 30px rgba(20,50,58,.12);
+      backdrop-filter:blur(14px);
+    }
+    .controls button{
+      padding:6px 11px;
+      border:1px solid var(--line);
+      border-radius:999px;
+      color:var(--ink);
+      background:white;
+      cursor:pointer;
+      font:inherit;
+      font-size:12px;
+      font-weight:700;
+    }
+    .controls button:hover{color:var(--teal);border-color:var(--teal)}
+    .progress{height:5px;flex:1;overflow:hidden;border-radius:999px;background:#e6eded}
+    .progress i{display:block;width:0;height:100%;border-radius:inherit;background:var(--teal);transition:width .2s ease}
+    .counter{min-width:60px;color:var(--muted);text-align:center;font-size:12px;font-variant-numeric:tabular-nums}
+    .deck{width:min(1500px,100%);margin:0 auto}
+    .slide{
+      position:relative;
+      display:flex;
+      min-height:100vh;
+      padding:clamp(72px,8vh,105px) clamp(34px,7vw,112px) clamp(45px,6vh,80px);
+      flex-direction:column;
+      justify-content:center;
+      scroll-snap-align:start;
+      overflow:hidden;
+      background:var(--paper);
+      border-bottom:1px solid var(--line);
+    }
+    .slide::after{
+      content:attr(data-number);
+      position:absolute;
+      right:32px;
+      bottom:20px;
+      color:#a4b2b7;
+      font-size:12px;
+      font-weight:800;
+      letter-spacing:.12em;
+    }
+    .cover{
+      color:white;
+      background:
+        radial-gradient(circle at 85% 80%,rgba(93,151,168,.28),transparent 32%),
+        linear-gradient(125deg,#064f57,#173e5d 72%);
+    }
+    .cover::before{
+      content:"";
+      position:absolute;
+      right:-8vw;
+      bottom:-26vw;
+      width:58vw;
+      height:58vw;
+      border:1px solid rgba(255,255,255,.14);
+      border-radius:50%;
+      box-shadow:0 0 0 5vw rgba(255,255,255,.025),0 0 0 11vw rgba(255,255,255,.02);
+    }
+    .eyebrow{
+      position:relative;
+      z-index:1;
+      margin:0 0 16px;
+      color:var(--teal2);
+      font-size:.66em;
+      font-weight:800;
+      letter-spacing:.18em;
+      text-transform:uppercase;
+    }
+    .cover .eyebrow{color:#9dd8da}
+    h1,h2{
+      margin:0;
+      font-family:"Noto Serif CJK SC","Source Han Serif SC","Songti SC",Georgia,serif;
+      letter-spacing:-.035em;
+      line-height:1.15;
+    }
+    h1{position:relative;z-index:1;max-width:1120px;font-size:clamp(3rem,6vw,6.4rem)}
+    h2{max-width:1180px;font-size:clamp(2.1rem,4.2vw,4.5rem)}
+    h3{margin:0 0 9px;font-size:1.02em;line-height:1.35}
+    p{margin:10px 0}
+    .subtitle{position:relative;z-index:1;max-width:980px;margin-top:26px;color:#d8e9ea;font-size:1.16em}
+    .meta{position:relative;z-index:1;display:flex;flex-wrap:wrap;gap:10px;margin-top:32px}
+    .tag{padding:7px 12px;border:1px solid rgba(255,255,255,.24);border-radius:999px;color:#e8f4f4;background:rgba(255,255,255,.06);font-size:.68em}
+    .slide-lede{max-width:1100px;margin-top:18px;color:var(--muted);font-size:1.08em}
+    .grid2{display:grid;grid-template-columns:1fr 1fr;gap:18px;margin-top:30px}
+    .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:30px}
+    .grid4{display:grid;grid-template-columns:repeat(4,1fr);gap:13px;margin-top:28px}
+    .card{
+      padding:22px 24px;
+      border:1px solid var(--line);
+      border-radius:18px;
+      background:#fff;
+      box-shadow:0 8px 26px rgba(38,66,73,.05);
+    }
+    .card p,.card li{color:#445a67;font-size:.8em}
+    .card ul{margin:10px 0 0;padding-left:1.1em}
+    .card li+li{margin-top:6px}
+    .gate{border-top:5px solid var(--line)}
+    .gate.go{border-top-color:var(--green);background:linear-gradient(145deg,var(--green-bg),#fff)}
+    .gate.no{border-top-color:var(--red);background:linear-gradient(145deg,var(--red-bg),#fff)}
+    .gate.pending{border-top-color:var(--amber);background:linear-gradient(145deg,var(--amber-bg),#fff)}
+    .gate-label{display:block;margin-bottom:8px;font-size:.61em;font-weight:850;letter-spacing:.13em;text-transform:uppercase}
+    .go .gate-label{color:var(--green)}.no .gate-label{color:var(--red)}.pending .gate-label{color:var(--amber)}
+    .big-number{display:block;color:var(--teal);font-size:clamp(2rem,4vw,4.3rem);font-weight:800;letter-spacing:-.05em;line-height:1}
+    .metric span:last-child{display:block;margin-top:8px;color:var(--muted);font-size:.7em;line-height:1.35}
+    .flow{display:grid;grid-template-columns:1fr 34px 1fr 34px 1fr 34px 1fr;gap:10px;align-items:stretch;margin-top:38px}
+    .node{display:flex;min-height:180px;padding:22px;flex-direction:column;justify-content:center;border:1px solid var(--line);border-radius:19px;background:white;text-align:center}
+    .node b{color:var(--teal);font-size:1.15em}.node span{margin-top:8px;color:var(--muted);font-size:.73em}.arrow{display:grid;place-items:center;color:#98aeb2;font-size:1.8em}
+    .distance-row{display:grid;grid-template-columns:repeat(3,1fr);gap:16px;margin-top:20px}
+    .distance{padding:15px;border:1px dashed #9cbfc0;border-radius:14px;color:var(--teal);background:#eef7f6;text-align:center;font-size:.78em;font-weight:720}
+    .bar-chart{margin-top:30px;padding:24px;border:1px solid var(--line);border-radius:18px;background:#fff}
+    .bar-row{display:grid;grid-template-columns:110px minmax(0,1fr) 120px;gap:15px;align-items:center;margin:17px 0}
+    .track{height:24px;overflow:hidden;border-radius:999px;background:#edf2f2}.fill{height:100%;border-radius:inherit;background:var(--blue)}.fill.hold{background:#8c9ca4}.fill.sell{background:#a4615c}.value{text-align:right;font-weight:800;font-variant-numeric:tabular-nums}
+    .student-chart{display:grid;grid-template-columns:repeat(3,1fr);gap:24px;align-items:end;height:360px;margin-top:30px;padding:30px 38px 0;border-bottom:2px solid #91a4aa}
+    .student-bar{position:relative;display:flex;height:100%;align-items:flex-end;justify-content:center}
+    .student-bar i{display:block;width:min(130px,72%);border-radius:12px 12px 0 0;background:var(--blue)}
+    .student-bar.prior i{height:61.2%;background:#8798a1}.student-bar.linear i{height:49.2%}.student-bar.mlp i{height:100%;background:#c47b75}
+    .student-bar b{position:absolute;bottom:calc(var(--h,50%) + 12px);font-size:1.2em}.student-bar span{position:absolute;bottom:-42px;font-size:.78em;font-weight:750}
+    .ood-visual{display:grid;grid-template-columns:1fr 1.5fr;gap:30px;align-items:center;margin-top:34px}
+    .ring{display:grid;place-items:center;width:min(300px,80%);aspect-ratio:1;margin:auto;border-radius:50%;background:conic-gradient(var(--amber) 0 11.37%,#e6eded 11.37% 100%);position:relative}
+    .ring::after{content:"";position:absolute;inset:23%;border-radius:50%;background:var(--paper)}.ring strong{position:relative;z-index:1;color:var(--amber);font-size:2em}.ring small{position:absolute;z-index:1;margin-top:62px;color:var(--muted);font-size:.65em}
+    .ood-bars{display:grid;gap:15px}.ood-row{display:grid;grid-template-columns:180px 1fr 75px;gap:12px;align-items:center;font-size:.78em}.ood-track{height:18px;border-radius:999px;background:#edf2f2;overflow:hidden}.ood-track i{display:block;height:100%;border-radius:inherit;background:var(--amber)}
+    .range-chart{margin-top:30px;padding:22px 24px 30px;border:1px solid var(--line);border-radius:18px;background:#fff}
+    .axis-labels{position:relative;height:24px;margin-left:210px;margin-right:72px;color:var(--muted);font-size:.57em}.axis-labels span{position:absolute;transform:translateX(-50%)}
+    .range-row{display:grid;grid-template-columns:195px minmax(0,1fr) 62px;gap:14px;align-items:center;margin:19px 0}.range-name{font-size:.72em;font-weight:740}.range-axis{position:relative;height:32px;border-radius:7px;background:#eef2f3}.range-axis::before{content:"";position:absolute;top:0;bottom:0;left:23.077%;width:1px;background:#6d7f87}.seed{position:absolute;top:50%;width:14px;height:14px;transform:translate(-50%,-50%);border:2px solid white;border-radius:50%;background:var(--blue);box-shadow:0 0 0 1px rgba(25,54,75,.4)}.seed.alt{background:var(--violet)}.range-mean{text-align:right;font-size:.7em;font-weight:800}
+    .claim-table{display:grid;grid-template-columns:1fr 1fr;gap:22px;margin-top:30px}.claim{padding:24px 27px;border-radius:18px}.claim.yes{background:var(--green-bg);border:1px solid #b9d8ca}.claim.no{background:var(--red-bg);border:1px solid #e3c0bd}.claim h3{font-size:1.15em}.claim ul{margin:12px 0 0;padding-left:1.1em}.claim li{font-size:.78em}.claim li+li{margin-top:8px}
+    .road{display:grid;grid-template-columns:repeat(3,1fr);gap:18px;margin-top:34px}.road-step{padding:26px;border:1px solid var(--line);border-radius:18px;background:white}.road-step .n{color:var(--teal);font-family:Georgia,serif;font-size:2.3em;font-weight:800}.road-step p{color:var(--muted);font-size:.78em}.road-step .go-line{padding-top:10px;border-top:1px solid var(--line);color:var(--teal);font-size:.7em;font-weight:700}
+    .ask-grid{display:grid;grid-template-columns:repeat(2,1fr);gap:16px;margin-top:30px}.ask{display:grid;grid-template-columns:45px 1fr;gap:15px;padding:20px 22px;border:1px solid var(--line);border-radius:16px;background:white}.ask b{display:grid;place-items:center;width:42px;height:42px;border-radius:13px;color:white;background:var(--teal)}.ask h3{margin:0}.ask p{margin:4px 0 0;color:var(--muted);font-size:.73em}
+    .boundary{margin-top:24px;padding:14px 18px;border-left:4px solid var(--amber);border-radius:0 12px 12px 0;color:#544b3d;background:var(--amber-bg);font-size:.72em}
+    .source{position:absolute;left:clamp(34px,7vw,112px);right:90px;bottom:24px;color:#84969d;font-size:.55em}
+    .appendix-label{display:inline-block;margin-bottom:16px;padding:5px 10px;border-radius:999px;color:var(--navy);background:#e9f0f6;font-size:.62em;font-weight:800;letter-spacing:.08em}
+    table{width:100%;margin-top:24px;border-collapse:collapse;font-size:.67em;background:white}th,td{padding:10px 12px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}th{background:#eef3f3}td.num{text-align:right;white-space:nowrap;font-variant-numeric:tabular-nums}
+    .refs{columns:2;column-gap:28px;margin-top:24px}.ref{break-inside:avoid;margin-bottom:12px;padding:12px 14px;border:1px solid var(--line);border-radius:12px;background:white;font-size:.64em}.ref strong{display:block}.badge{display:inline-block;margin-top:5px;padding:2px 6px;border-radius:999px;color:var(--green);background:var(--green-bg);font-size:.8em;font-weight:760}.badge.pre{color:var(--amber);background:var(--amber-bg)}
+    .code-map{display:grid;grid-template-columns:repeat(2,1fr);gap:15px;margin-top:28px}.code-item{padding:18px 20px;border:1px solid var(--line);border-radius:15px;background:white}.code-item code{color:var(--teal);font-size:.72em;font-weight:700}.code-item p{color:var(--muted);font-size:.68em}
+    .quiet{color:var(--muted)}
+    @media(max-width:900px){html{scroll-snap-type:none}.slide{min-height:auto;padding:92px 25px 55px}.grid3,.grid4,.road{grid-template-columns:1fr}.grid2,.claim-table,.ask-grid,.ood-visual{grid-template-columns:1fr}.flow{grid-template-columns:1fr}.arrow{transform:rotate(90deg);height:25px}.student-chart{height:280px}.range-row{grid-template-columns:120px 1fr 50px}.axis-labels{margin-left:134px}.source{position:static;margin-top:28px}.refs{columns:1}.code-map{grid-template-columns:1fr}}
+    @media print{
+      @page{size:13.333in 7.5in;margin:0}
+      html{scroll-snap-type:none}
+      body{background:white;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+      .controls{display:none}
+      .deck{width:100%}
+      .slide{width:13.333in;height:7.5in;min-height:0;padding:.58in .75in .48in;break-after:page;overflow:hidden;border:0}
+      .slide:last-child{break-after:auto}
+      .source{left:.75in;right:.75in;bottom:.2in}
+    }
+  </style>
+</head>
+<body>
+  <div class="controls" aria-label="演示控制">
+    <button type="button" id="prev">← 上一页</button>
+    <div class="progress" aria-hidden="true"><i id="progress"></i></div>
+    <span class="counter" id="counter">1 / 17</span>
+    <button type="button" id="next">下一页 →</button>
+    <button type="button" onclick="window.print()">导出 PDF</button>
+  </div>
+
+  <main class="deck">
+    <section class="slide cover" id="s1" data-number="01" data-title="封面">
+      <p class="eyebrow">Research briefing · 2026-08-22</p>
+      <h1>从条件决策蒸馏<br>到市场反馈</h1>
+      <p class="subtitle">智能体金融市场研究项目阶段汇报：a10 端到端工程已经完成，Teacher 资格、Student 泛化与市场科学解释仍待通过。</p>
+      <div class="meta"><span class="tag">V2 behavior distillation</span><span class="tag">Conserving call market</span><span class="tag">Exploratory evidence</span><span class="tag">非投资建议</span></div>
+    </section>
+
+    <section class="slide" id="s2" data-number="02" data-title="阶段结论">
+      <p class="eyebrow">阶段结论</p>
+      <h2>工程链条完整，核心科学假设尚未通过</h2>
+      <div class="grid3">
+        <article class="card gate go"><span class="gate-label">Engineering · GO</span><h3>采集、审计与守恒通过</h3><p>162/162 Teacher，12/12 市场，720/720 轮；注册产物完整，私有理由未进入下游。</p></article>
+        <article class="card gate no"><span class="gate-label">Distillation · NO-GO</span><h3>固定 MLP 未击败基线</h3><p>Frozen-test CE：MLP 1.022，高于 prior 0.625 与 linear 0.502。</p></article>
+        <article class="card gate pending"><span class="gate-label">Validation · Pending</span><h3>人类与市场解释未建立</h3><p>无人类同任务标签、无 fundamental、每格仅 3 paired seeds。</p></article>
+      </div>
+      <div class="boundary">Manifest 的 <code>finished</code> 表示计划计算完整终止，不表示政策已 <code>qualified</code>。</div>
+      <p class="source">项目证据：a10 run manifest、student evaluation、market summary。</p>
+    </section>
+
+    <section class="slide" id="s3" data-number="03" data-title="研究定位">
+      <p class="eyebrow">研究定位</p>
+      <h2>创新不在“再造一个 LLM 市场”，而在逐级验证误差</h2>
+      <div class="grid3">
+        <article class="card"><h3>已有文献已覆盖</h3><p>LLM 买卖方向、规则执行、订单簿、大规模 Agent、多模型和社会信息均已有工作。</p></article>
+        <article class="card"><h3>当前研究缺口</h3><p>同一可执行状态下的人类—Teacher—Student 分布比较，以及 Student 进入闭环后的等价性。</p></article>
+        <article class="card"><h3>项目方法优势</h3><p>honest-N、不可变运行、私有/公开边界、显式账本和机制级 controls。</p></article>
+      </div>
+      <div class="boundary">融资、注意力和社交应作为通过基础有效性链后的处理条件，而不是同时加入第一篇主实验。</div>
+      <p class="source">相邻工作：Hashimoto et al. (2026，同行评审)；Henning et al. (2025，预印本)；Machine Spirits (2026，预印本)。</p>
+    </section>
+
+    <section class="slide" id="s4" data-number="04" data-title="识别链">
+      <p class="eyebrow">可识别的研究链</p>
+      <h2>Human → Teacher → Student → Market 必须分别过门</h2>
+      <div class="flow">
+        <div class="node"><b>Human H(a,q|x)</b><span>同任务、激励相容的目标人群行为分布</span></div><div class="arrow">→</div>
+        <div class="node"><b>Teacher T(a,q|x)</b><span>跨 prompt、批次和模型条件下的合格标注器</span></div><div class="arrow">→</div>
+        <div class="node"><b>Student S(a,q|x)</b><span>未见 family 上胜过 prior 与 linear 的数值政策</span></div><div class="arrow">→</div>
+        <div class="node"><b>Market M[S]</b><span>与 M[T] 在路径、机制统计和状态访问上等价</span></div>
+      </div>
+      <div class="distance-row"><div class="distance">D(T,H) · 人类有效性</div><div class="distance">D(S,T) · 蒸馏有效性</div><div class="distance">D(M[S],M[T]) · 闭环等价</div></div>
+      <p class="source">方法依据：Hinton et al. (2015)；Ross, Gordon &amp; Bagnell (2011，同行评审)。</p>
+    </section>
+
+    <section class="slide" id="s5" data-number="05" data-title="a10完整性">
+      <p class="eyebrow">a10 · 完整且可审计</p>
+      <h2>第一次完成真实 Endpoint → Student → 市场全链路</h2>
+      <div class="grid4">
+        <div class="card metric"><strong class="big-number">162/162</strong><span>有效 Teacher responses<br>54 states × K=3</span></div>
+        <div class="card metric"><strong class="big-number">163</strong><span>物理 Provider attempts<br>162 logical requests</span></div>
+        <div class="card metric"><strong class="big-number">12/12</strong><span>四格市场运行<br>每格3 paired seeds</span></div>
+        <div class="card metric"><strong class="big-number">720/720</strong><span>完成模拟轮次<br>逐轮守恒检查通过</span></div>
+      </div>
+      <div class="grid2">
+        <article class="card"><h3>严格采集门</h3><p>162 个新请求从头采集；a1–a9 未复用、补齐或拼接。一次瞬态异常经审计过的 application-level retry 后成功；SDK internal retry=0。</p></article>
+        <article class="card"><h3>三个不可混淆的 honest-N</h3><p>Teacher samples 162；aggregated state families 54；market runs 12。162 不是 162 名参与者，720 也不是 720 个独立实验。</p></article>
+      </div>
+      <p class="source">Run：v2-teacher-pilot-live-20260820-a10 · Code：b9919c4 · 2026-08-20。</p>
+    </section>
+
+    <section class="slide" id="s6" data-number="06" data-title="Teacher分布">
+      <p class="eyebrow">Teacher 条件决策分布</p>
+      <h2>动作具有状态反应，但整体显著偏向 Sell</h2>
+      <div class="bar-chart">
+        <div class="bar-row"><strong>Buy</strong><div class="track"><div class="fill" style="width:8.02%"></div></div><span class="value">13 · 8.0%</span></div>
+        <div class="bar-row"><strong>Hold</strong><div class="track"><div class="fill hold" style="width:15.43%"></div></div><span class="value">25 · 15.4%</span></div>
+        <div class="bar-row"><strong>Sell</strong><div class="track"><div class="fill sell" style="width:76.54%"></div></div><span class="value">124 · 76.5%</span></div>
+      </div>
+      <div class="grid3">
+        <article class="card"><h3>38 / 54</h3><p>状态内三次动作完全一致；另有15个2:1、1个1:1:1。</p></article>
+        <article class="card"><h3>Gini 0.1358</h3><p>描述同一 Endpoint 条件下的响应差异，不代表人群异质性。</p></article>
+        <article class="card"><h3>K=3 / state</h3><p>软标签只能取0、1/3、2/3、1，尚不足以精细估计条件概率。</p></article>
+      </div>
+      <div class="boundary">当前只证明固定 prompt 下可获得合法回答；尚无人类锚点、prompt multiverse、跨模型稳健性和预注册行为阈值。</div>
+    </section>
+
+    <section class="slide" id="s7" data-number="07" data-title="Student结果">
+      <p class="eyebrow">Student 泛化</p>
+      <h2>固定 MLP 的冻结测试表现低于两个简单基线</h2>
+      <div class="student-chart" aria-label="Test cross entropy，越低越好">
+        <div class="student-bar prior" style="--h:61.2%"><b>0.625</b><i></i><span>Prior</span></div>
+        <div class="student-bar linear" style="--h:49.2%"><b>0.502</b><i></i><span>Linear</span></div>
+        <div class="student-bar mlp" style="--h:100%"><b>1.022</b><i></i><span>Fixed MLP</span></div>
+      </div>
+      <div class="grid3" style="margin-top:55px">
+        <article class="card"><h3>Train CE 0.244</h3><p>几乎贴近训练软标签的熵下限，训练拟合非常充分。</p></article>
+        <article class="card"><h3>Validation CE 1.626</h3><p>明显高于 prior 0.588，显示严重 train–validation gap。</p></article>
+        <article class="card"><h3>Test Brier 0.403</h3><p>同样差于 linear 0.218 和 prior 0.257。</p></article>
+      </div>
+      <div class="boundary"><code>deployed_model_failed_to_beat_a_baseline=true</code>。固定部署源于预先协议，不是看到 test 后选出的胜者。</div>
+    </section>
+
+    <section class="slide" id="s8" data-number="08" data-title="OOD风险">
+      <p class="eyebrow">Closed-loop distribution shift</p>
+      <h2>闭环会把政策带到训练数据之外</h2>
+      <div class="ood-visual">
+        <div class="ring"><strong>11.37%</strong><small>四格总体 marginal OOD</small></div>
+        <div class="ood-bars">
+          <div class="ood-row"><strong>Validation</strong><div class="ood-track"><i style="width:55.56%"></i></div><span>5 / 9</span></div>
+          <div class="ood-row"><strong>Frozen test</strong><div class="ood-track"><i style="width:55.56%"></i></div><span>5 / 9</span></div>
+          <div class="ood-row"><strong>Finite · distilled</strong><div class="ood-track"><i style="width:1.6%"></i></div><span>0.31%</span></div>
+          <div class="ood-row"><strong>Credit · distilled</strong><div class="ood-track"><i style="width:47.8%"></i></div><span>9.18%</span></div>
+        </div>
+      </div>
+      <div class="boundary">这是逐特征 train min–max 诊断，不等于状态无效；尚未评估 joint support、manifold 或 density shift。11.37% 总数还包含不消费全部 Student 特征的 momentum cells。</div>
+      <p class="source">项目证据：student evaluation / market-vs-train OOD；理论风险：DAgger covariate shift。</p>
+    </section>
+
+    <section class="slide" id="s9" data-number="09" data-title="MarketCore">
+      <p class="eyebrow">MarketCore</p>
+      <h2>市场工程边界可信，但行为识别仍不充分</h2>
+      <div class="grid3">
+        <article class="card gate go"><span class="gate-label">Verified</span><h3>集合竞价与账本</h3><p>统一价格、无 crossing 则价格不变；无隐藏做市商和 phantom fill；现金、股份、债务与 facility 逐轮闭合。</p></article>
+        <article class="card gate pending"><span class="gate-label">Composite treatment</span><h3>MLP vs Momentum</h3><p>两种完全不同的政策，不是纯 attention、参考点或账户记忆消融。</p></article>
+        <article class="card gate pending"><span class="gate-label">Missing controls</span><h3>尚缺闭环基线</h3><p>未运行 prior、linear、ZI、state-shuffled matched-marginal 与直接 Teacher 市场。</p></article>
+      </div>
+      <div class="boundary">工程守恒证明实现符合规格；不证明政策真实、价格路径像真人或机制具有外部有效性。</div>
+      <p class="source">制度依据：Gode &amp; Sunder (1993，同行评审)；Plott &amp; Pogorelskiy (2017，同行评审)。</p>
+    </section>
+
+    <section class="slide" id="s10" data-number="10" data-title="2×2市场">
+      <p class="eyebrow">Budget × policy diagnostic</p>
+      <h2>信用与动量出现强放大，但当前只能视为探索性信号</h2>
+      <div class="range-chart">
+        <div class="axis-labels"><span style="left:0%">−60%</span><span style="left:42.3%">+50%</span><span style="left:61.5%">+100%</span><span style="left:80.8%">+150%</span><span style="left:100%">+200%</span></div>
+        <div class="range-row"><span class="range-name">finite · distilled</span><div class="range-axis"><i class="seed alt" style="left:17.75%"></i><i class="seed alt" style="left:19.42%"></i><i class="seed alt" style="left:16.21%"></i></div><span class="range-mean">−13.75%</span></div>
+        <div class="range-row"><span class="range-name">credit · distilled</span><div class="range-axis"><i class="seed alt" style="left:19.30%"></i><i class="seed alt" style="left:20.44%"></i><i class="seed alt" style="left:18.73%"></i></div><span class="range-mean">−9.32%</span></div>
+        <div class="range-row"><span class="range-name">finite · momentum</span><div class="range-axis"><i class="seed" style="left:21.21%"></i><i class="seed" style="left:2.52%"></i><i class="seed" style="left:57.72%"></i></div><span class="range-mean">+10.59%</span></div>
+        <div class="range-row"><span class="range-name">credit · momentum</span><div class="range-axis"><i class="seed" style="left:64.48%"></i><i class="seed" style="left:69.64%"></i><i class="seed" style="left:96.94%"></i></div><span class="range-mean">+140.26%</span></div>
+      </div>
+      <div class="grid3">
+        <article class="card"><h3>N=3 paired seeds / cell</h3><p>Finite momentum 从 −53.44% 到 +90.07%，均值掩盖巨大不稳定性。</p></article>
+        <article class="card"><h3>26.42m cents debt</h3><p>Credit momentum 使用零息、无费用、期内不还本的特殊 facility。</p></article>
+        <article class="card"><h3>无 fundamental</h3><p>三条 credit-momentum 路径均在终点附近达峰，不能称 bubble、reversal 或投资收益。</p></article>
+      </div>
+    </section>
+
+    <section class="slide" id="s11" data-number="11" data-title="声明边界">
+      <p class="eyebrow">Claim boundary</p>
+      <h2>当前可以报告工程事实，不能升级为人类或市场结论</h2>
+      <div class="claim-table">
+        <div class="claim yes"><h3>可以声称</h3><ul><li>a10 完整获得 162 条合法 Endpoint 响应。</li><li>Teacher 在当前条件下表现出 sell-dominant 分布。</li><li>固定 MLP 未击败 prior/linear，是明确负结果。</li><li>12 个市场、720 轮账本和隐私边界通过工程验证。</li></ul></div>
+        <div class="claim no"><h3>尚不能声称</h3><ul><li>Teacher 或 Student 代表真人交易者。</li><li>已经成功蒸馏、识别注意力或处置效应。</li><li>观察到实验金融意义上的泡沫、盈利或福利提升。</li><li>3 seeds/cell 足以支持因果、显著性或外推。</li></ul></div>
+      </div>
+      <div class="boundary">科学状态：<code>exploratory_endpoint_pilot_not_human_ground_truth</code>。</div>
+    </section>
+
+    <section class="slide" id="s12" data-number="12" data-title="论文与路线">
+      <p class="eyebrow">Publication strategy</p>
+      <h2>先建立行为有效性，再研究闭环融资与公共信息</h2>
+      <div class="grid3">
+        <article class="card"><h3>Paper 1｜行为基准</h3><p>相同量价/账户状态下，真人、多个 LLM 与 Student 的动作分布、反事实方向和校准。</p></article>
+        <article class="card"><h3>Paper 2｜闭环融资</h3><p>经验证政策在 finite、额外现金、zero-cost facility 与真实 credit 下的市场动力学。</p></article>
+        <article class="card"><h3>Paper 3｜注意力与传播</h3><p>相关/无关信息、公共 feed、网络结构和模型同质性如何改变微观选择与群体结果。</p></article>
+      </div>
+      <div class="road">
+        <article class="road-step"><span class="n">01</span><h3>Human / Teacher 资格</h3><p>Matched counterfactual、prompt multiverse、多个模型和激励相容人类样本。</p><div class="go-line">GO：状态效应大于格式效应，Teacher 达到人类预注册阈值。</div></article>
+        <article class="road-step"><span class="n">02</span><h3>Fresh Student 验收</h3><p>Prior、linear、GAM/tree、MLP 仅用 validation 选择；新 family test 一次验收。</p><div class="go-line">GO：CE/Brier/校准同时稳定胜 prior 与 linear。</div></article>
+        <article class="road-step"><span class="n">03</span><h3>闭环等价</h3><p>Teacher、Student、prior、linear 与 state-shuffled 市场按预注册等价界比较。</p><div class="go-line">GO：路径、换手、失衡、锁市与状态访问分布均等价。</div></article>
+      </div>
+    </section>
+
+    <section class="slide" id="s13" data-number="13" data-title="请导师拍板">
+      <p class="eyebrow">Discussion &amp; decisions</p>
+      <h2>建议本次会议拍板五项研究决策</h2>
+      <div class="ask-grid">
+        <article class="ask"><b>1</b><div><h3>研究对象</h3><p>近期限定为“模型条件政策”，还是以人类行为有效性作为主目标？</p></div></article>
+        <article class="ask"><b>2</b><div><h3>目标人群</h3><p>普通成人、有交易经验的个人投资者，还是专业交易者？</p></div></article>
+        <article class="ask"><b>3</b><div><h3>第一篇主论文</h3><p>是否优先做人类—LLM 同任务行为基准，而不是继续扩大市场规模？</p></div></article>
+        <article class="ask"><b>4</b><div><h3>市场基准</h3><p>MarketCore 首先冻结恒定 fundamental、SSW 递减 fundamental，或并行支持两套场景？</p></div></article>
+        <article class="ask"><b>5</b><div><h3>资源与伦理</h3><p>Human vignette 的样本来源、激励预算、伦理审批和负责人如何安排？</p></div></article>
+        <article class="ask"><b>→</b><div><h3>会后第一步</h3><p>无论选择如何，先备份 a10、冻结行为资格协议，并停止同 profile 的 Endpoint 扩量。</p></div></article>
+      </div>
+    </section>
+
+    <section class="slide" id="a1" data-number="A1" data-title="备份：市场指标">
+      <span class="appendix-label">BACKUP</span>
+      <h2>四格市场完整指标</h2>
+      <table>
+        <thead><tr><th>Cell</th><th class="num">Mean final return</th><th class="num">Max drawdown</th><th class="num">Turnover</th><th class="num">Locked rounds</th><th class="num">Ending debt</th><th class="num">OOD rows</th></tr></thead>
+        <tbody>
+          <tr><th>finite · distilled</th><td class="num">−13.7466%</td><td class="num">−13.8100%</td><td class="num">3,497.67</td><td class="num">43.00</td><td class="num">0</td><td class="num">0.3125%</td></tr>
+          <tr><th>credit · distilled</th><td class="num">−9.3202%</td><td class="num">−9.6539%</td><td class="num">5,713.00</td><td class="num">44.00</td><td class="num">4,592,500.67¢</td><td class="num">9.1782%</td></tr>
+          <tr><th>finite · momentum</th><td class="num">+10.5898%</td><td class="num">−33.3901%</td><td class="num">18,850.00</td><td class="num">10.67</td><td class="num">0</td><td class="num">16.7593%</td></tr>
+          <tr><th>credit · momentum</th><td class="num">+140.2612%</td><td class="num">−6.6047%</td><td class="num">20,341.67</td><td class="num">9.67</td><td class="num">26,419,596.33¢</td><td class="num">19.2245%</td></tr>
+        </tbody>
+      </table>
+      <div class="boundary">每格 N=3 paired program seeds；结果是机制诊断，不是投资绩效或人类市场样本。</div>
+    </section>
+
+    <section class="slide" id="a2" data-number="A2" data-title="备份：文献定位">
+      <span class="appendix-label">BACKUP</span>
+      <h2>核心文献与项目定位</h2>
+      <div class="refs">
+        <div class="ref"><strong><a href="https://doi.org/10.2307/1911361">Smith, Suchanek &amp; Williams, 1988</a></strong>已知基本价值下的人类 bubble/crash 基准。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://doi.org/10.1086/261868">Gode &amp; Sunder, 1993</a></strong>市场制度与预算约束可独立产生宏观秩序。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://www.aeaweb.org/articles?id=10.1257/mic.20150201">Plott &amp; Pogorelskiy, 2017</a></strong>Call market 的价格发现与实验依据。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://doi.org/10.1016/j.jebo.2020.10.024">Capital Constraints and Asset Bubbles</a></strong>放松信用约束会扩大实验泡沫。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://pmc.ncbi.nlm.nih.gov/articles/PMC12184514/">Gao et al., 2025</a></strong>LLM 不能仅靠重复采样替代人类行为分布。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://proceedings.neurips.cc/paper_files/paper/2024/hash/515c62809e0a29729d7eec26e2916fc0-Abstract-Conference.html">Questioning Survey Responses</a></strong>选项顺序与标签会系统性改变 LLM 回答。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://link.springer.com/article/10.1007/s42001-026-00465-4">Hashimoto et al., 2026</a></strong>FCLAgent 已覆盖 LLM方向 + 规则执行 + 1,000-agent LOB。<br><span class="badge">同行评审</span></div>
+        <div class="ref"><strong><a href="https://arxiv.org/abs/2604.18602">Machine Spirits, 2026</a></strong>15模型与混合市场重复，提示模型生态高度异质。<br><span class="badge pre">预印本</span></div>
+      </div>
+    </section>
+
+    <section class="slide" id="a3" data-number="A3" data-title="备份：Provenance">
+      <span class="appendix-label">BACKUP</span>
+      <h2>运行身份与工程验证</h2>
+      <div class="grid2">
+        <article class="card"><h3>Run identity</h3><p><code>v2-teacher-pilot-live-20260820-a10</code><br>Code <code>b9919c4</code><br>Requested model <code>MiniMax-M2.7</code><br>SDK-reported alias <code>HiggsAI</code></p></article>
+        <article class="card"><h3>Artifact integrity</h3><p>42/42 registered artifacts 重新 SHA-256 通过；43 个普通文件、0 symlink；私有记录保持 mode-0600。</p></article>
+        <article class="card"><h3>Verification</h3><p>完整 unittest 498/498；V10 专项 96 项；compileall、Mock repro-check、diff-check 通过。</p></article>
+        <article class="card"><h3>解释边界</h3><p>工程 verification 不等于 empirical validation；真实 Provider 不声明严格确定性；alias 不独立证明底层 weights。</p></article>
+      </div>
+      <div class="boundary">Manifest SHA-256：<span class="mono">33605f7c50424156fa77e2576cc915fedc1d0cbe9ffc49474be8df105c00bf6f</span></div>
+    </section>
+
+    <section class="slide" id="a4" data-number="A4" data-title="备份：新同学入口">
+      <span class="appendix-label">BACKUP</span>
+      <h2>新同学阅读与代码入口</h2>
+      <div class="code-map">
+        <div class="code-item"><code>docs/V2_ATTENTION_DISTILLATION.md</code><p>研究合同、状态、动作、split、Student 与市场边界。</p></div>
+        <div class="code-item"><code>nmsim/v2_attention.py</code><p>状态设计、Teacher prompt、严格 parser 和重复聚合。</p></div>
+        <div class="code-item"><code>nmsim/v2_distillation.py</code><p>family split、prior/linear/MLP、评估和 OOD。</p></div>
+        <div class="code-item"><code>nmsim/v2_market.py</code><p>账户、信用设施、集合竞价、结算与守恒。</p></div>
+        <div class="code-item"><code>nmsim/v2_market_experiment.py</code><p>政策到订单、配对随机流和四格实验。</p></div>
+        <div class="code-item"><code>experiments/v2_attention_market.py</code><p>正式 managed entrypoint、Teacher gate、产物和报告。</p></div>
+      </div>
+      <div class="boundary">阅读原则：代码、测试、manifest 与 raw result 是事实源；文档表达设计意图和历史解释。</div>
+    </section>
+
+  </main>
+
+  <script>
+    (() => {
+      const slides = [...document.querySelectorAll('.slide')];
+      const progress = document.getElementById('progress');
+      const counter = document.getElementById('counter');
+      let current = 0;
+      const update = (index) => {
+        current = Math.max(0, Math.min(slides.length - 1, index));
+        counter.textContent = `${current + 1} / ${slides.length}`;
+        progress.style.width = `${((current + 1) / slides.length) * 100}%`;
+        history.replaceState(null, '', `#${slides[current].id}`);
+      };
+      const go = (delta) => {
+        const next = Math.max(0, Math.min(slides.length - 1, current + delta));
+        slides[next].scrollIntoView({behavior:'smooth', block:'start'});
+        update(next);
+      };
+      document.getElementById('prev').addEventListener('click', () => go(-1));
+      document.getElementById('next').addEventListener('click', () => go(1));
+      document.addEventListener('keydown', (event) => {
+        if (['ArrowRight','ArrowDown','PageDown',' '].includes(event.key)) { event.preventDefault(); go(1); }
+        if (['ArrowLeft','ArrowUp','PageUp'].includes(event.key)) { event.preventDefault(); go(-1); }
+        if (event.key === 'Home') { event.preventDefault(); slides[0].scrollIntoView(); update(0); }
+        if (event.key === 'End') { event.preventDefault(); slides.at(-1).scrollIntoView(); update(slides.length - 1); }
+      });
+      const observer = new IntersectionObserver((entries) => {
+        const visible = entries.filter(e => e.isIntersecting).sort((a,b) => b.intersectionRatio - a.intersectionRatio)[0];
+        if (visible) update(slides.indexOf(visible.target));
+      }, {threshold:[.45,.7]});
+      slides.forEach(s => observer.observe(s));
+      const hashIndex = slides.findIndex(s => `#${s.id}` === location.hash);
+      update(hashIndex >= 0 ? hashIndex : 0);
+    })();
+  </script>
+</body>
+</html>
