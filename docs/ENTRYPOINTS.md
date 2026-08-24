@@ -45,6 +45,7 @@ Management policies are more precise than a managed/unmanaged boolean:
 | python3 -m experiments.model_qualification | bootstrap → frozen protocol/fixture/rubric validation → Provider/real-use guard → ManagedRunContext → selected cases or dry-run → public/private export | New in Phase 1.2A | Managed qualification manifest, public case/aggregate output and 0600 private case records | Mock/Fake; experimental CodexExec only behind explicit future-use confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=model_qualification`; it is not a market simulation |
 | python3 -m experiments.endpoint_stochasticity | bootstrap → validate frozen qualification universe and 48-to-6 selection → Provider/live guard → ManagedRunContext → dry-run or 1080-sample grid plus separate two-call seed probe → public/private export | New in Wave 0 | Dry-run `dry_run_summary.json`, or full `endpoint_stochasticity_summary.json`, `endpoint_samples.jsonl`, and mode-0600 `private_endpoint_records.jsonl`, in a managed run | Fake offline; real OpenAI-compatible only with `--live`; dry-run constructs none | Yes, direct_managed with `run_kind=endpoint_stochasticity`; non-market noise diagnostic with zero simulation honest-N |
 | python3 -m experiments.v2_attention_market | bootstrap → V2 contract/count/live guard → ManagedRunContext with a non-Persona research profile → dry plan, or Teacher sampling → aggregation/group split → prior/linear/MLP Students → paired budget x behavior four-cell market → public/private export | New additive V2 prototype | One immutable managed run containing Teacher records, aggregated data/split, Student/evaluation artifacts, four-cell market ledgers, summary, and Markdown/HTML report | Direct only during the Teacher phase: deterministic Fake/Null offline; OpenAI-compatible only with `--live`, explicit model, and exact request-count confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=v2_attention_market`; one integrated engineering pipeline, isolated from the V1 Persona market |
+| python3 -m experiments.information_weight_teacher | bootstrap → frozen 50-latent-state x four-view validation → Provider/live/exact-200 guard → ManagedRunContext → dry plan or strict-sequential Teacher acquisition → public/private export | New additive information-view pilot | Dry-run summary, or immutable 50-state design, 200-sample plan, public samples, mode-0600 private records, and Teacher summary | Fake offline engineering control; real OpenAI-compatible only with `--live`, frozen model, and exact 200-request confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=information_weight_teacher`; Teacher-only diagnostic with no Student or market |
 
 Evidence in the Phase 1.1A source:
 
@@ -250,6 +251,41 @@ semantic hashes from exact artifact SHA-256 values.
 See [V2_ATTENTION_DISTILLATION.md](V2_ATTENTION_DISTILLATION.md) for the frozen
 time/state/action contract, clearing and credit accounting, four controls,
 artifact identities, commands, and remaining scientific validation work.
+
+## Information-weight Teacher entrypoint
+
+`python3 -m experiments.information_weight_teacher` is an additive official
+managed entrypoint for a Teacher-only paired-view diagnostic. It renders each
+of 50 common synthetic latent market/account states four ways under a fixed
+12-field information budget: price/volume `8/2/2`, company fundamentals
+`2/8/2`, public news `2/2/8`, and balanced `4/4/4`. The same eight account
+fields are visible in every view. Profile IDs are internal design metadata;
+the exact Provider prompt contains only the selected numeric values, neutral
+field semantics, and the common action schema, with no trader-type, Persona,
+domain-weight, or behavioral instruction.
+
+The design makes exactly 200 logical requests at `K=1`. It distinguishes
+logical requests, physical Provider attempts, raw responses, parsed decisions,
+and complete four-view latent-state groups; retries never become extra logical
+samples. `balanced_4_4_4` is an information-rich comparison arm, not a true
+null. Synthetic Latin-hypercube coverage is not a fitted joint market/company
+distribution, and there is no human ground truth, Student training, market
+clearing, price path, or simulation-run honest-N.
+
+`--dry-run` creates a managed plan-only attempt while constructing no Provider
+and making no network request. The Fake path executes all 200 rows offline but
+is only an engineering control. Real acquisition fails closed unless
+`--provider openai`, frozen `--model MiniMax-M2.7`, `--live`, and
+`--confirm-request-count 200` are all present. Public artifacts contain exact
+visible inputs, prompts, parsed public decisions and public-safe failure codes;
+raw responses, private rationale, raw SDK identity fields, and detailed errors
+remain in `private_information_weight_records.jsonl` with mode `0600`.
+
+See
+[INFORMATION_WEIGHT_TEACHER_PILOT.md](INFORMATION_WEIGHT_TEACHER_PILOT.md) for
+the exact variables/ranges, profile allocations, sampling/request contract,
+honest-N units, schemas, named identity hashes, frozen run IDs, commands, and
+scientific limitations.
 
 ## Test and diagnostic entrypoints
 
