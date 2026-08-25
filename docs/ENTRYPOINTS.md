@@ -46,6 +46,7 @@ Management policies are more precise than a managed/unmanaged boolean:
 | python3 -m experiments.endpoint_stochasticity | bootstrap → validate frozen qualification universe and 48-to-6 selection → Provider/live guard → ManagedRunContext → dry-run or 1080-sample grid plus separate two-call seed probe → public/private export | New in Wave 0 | Dry-run `dry_run_summary.json`, or full `endpoint_stochasticity_summary.json`, `endpoint_samples.jsonl`, and mode-0600 `private_endpoint_records.jsonl`, in a managed run | Fake offline; real OpenAI-compatible only with `--live`; dry-run constructs none | Yes, direct_managed with `run_kind=endpoint_stochasticity`; non-market noise diagnostic with zero simulation honest-N |
 | python3 -m experiments.v2_attention_market | bootstrap → V2 contract/count/live guard → ManagedRunContext with a non-Persona research profile → dry plan, or Teacher sampling → aggregation/group split → prior/linear/MLP Students → paired budget x behavior four-cell market → public/private export | New additive V2 prototype | One immutable managed run containing Teacher records, aggregated data/split, Student/evaluation artifacts, four-cell market ledgers, summary, and Markdown/HTML report | Direct only during the Teacher phase: deterministic Fake/Null offline; OpenAI-compatible only with `--live`, explicit model, and exact request-count confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=v2_attention_market`; one integrated engineering pipeline, isolated from the V1 Persona market |
 | python3 -m experiments.information_weight_teacher | bootstrap → frozen 50-latent-state x four-view validation → Provider/live/exact-200 guard → ManagedRunContext → dry plan or strict-sequential Teacher acquisition → public/private export | New additive information-view pilot | Dry-run summary, or immutable 50-state design, 200-sample plan, public samples, mode-0600 private records, and Teacher summary | Fake offline engineering control; real OpenAI-compatible only with `--live`, frozen model, and exact 200-request confirmation; dry-run constructs none | Yes, direct_managed with `run_kind=information_weight_teacher`; Teacher-only diagnostic with no Student or market |
+| python3 -m experiments.information_weight_teacher_scale | bootstrap → frozen 2,500-latent-state x four-view validation → Provider/live/exact-10,000 guard → ManagedRunContext → dry plan or strict group-order/four-worker Teacher acquisition → public/private export | New additive scale successor | Dry-run summary, or immutable 2,500-state design, 10,000-sample plan, public samples, mode-0600 private records, and Teacher summary | Real OpenAI-compatible only with `--live`, frozen model, exact 10,000 confirmation, HiggsAI/stop response contract, SDK retries zero and at most five application attempts; dry-run constructs none | Yes, direct_managed with `run_kind=information_weight_teacher_scale`; Teacher-only coverage study with no Student or market |
 
 Evidence in the Phase 1.1A source:
 
@@ -287,6 +288,36 @@ the exact variables/ranges, profile allocations, sampling/request contract,
 honest-N units, schemas, named identity hashes, frozen run IDs, commands, and
 scientific limitations.
 
+### 10,000-request scale successor
+
+`python3 -m experiments.information_weight_teacher_scale` preserves the
+pilot's Provider-facing prompt bytes, four twelve-field information
+allocations, eight common account fields, strict parser, sampling tuple, and
+label-free semantics, but expands coverage to 2,500 common latent states x
+four views = 10,000 logical requests.  Four views from one latent state may run
+concurrently with worker limit four; latent-state groups remain sequential, so
+the next group is released only after all four requests in the current group
+resolve.  Callback and retry evidence is normalized into one global 0-based
+request-index space even though Provider batches restart their local indices.
+
+Dry-run constructs and calls no Provider and writes no research samples.  A
+live attempt requires the frozen `MiniMax-M2.7` request, explicit `--live`,
+exact `--confirm-request-count 10000`, the frozen live run ID, `HiggsAI` as the
+public-safe reported model, and `finish_reason=stop`.  SDK retries remain zero;
+application retries increase physical-attempt counts but never logical N.
+Every run ID and artifact is exclusive-create.  A failed or interrupted run
+retains partial honest-N evidence but cannot be resumed, overwritten, or
+stitched to another attempt.
+
+This remains `K=1` per state x view.  It increases state coverage but does not
+estimate within-cell endpoint variance or turn repeated model calls into human
+samples.  Planning estimates are 20-36 hours, approximately 30.24 million
+reported tokens under a linear projection from the 200-call a1, and roughly
+360 MiB before retry/response-length variation; reserve at least 1 GiB.  See
+[INFORMATION_WEIGHT_TEACHER_SCALE10K.md](INFORMATION_WEIGHT_TEACHER_SCALE10K.md)
+for exact hashes, commands, accounting units, privacy boundary, interruption
+policy, and scientific limits.
+
 ## Test and diagnostic entrypoints
 
 | Entrypoint | Actual purpose | Writes files | Provider | Formal research allowed |
@@ -322,6 +353,8 @@ The eighteen test files that also have standalone unittest.main guards are:
 - tests/test_model_qualification.py
 - tests/test_codex_exec_provider.py
 - tests/test_endpoint_stochasticity.py
+- tests/test_information_weight_teacher.py
+- tests/test_information_weight_teacher_scale.py
 - tests/test_aggregate_multi_event.py
 
 They share the test-suite registry policy; individual execution does not create

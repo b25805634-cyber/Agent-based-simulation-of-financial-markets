@@ -215,6 +215,30 @@ ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
         True,
         "Teacher-only diagnostic for information-weight views: no Student or market is run. Dry-run constructs no Provider; Fake is an offline engineering control; OpenAI-compatible access requires --live, exact request-count confirmation, frozen MiniMax-M2.7 request settings, exact HiggsAI response alias, and finish_reason=stop.",
     ),
+    _spec(
+        "experiments.information_weight_teacher_scale",
+        "experiments/information_weight_teacher_scale.py",
+        "python3 -m experiments.information_weight_teacher_scale",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT,
+        DIRECT_MANAGED,
+        (
+            "bootstrap",
+            "frozen 2500-latent-state by four-information-view validation",
+            "explicit Provider/live/exact-10000-request guard",
+            "ManagedRunContext",
+            "strict latent-group release with four-view bounded concurrency",
+            "global-index private attempt audit and public/private Teacher-only export",
+        ),
+        (
+            "managed information-weight scale Teacher run directory",
+            "latent state design and immutable 10000-sample plan",
+            "public visible observations/prompts/decisions",
+            "0600 raw responses, rationale, SDK payloads, and errors",
+        ),
+        PROVIDER_DIRECT,
+        True,
+        "Teacher-only 10k scale successor: no Student or market is run. Groups are sequential and each four-view group is bounded at workers=4; logical failures do not stop later groups. Dry-run constructs no Provider; OpenAI-compatible access requires --live, exact 10000-request confirmation, frozen MiniMax-M2.7 request settings, exact HiggsAI response alias, finish_reason=stop, SDK retries=0, and five application attempts.",
+    ),
 
     # Experiment-level drivers.  Their run-count lifecycle is managed at the
     # driver level; every simulation remains a separate managed run_seed child.
