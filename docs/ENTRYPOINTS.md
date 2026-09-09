@@ -441,3 +441,16 @@ Important remaining risks:
   expose the fixture's numeric fundamental value, the corresponding diagnostic
   is machine-readably `not_scored`; raw actions/sentiments remain descriptive
   evidence only.
+# Information-market successor (2026-09-09)
+
+`python3 -m experiments.information_market --task train|simulate` is a new
+provider-free official managed entrypoint. It validates a finished historical
+source and all registered artifact hashes, uses that source as a hashed analysis
+input (never resume), and emits a new managed run, four named config identities,
+progress JSONL, public model/market outputs and reports. `--help`/`--version`
+create no run; `--dry-run` verifies and describes inputs without fitting or
+simulating. There is deliberately no `--live` option. The pure libraries are
+`nmsim.information_student` and `nmsim.information_market`; local preservation
+uses the dedicated, non-research `nmsim.information_artifacts` audit API.
+See [AGENT_MARKET_DELIVERY.md](AGENT_MARKET_DELIVERY.md) for the complete goal,
+implementation status and still-missing human evidence.

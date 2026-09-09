@@ -82,6 +82,43 @@ def _spec(
 
 
 ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
+    _spec(
+        "experiments.information_market", "experiments/information_market.py",
+        "python3 -m experiments.information_market",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify historical input",
+        "masked Student training, synchronous information market or human task benchmark", "source integrity recheck", "export"),
+        ("managed run directory", "source_receipt.json", "identities.json",
+         "summary.json", "report.html", "progress.jsonl"),
+        PROVIDER_NONE, True,
+        "New offline development protocol; no live/provider option; historical inputs are not resumed children; human validity remains unestablished.",
+    ),
+    _spec(
+        "nmsim.information_student", "nmsim/information_student.py",
+        "nmsim.information_student.train_models(...) / make_predictor(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("validate public observations", "group split", "train/evaluate"),
+        notes="Pure library; official outputs are owned by experiments.information_market.",
+    ),
+    _spec(
+        "nmsim.information_market", "nmsim/information_market.py",
+        "nmsim.information_market.run_market(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("world", "visible state", "policy", "constrain", "clear", "settle"),
+        notes="Pure synchronous simulation; no provider, filesystem or implied managed provenance.",
+    ),
+    _spec(
+        "nmsim.human_benchmark", "nmsim/human_benchmark.py",
+        "nmsim.human_benchmark.build_tasks(...) / score_responses(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("neutral tasks", "anonymous same-task comparison"),
+        notes="Pure task/scoring library; synthetic fixtures never count as human evidence.",
+    ),
+    _spec(
+        "nmsim.information_artifacts", "nmsim/information_artifacts.py",
+        "nmsim.information_artifacts.verify_run(...) / archive_verified_run(...)",
+        TEST_OR_DIAGNOSTIC_ENTRYPOINT, DEDICATED_AUDIT,
+        ("hash and inspect immutable input", "optional explicit exclusive backup and restore drill"),
+        ("optional local private backup receipt",), PROVIDER_NONE, False,
+        "Artifact audit only, never a research market or reusable child-run declaration.",
+    ),
     # Direct managed leaves.  Only the simulation leaves construct a Provider
     # for a market run; qualification and stochasticity use direct Providers
     # inside their own explicitly non-market managed protocols.
