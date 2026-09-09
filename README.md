@@ -2,6 +2,12 @@
 
 ## Current information-market work (2026-09-09)
 
+Latest continuation: [available-state probes, learning curves and an audited
+81-person published reference](docs/AGENT_MARKET_VALIDATION_20260909.md).
+630 tests pass. The repeated Teacher plan is ready; the existing internal
+endpoint currently times out. The published human task has six assets and
+must not be confused with the current single-asset benchmark.
+
 The new `feat/agent-market-loop` path connects the existing 10k public Teacher
 observations to a 56-input masked Student and a conserving daily call market.
 An actual offline run selected a 997-parameter MLP by validation CE; frozen-test

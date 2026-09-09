@@ -38,11 +38,11 @@ order book remain outside this implementation.
 |---|---|---|
 | Preserve historical evidence | Original manifests, artifact hashes, modes and mtimes unchanged; verified backup | local archives and restore verified; second medium pending |
 | Train from 10k public data | Verified input, grouped split, masked input, prior/linear/MLP, validation-only selection, final test report | completed development run; MLP selected, test CE 0.382743 |
-| Continuous information world | Coherent company ratios, timestamped news, endogenous price/volume, public information views | implemented; intraday-range proxy remains a semantic gap |
+| Continuous information world | Coherent company ratios, timestamped news, endogenous price/volume, public information views | available_only successor removes unobserved range/undefined turnover; new mask patterns still need fidelity checks |
 | Interacting agents | Private account/trade history, finite resources, order/fill distinction, atomic conserving settlement | 28 markets, 1,680 rounds, 384,000 decisions; conservation passed |
 | Separate order-rule effects | Independent vs intensity-linked quote treatment plus no-state controls under the same accounting | implemented and run; large rule sensitivity observed |
-| Closed-loop fidelity | Rollout coverage and audited Teacher probes; unchanged held-out evaluation | pending |
-| Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | 24 tasks and scoring implemented; actual human evidence absent |
+| Closed-loop fidelity | Rollout coverage and audited Teacher probes; unchanged held-out evaluation | 24-state/K=5 plan frozen from 72,000 agent-rounds; 120 fake checks passed; real endpoint TCP timed out |
+| Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | 81 published humans audited in a different six-asset task; own 24-task responses still absent |
 | Empirical market validation | Matched time/institution/data, whole-market replicates, controls, uncertainty | pending |
 | Social mechanism | Public-only messages and no-social/sham controls, if needed after the basic loop | pending |
 | Scale and operation | 200/1,000-agent timings, progress, immutable outputs, failure evidence | 200 and 1,000 run timings recorded; durable progress/report available; always-open dashboard pending |
@@ -87,19 +87,23 @@ open until the requested research system and its evidence have been verified.
 
 ## Next continuation priorities
 
-1. Audit actual rollout states and prepare repeated Teacher probes; investigate
-   the 18–22% marginal range flags and the structural intraday-range mismatch.
-   Do not compensate by forcing a preferred price trajectory.
-2. Validate and ingest same-task human evidence. A public candidate catalogue
-   is Liêu/Pelster v1, DOI 10.17632/jfg8s32xdm.1 (CC BY 4.0); dataset contents
-   and task compatibility have not yet been inspected. Human N remains zero.
-3. Add training-only/validation-only learning curves without reusing the
-   already-observed test for model selection. New confirmation needs fresh
-   evidence; more random labels alone do not establish human validity.
+1. Execute the frozen 120-request plan once the existing internal endpoint is
+   reachable. Its TCP probe currently times out. This is not a project-wide
+   blocker: human-task reconstruction and sizing-distribution work can proceed.
+2. Complete same-task human evidence. Liêu/Pelster v1 is now downloaded and
+   audited (81 humans, six assets, 14 paid periods); it is not automatically
+   compatible with the single-asset 24-task benchmark. Preserve its joint
+   decisions and never feed future-marked result_final into an observation.
+3. Retain the completed training-only/validation-only learning curves. The
+   871-to-6954 row expansion materially improves MLP validation CE. Investigate
+   intensity distribution/endpoint mass: Teacher has 966 full-sell labels,
+   whereas current conditional-mean Student loses full-exit behavior. Do not
+   change integer rounding merely to force a preferred price path.
 4. Improve researcher-facing monitoring and compile empirical market
    comparisons, then add independently controlled social information.
 
 Actual results, hashes and boundaries: [2026-09-09 report](AGENT_MARKET_RESULTS_20260909.md).
+Second-stage evidence: [validation continuation](AGENT_MARKET_VALIDATION_20260909.md).
 
 GitHub review: [PR #13](https://github.com/b25805634-cyber/Agent-based-simulation-of-financial-markets/pull/13).
 The new branch is `feat/agent-market-loop`. Main has not been merged. Local
