@@ -1,5 +1,11 @@
 # Entrypoint inventory and management policy
 
+Additional 2026-09-09 successors: `experiments.information_diagnostics` is a
+provider-free managed learning-curve/reference audit; `experiments.rollout_fidelity`
+is a managed plan/acquisition diagnostic with explicit live/count guards.
+See [ROLLOUT_FIDELITY.md](ROLLOUT_FIDELITY.md). Their pure libraries and the
+human-reference/learning-curve adapters are separately registered.
+
 This document records the executable surfaces found through the additive V2
 attention-distillation prototype and their current lifecycle and result-reuse policy. The machine-readable source is
 [nmsim/entrypoints.py](../nmsim/entrypoints.py). Importing that registry has no

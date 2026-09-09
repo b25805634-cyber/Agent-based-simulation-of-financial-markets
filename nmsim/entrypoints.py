@@ -83,6 +83,40 @@ def _spec(
 
 ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
     _spec(
+        "experiments.information_diagnostics", "experiments/information_diagnostics.py",
+        "python3 -m experiments.information_diagnostics",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, ANALYSIS_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify historical sources", "learning curves or human input audit", "export"),
+        ("managed run directory", "diagnostic_result.json", "identities.json", "summary.json"),
+        PROVIDER_NONE, True,
+        "Offline only; learning curves exclude original test payloads; published human references retain their original task and timing.",
+    ),
+    _spec(
+        "experiments.rollout_fidelity", "experiments/rollout_fidelity.py",
+        "python3 -m experiments.rollout_fidelity",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify sources and frozen plan", "plan or guarded repeated probes", "export"),
+        ("managed run directory", "probe_plan.json", "probe_samples.jsonl", "private_probe_records.jsonl", "fidelity_summary.json"),
+        PROVIDER_DIRECT, True,
+        "Real probes require explicit openai, --live and exact planned request count. Private raw response precedes parsing. Fake null control has zero endpoint/human evidence.",
+    ),
+    _spec(
+        "nmsim.information_learning_curve", "nmsim/information_learning_curve.py",
+        "nmsim.information_learning_curve.learning_curves(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("original identity roster", "exclude test payloads", "nested training groups", "validation only"),
+        notes="Pure offline analysis; caller owns source-byte verification and managed output.",
+    ),
+    _spec(
+        "nmsim.human_reference", "nmsim/human_reference.py", "nmsim.human_reference.audit_records(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("published schema", "joint decision reconstruction", "timing/accounting audit"),
+        notes="Pure CSV/text analysis; future portfolio outcome never enters predecision state.",
+    ),
+    _spec(
+        "nmsim.rollout_probes", "nmsim/rollout_probes.py", "nmsim.rollout_probes.build_plan(...) / summarize(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("observed state selection", "neutral prompts", "replicated fidelity metrics"),
+        notes="Pure selection and scoring; no provider or file side effects.",
+    ),
+    _spec(
         "experiments.information_market", "experiments/information_market.py",
         "python3 -m experiments.information_market",
         OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,

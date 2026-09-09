@@ -121,6 +121,19 @@ class InformationMarketEntrypointTests(unittest.TestCase):
         self.assertEqual(read_json(run/"summary.json")["honest_n"]["market_runs"], 0)
         verify_run(run)
 
+    def test_available_only_task_bank_and_cli_explicit_contract(self):
+        out = self.base/"available"
+        self.invoke("--task", "benchmark", "--observation-policy", "available_only",
+                    "--out", str(out), "--run-id", "available-tasks")
+        tasks = read_json(out/"runs/available-tasks/human_tasks.json")
+        for task in tasks:
+            self.assertEqual(task["schema"], "human-information-market-task/1.1.0")
+            self.assertNotIn("intraday_range_5d_mean", task["visible_fields"])
+            self.assertNotIn("intraday_range_5d_mean", task["field_semantics"])
+        with self.assertRaises(SystemExit):
+            self.invoke("--task", "train", "--source-run", str(self.source),
+                        "--observation-policy", "available_only", "--out", str(self.base/"bad-train"))
+
     def test_existing_output_never_overwritten(self):
         run = self.train()
         before = file_sha256(run/"run_manifest.json")

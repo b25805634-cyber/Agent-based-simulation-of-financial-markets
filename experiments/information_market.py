@@ -69,6 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
                         metavar=("PV", "FUND", "NEWS", "BAL"))
     parser.add_argument("--quote-rule", choices=("independent", "legacy_intensity_linked", "both"), default="both")
     parser.add_argument("--news-mode", choices=("eventful", "neutral"), default="eventful")
+    parser.add_argument("--observation-policy", choices=("legacy_proxy", "available_only"), default="legacy_proxy")
     parser.add_argument("--policies", nargs="+", choices=("selected", "prior", "random"),
                         default=["selected", "prior", "random"])
     parser.add_argument("--version", action="version", version=SCHEMA)
@@ -82,6 +83,8 @@ def _validate(args) -> None:
         raise ValueError("--model-run is required for simulation")
     if args.human_responses is not None and args.task != "benchmark":
         raise ValueError("--human-responses only applies to benchmark")
+    if args.task == "train" and args.observation_policy != "legacy_proxy":
+        raise ValueError("--observation-policy cannot redefine historical training observations")
     if min(args.epochs, args.hidden_dim, args.agents, args.rounds, args.seeds) <= 0:
         raise ValueError("counts must be positive")
     if args.agents < 2:
@@ -124,7 +127,7 @@ def build_identities(args, receipt: dict) -> dict:
     else:
         from nmsim.human_benchmark import build_tasks
         source_files["nmsim/human_benchmark.py"] = file_sha256(ROOT/"nmsim/human_benchmark.py")
-        input_identity = {"task_bank_hash": canonical_hash(build_tasks(args.seed)),
+        input_identity = {"task_bank_hash": canonical_hash(build_tasks(args.seed, observation_policy=args.observation_policy)),
                           "human_responses_sha256": file_sha256(args.human_responses) if args.human_responses else None}
         if args.model_run is not None:
             study = _load_study(args.model_run, receipt)
@@ -139,7 +142,7 @@ def build_identities(args, receipt: dict) -> dict:
                   "market": {"agents": args.agents, "rounds": args.rounds, "seeds": args.seeds,
                              "profile_weights": args.profile_weights, "quote_rules": _quotes(args),
                              "policies": args.policies, "news_mode": args.news_mode,
-                             "contract": market.descriptor()} if args.task == "simulate" else None}
+                             "contract": market.descriptor(args.observation_policy)} if args.task == "simulate" else None}
     model_request = {"schema_version": "information-market-model-request/1.0", "provider_access": "none",
                      "new_teacher_requests": 0}
     execution = {"schema_version": "information-market-execution-config/1.0", "dry_run": args.dry_run,
@@ -167,7 +170,10 @@ def _summary(context, args, identities, receipt):
     return {"schema_version": SCHEMA, "run_id": context.run_id, "task": args.task,
             "status": "dry_run" if args.dry_run else "finished", "source": _source_identity(receipt),
             "identities": {k: v for k, v in identities.items() if k.endswith("hash") or k == "schema_version"},
-            "human_validation": "not_established", "limitations": list(LIMITATIONS),
+            "human_validation": "not_established", "limitations": [
+                ("Unobserved intraday range is omitted; the new visibility pattern needs fidelity checks."
+                 if args.observation_policy == "available_only" and text.startswith("Daily-close-range") else text)
+                for text in LIMITATIONS],
             "honest_n": {"new_teacher_requests": 0, "human_participants": 0,
                          "trained_models": 0, "market_runs": 0, "rounds": 0, "agent_decisions": 0},
             "next_evidence_needed": ["same-task human choices", "repeated Teacher probes on rollout states",
@@ -249,8 +255,10 @@ def _simulate(context, args, receipt, summary, progress):
             def on_round(row):
                 nonlocal ood_rows, max_abs_z
                 for decision in row["decisions"]:
-                    visible = {field: row["market_effective"][field]
-                               for field in PROFILE_FIELDS[decision["profile_id"]]}
+                    visible = decision.get("visible_fields")
+                    if visible is None:
+                        visible = {field: row["market_effective"][field]
+                                   for field in PROFILE_FIELDS[decision["profile_id"]]}
                     support = check_support(visible, decision["account_state"])
                     ood_rows += int(support["outside_train_range"])
                     ood_counts.update(support["outside_features"])
@@ -271,7 +279,8 @@ def _simulate(context, args, receipt, summary, progress):
                 result = market.run_market(predictors[policy_name], seed=args.seed+seed_index,
                                            agents=args.agents, rounds=args.rounds,
                                            profile_weights=weights, quote_rule=quote,
-                                           news_mode=args.news_mode, on_round=on_round)
+                                           news_mode=args.news_mode, observation_policy=args.observation_policy,
+                                           on_round=on_round)
             except BaseException:
                 context.set_experiment_completion(planned_runs=planned, started_runs=index+1,
                                                   completed_runs=index, failed_runs=1)
@@ -302,7 +311,7 @@ def _simulate(context, args, receipt, summary, progress):
 def _benchmark(context, args, receipt, summary, progress):
     from nmsim.human_benchmark import build_tasks, score_responses
     from nmsim.information_student import make_predictor
-    tasks = build_tasks(args.seed)
+    tasks = build_tasks(args.seed, observation_policy=args.observation_policy)
     predictions = []
     if args.model_run is not None:
         study = _load_study(args.model_run, receipt)

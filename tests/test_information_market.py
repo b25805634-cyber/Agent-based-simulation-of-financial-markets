@@ -181,6 +181,51 @@ class InformationMarketTests(TestCase):
             with self.assertRaises(ValueError):
                 market.profile_allocation(8, **kwargs)
 
+    def test_available_only_does_not_invent_intraday_observations(self):
+        observed = []
+        def policy(visible, account):
+            observed.append(dict(visible))
+            return market.random_policy(visible, account)
+        result = market.run_market(policy, agents=8, rounds=3, seed=4,
+                                   observation_policy="available_only")
+        self.assertEqual(result["schema"], market.AVAILABLE_SCHEMA_VERSION)
+        self.assertEqual(result["summary"]["intraday_range_approximation_rounds"], 0)
+        self.assertEqual({len(fields) for fields in observed}, {11, 12})
+        for fields in observed:
+            self.assertNotIn("intraday_range_5d_mean", fields)
+        for row in result["ledger"]:
+            self.assertNotIn("intraday_range_5d_mean", row["market_raw"])
+            for decision in row["decisions"]:
+                self.assertNotIn("intraday_range_5d_mean", decision["visible_fields"])
+        legacy = market.run_market(market.random_policy, agents=8, rounds=3, seed=4)
+        self.assertEqual(legacy["world_hash"], result["world_hash"])
+        self.assertEqual(legacy["initial_accounts"], result["initial_accounts"])
+        self.assertEqual(legacy["summary"]["price_return"], result["summary"]["price_return"])
+        self.assertNotIn("observation_policy", legacy["config"])
+        self.assertEqual(legacy["schema"], market.SCHEMA_VERSION)
+        self.assertTrue(result["summary"]["conservation_passed"])
+
+    def test_available_only_mask_reaches_student_as_missing_not_zero(self):
+        from nmsim.information_student import encode_observation, INFORMATION_FIELDS
+        result = market.run_market(market.random_policy, agents=8, rounds=1,
+                                   observation_policy="available_only")
+        index = INFORMATION_FIELDS.index("intraday_range_5d_mean")
+        for decision in result["ledger"][0]["decisions"]:
+            vector = encode_observation(decision["visible_fields"], decision["account_state"])
+            self.assertEqual(vector[index], 0.0)
+            self.assertEqual(vector[index+24], 0.0)
+        with self.assertRaises(ValueError):
+            market.run_market(market.random_policy, observation_policy="invent_range")
+
+    def test_available_only_undefined_turnover_is_missing(self):
+        result = market.run_market(market.prior_policy((0, 1, 0)), agents=8, rounds=12,
+                                   observation_policy="available_only")
+        last = result["ledger"][-1]
+        self.assertTrue(last["undefined_turnover_ratio"])
+        self.assertNotIn("turnover_change_5d", last["market_raw"])
+        for decision in last["decisions"]:
+            self.assertNotIn("turnover_change_5d", decision["visible_fields"])
+
     def test_seed_controls_replay_and_changes_scenario(self):
         first = market.run_market(market.random_policy, agents=8, rounds=3, seed=1)
         repeated = market.run_market(market.random_policy, agents=8, rounds=3, seed=1)

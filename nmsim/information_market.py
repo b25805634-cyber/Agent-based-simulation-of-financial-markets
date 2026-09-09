@@ -30,6 +30,8 @@ from nmsim.v2_market_experiment import (
 )
 
 SCHEMA_VERSION = "information-market/1.0.0"
+AVAILABLE_SCHEMA_VERSION = "information-market/1.1.0"
+OBSERVATION_POLICIES = ("legacy_proxy", "available_only")
 WORLD_SCHEMA_VERSION = "synthetic-daily-company-news/1.0.0"
 PROJECTION_SCHEMA_VERSION = "information-market-explicit-domain-projection/1.0.0"
 QUOTE_SCHEMAS = {
@@ -55,9 +57,11 @@ def _uniform(seed: int, day: int, agent_id: str, purpose: str) -> float:
             + 0.5) / float(2**64)
 
 
-def descriptor() -> dict[str, Any]:
+def descriptor(observation_policy: str = "legacy_proxy") -> dict[str, Any]:
     """Fixed scientific assumptions that the managed entrypoint must identify."""
-    return {
+    if observation_policy not in OBSERVATION_POLICIES:
+        raise ValueError("unknown observation policy")
+    result = {
         "schema": SCHEMA_VERSION,
         "world_schema": WORLD_SCHEMA_VERSION,
         "projection_schema": PROJECTION_SCHEMA_VERSION,
@@ -95,6 +99,16 @@ def descriptor() -> dict[str, Any]:
         "domain_projection": "raw values retained; effective closed-domain inputs and counts recorded",
         "evidence_scope": "synthetic exploratory simulation, no human validation",
     }
+    if observation_policy == "available_only":
+        result.update(schema=AVAILABLE_SCHEMA_VERSION, observation_policy=observation_policy,
+                      unavailable_fields=["intraday_range_5d_mean"],
+                      conditionally_unavailable_fields={"turnover_change_5d": "prior-five volume mean is zero"},
+                      effective_profile_fields={key: [field for field in fields
+                          if field != "intraday_range_5d_mean"] for key, fields in PROFILE_FIELDS.items()},
+                      intraday_range_approximation=None,
+                      zero_turnover_reference="undefined turnover ratio omitted, including zero/zero",
+                      missing_information_rule="unobserved field omitted; encoder mask=0, not observed zero")
+    return result
 
 
 def build_world(*, seed: int, rounds: int, total_shares: int,
@@ -271,6 +285,7 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
                profile_weights: Mapping[str, float] | None = None,
                quote_rule: str = "independent",
                news_mode: str = "eventful",
+               observation_policy: str = "legacy_proxy",
                on_round: Callable[[Mapping[str, Any]], None] | None = None) -> dict[str, Any]:
     """Run finite-budget synchronous trading, preserving public replay evidence.
 
@@ -281,6 +296,8 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
     _integer("seed", seed)
     _integer("rounds", rounds, 1)
     counts = profile_allocation(agents, profile_counts, profile_weights)
+    effective_descriptor = descriptor(observation_policy)
+    available_only = observation_policy == "available_only"
     if quote_rule not in QUOTE_SCHEMAS:
         raise ValueError("unknown quote rule")
     if not callable(policy):
@@ -312,13 +329,15 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
     for day in range(rounds):
         price = prices[-1]
         raw_market = _market_features(prices, volumes)
-        raw_market["intraday_range_5d_mean"] = statistics.fmean(
-            abs(prices[index] / prices[index - 1] - 1) for index in range(len(prices) - 5, len(prices)))
+        if not available_only:
+            raw_market["intraday_range_5d_mean"] = statistics.fmean(
+                abs(prices[index] / prices[index - 1] - 1) for index in range(len(prices) - 5, len(prices)))
         volume_reference = statistics.fmean(volumes[-6:-1])
-        undefined_turnover = volume_reference == 0 and volumes[-1] > 0
+        undefined_turnover = volume_reference == 0 and (available_only or volumes[-1] > 0)
         undefined_turnover_count += int(undefined_turnover)
-        raw_market["turnover_change_5d"] = (volumes[-1] / volume_reference - 1 if volume_reference
-                                              else (5.0 if volumes[-1] else 0.0))
+        if volume_reference or not available_only:
+            raw_market["turnover_change_5d"] = (volumes[-1] / volume_reference - 1 if volume_reference
+                                               else (5.0 if volumes[-1] else 0.0))
         raw_market.update(fundamental_fields(world[day]["report"], price, total_shares))
         raw_market.update(world[day]["news"])
         effective_market, market_projection = project_fields(raw_market)
@@ -327,7 +346,8 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
         probed_profiles = set()
         for account in accounts:
             profile = profiles[account.agent_id]
-            visible = {name: effective_market[name] for name in PROFILE_FIELDS[profile]}
+            visible = {name: effective_market[name] for name in PROFILE_FIELDS[profile]
+                       if name in effective_market}
             raw_account = _account_fields(account, metadata[account.agent_id], price, day)
             effective_account, account_projection = project_fields(raw_account)
             clips.update(item["field"] for item in account_projection)
@@ -348,6 +368,8 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
                               "account_state_raw": raw_account, "account_state": effective_account,
                               "account_projection": account_projection, **prediction,
                               "action": action, "intensity": intensity, "order_status": status})
+            if available_only:
+                decisions[-1]["visible_fields"] = dict(visible)
             if profile not in probed_profiles:
                 probes.append({"decision_day": day, "agent_id": account.agent_id,
                                "profile_id": profile, "visible_fields": visible,
@@ -383,11 +405,12 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
         peak = max(peak, price)
         max_drawdown = min(max_drawdown, price / peak - 1)
     return {
-        "schema": SCHEMA_VERSION,
+        "schema": AVAILABLE_SCHEMA_VERSION if available_only else SCHEMA_VERSION,
         "config": {"seed": seed, "agents": agents, "rounds": rounds,
                    "profile_counts": counts, "quote_rule": quote_rule,
                    "news_mode": news_mode,
-                   "quote_schema": QUOTE_SCHEMAS[quote_rule], "descriptor": descriptor()},
+                   "quote_schema": QUOTE_SCHEMAS[quote_rule], "descriptor": effective_descriptor,
+                   **({"observation_policy": observation_policy} if available_only else {})},
         "world_hash": _hash({"schema": WORLD_SCHEMA_VERSION, "schedule": world}),
         "world_schedule": world, "warmup": warmup, "initial_accounts": initial_accounts,
         "profile_assignments": profiles, "ledger": ledger, "state_probes": probes,
@@ -406,13 +429,14 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
                     "conservation_passed": True, "domain_projection_counts": dict(clips),
                     "domain_projection_count_unit": "once per common market field per round plus once per account field per decision",
                     "undefined_turnover_ratio_rounds": undefined_turnover_count,
-                    "intraday_range_approximation_rounds": rounds,
-                    "structural_ood": ["daily-close-range proxy replaces unobserved intraday range"],
+                    "intraday_range_approximation_rounds": 0 if available_only else rounds,
+                    "structural_ood": (["unobserved intraday range omitted; new visibility pattern needs fidelity evidence"]
+                                       if available_only else ["daily-close-range proxy replaces unobserved intraday range"]),
                     "evidence_scope": "exploratory synthetic simulation; human resemblance unvalidated"},
     }
 
 
-__all__ = ["SCHEMA_VERSION", "WORLD_SCHEMA_VERSION", "PROJECTION_SCHEMA_VERSION",
+__all__ = ["SCHEMA_VERSION", "AVAILABLE_SCHEMA_VERSION", "OBSERVATION_POLICIES", "WORLD_SCHEMA_VERSION", "PROJECTION_SCHEMA_VERSION",
            "QUOTE_SCHEMAS", "descriptor", "build_world", "fundamental_fields",
            "project_fields", "profile_allocation", "quote_price", "prior_policy",
            "random_policy", "run_market"]

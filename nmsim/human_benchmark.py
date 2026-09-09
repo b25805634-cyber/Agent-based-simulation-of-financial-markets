@@ -17,6 +17,7 @@ from nmsim.v2_attention import ACTION_ORDER
 from nmsim.v2_market_experiment import _normalise_prediction
 
 TASK_SCHEMA = "human-information-market-task/1.0.0"
+AVAILABLE_TASK_SCHEMA = "human-information-market-task/1.1.0"
 SCORE_SCHEMA = "human-information-market-comparison/1.0.0"
 INSTRUCTIONS = (
     "At the daily decision point, use the supplied numeric market observations "
@@ -29,9 +30,10 @@ INSTRUCTIONS = (
 _ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,95}\Z")
 
 
-def build_tasks(seed: int = 20260909) -> list[dict[str, Any]]:
+def build_tasks(seed: int = 20260909, *, observation_policy: str = "legacy_proxy") -> list[dict[str, Any]]:
     """Build 12 paired contrasts (24 tasks), with no simulated response labels."""
-    simulation = run_market(prior_policy((0, 1, 0)), seed=seed, agents=8, rounds=11)
+    simulation = run_market(prior_policy((0, 1, 0)), seed=seed, agents=8, rounds=11,
+                            observation_policy=observation_policy)
     tasks = []
     for replica, day in enumerate((0, 10)):
         row = simulation["ledger"][day]
@@ -61,14 +63,16 @@ def build_tasks(seed: int = 20260909) -> list[dict[str, Any]]:
             pair_id = f"pair-{replica * 6 + index + 1:02d}"
             for condition, profile, changes in (("a", first, first_account), ("b", second, second_account)):
                 own = {**account, **changes}
+                fields = [key for key in PROFILE_FIELDS[profile] if key in market]
                 tasks.append({
-                    "schema": TASK_SCHEMA, "task_id": f"{pair_id}-{condition}",
+                    "schema": AVAILABLE_TASK_SCHEMA if observation_policy == "available_only" else TASK_SCHEMA,
+                    "task_id": f"{pair_id}-{condition}",
                     "pair_id": pair_id, "condition": condition,
                     "contrast": contrast, "decision_day": day,
-                    "visible_fields": {key: market[key] for key in PROFILE_FIELDS[profile]},
+                    "visible_fields": {key: market[key] for key in fields},
                     "account_state": own, "instructions": INSTRUCTIONS,
                     "field_semantics": {key: FIELD_SEMANTICS[key]
-                                        for key in (*PROFILE_FIELDS[profile], *ACCOUNT8)},
+                                        for key in (*fields, *ACCOUNT8)},
                     "source_kind": "synthetic_task_not_human_response",
                     "design_note": "matched numerical vignette; account contrasts are counterfactual endowments/history",
                 })
@@ -85,6 +89,8 @@ def _task_map(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]
     result = {}
     pairs: dict[str, set[str]] = defaultdict(set)
     for task in tasks:
+        if task.get("schema") not in (TASK_SCHEMA, AVAILABLE_TASK_SCHEMA):
+            raise ValueError("unknown human task schema")
         task_id = _identifier(task.get("task_id"), "task_id")
         pair_id = _identifier(task.get("pair_id"), "pair_id")
         condition = task.get("condition")
@@ -92,7 +98,11 @@ def _task_map(tasks: Sequence[Mapping[str, Any]]) -> dict[str, Mapping[str, Any]
             raise ValueError("tasks require unique ids and one a/b condition per pair")
         if set(task.get("account_state", {})) != set(ACCOUNT8):
             raise ValueError("task account state must contain A8")
-        if set(task.get("visible_fields", {})) not in [set(fields) for fields in PROFILE_FIELDS.values()]:
+        allowed_views = [set(fields) - ({"intraday_range_5d_mean"} if task["schema"] == AVAILABLE_TASK_SCHEMA else set())
+                         for fields in PROFILE_FIELDS.values()]
+        if task["schema"] == AVAILABLE_TASK_SCHEMA:
+            allowed_views += [fields - {"turnover_change_5d"} for fields in list(allowed_views)]
+        if set(task.get("visible_fields", {})) not in allowed_views:
             raise ValueError("task visible fields must match a registered information allocation")
         for name, value in {**task["visible_fields"], **task["account_state"]}.items():
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):

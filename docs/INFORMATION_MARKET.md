@@ -169,3 +169,12 @@ Validation command: `python3 -m unittest tests.test_information_market -v`.
 Tests exercise integer conservation, feasible limits, no-cross behavior,
 observation privacy, chronology, persistent own history, ratio consistency,
 controls, deterministic replay and a no-files/no-network diagnostic path.
+
+## Explicit available-only successor
+
+`--observation-policy available_only` adds schema `information-market/1.1.0`.
+It omits unobserved intraday range and undefined turnover instead of supplying
+a proxy/sentinel as an observed value. Each new-mode decision stores the exact
+visible field set. Existing defaults and old outputs retain 1.0 behavior. The
+new visibility pattern is itself out of the historical training design and
+requires fidelity checks. See [ROLLOUT_FIDELITY.md](ROLLOUT_FIDELITY.md).
