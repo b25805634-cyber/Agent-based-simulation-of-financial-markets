@@ -83,6 +83,33 @@ def _spec(
 
 ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
     _spec(
+        "experiments.rollout_sizing_scores", "experiments/rollout_sizing_scores.py",
+        "python3 -m experiments.rollout_sizing_scores", OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, ANALYSIS_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify completed probes and frozen models", "fixed-candidate distribution scores", "export"),
+        ("managed run directory", "identities.json", "source_receipts.json", "summary.json"), PROVIDER_NONE, True,
+        "Offline scores only; no fitting, selection or new Teacher calls. Scores apply only to supplied frozen states, not unprobed trajectories.",
+    ),
+    _spec(
+        "nmsim.rollout_sizing_scores", "nmsim/rollout_sizing_scores.py",
+        "nmsim.rollout_sizing_scores.score_rollout_sizing(...)", LIBRARY_API, LIBRARY_UNMANAGED,
+        ("validate plan and response roster", "authenticate frozen predictions", "per-case and weighted scores"),
+        notes="Pure fixed-candidate diagnostic; failures and missing rows never become hold observations.",
+    ),
+    _spec(
+        "experiments.human_early_teacher", "experiments/human_early_teacher.py",
+        "python3 -m experiments.human_early_teacher", OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify private task bank", "freeze plan or guarded independent requests", "aggregate comparison"),
+        ("managed run directory", "private task and response artifacts", "public plan hashes and aggregate summary"),
+        PROVIDER_DIRECT, True,
+        "Reconstructed six-asset comparison, not original-UI identity. Explicit live/exact-count guards; no human-validity pass flag.",
+    ),
+    _spec(
+        "nmsim.human_early_acquisition", "nmsim/human_early_acquisition.py",
+        "nmsim.human_early_acquisition", LIBRARY_API, LIBRARY_UNMANAGED,
+        ("validate reconstructed task bank", "freeze independent request order", "private task/public plan boundary"),
+        notes="Pure protocol functions; no Provider or file lifecycle. Later own histories must never be supplied with earlier tasks.",
+    ),
+    _spec(
         "nmsim.human_early_tasks", "nmsim/human_early_tasks.py",
         "nmsim.human_early_tasks.build_early_tasks(...) / parse_joint_response(...)",
         LIBRARY_API, LIBRARY_UNMANAGED, ("source histories", "pre-ranking task window", "strict six-asset joint choices"),

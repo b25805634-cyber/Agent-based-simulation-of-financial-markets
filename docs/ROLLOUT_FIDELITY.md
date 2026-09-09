@@ -52,6 +52,49 @@ source IDs, model predictions and identity labels are absent from prompts.
 The unchanged neutral system instruction is reused; the new payload schema is
 `available-rollout-teacher-prompt/1.0`.
 
+### Planning from distributional-sizing rollouts
+
+Planning also accepts `information-market/1.2.0` available-only rollouts, with
+the additional explicit `--distribution-run` input and optional
+`--distribution-manifest-sha256` pin. The sizing run must be finished, its
+registered artifacts must verify, and its original source, encoder, selected
+action model and frozen representation must match the supplied Student study.
+Every selected market cell must bind that exact sizing manifest and agree with
+the market summary's `sizing_candidate` and `sizing_policy`.
+
+The planner recomputes each recorded action probability, original conditional
+intensity head, new intensity distribution and distribution mean. It also
+checks the actual intensity against `distribution_mean` or the original seeded
+`distribution_sampled` draw. These checks authenticate the visited state; they
+do not expose sizing distributions, density, selection metadata or another
+account to the Teacher. Full liquidation can now supply subsequently observed
+empty-portfolio states through the same existing selection strata.
+
+The plan and prompt remain `rollout-fidelity-plan/1.0` and
+`available-rollout-teacher-prompt/1.0`; selection and replication order are
+unchanged. Plan `student_prediction` and the existing fidelity metrics still
+refer to the original action probabilities and legacy conditional intensity
+heads, not to a newly invented distributional fidelity score. The sizing
+study's semantic hash is added only to new planning scientific configuration;
+its exact manifest is an additional managed input and execution receipt.
+The four named configuration hashes retain their separate meanings, and the
+Teacher model-request configuration is unchanged. No historical plan or hash
+is rewritten.
+
+An old `1.1.0` source requires no sizing input and rejects unused sizing flags.
+Acquisition consumes only the already frozen plan and rejects distribution,
+rollout, model or selection overrides. This extension grants no live-request
+authorization.
+
+```sh
+python3 -m experiments.rollout_fidelity --task plan \
+  --market-run <finished-sizing-market-run> \
+  --model-run <its-original-student-run> \
+  --distribution-run <its-exact-finished-sizing-run> \
+  --distribution-manifest-sha256 <sizing-manifest-sha256> \
+  --max-states 24 --replicates 5 --run-id <new-plan-run-id>
+```
+
 ## Acquisition and preservation
 
 The plan is a finished managed input to a NEW acquisition run. Real requests

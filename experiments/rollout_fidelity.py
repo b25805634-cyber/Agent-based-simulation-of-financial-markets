@@ -6,13 +6,14 @@ import asyncio
 import hashlib
 from dataclasses import asdict
 import json
+import math
 import os
 from pathlib import Path
 import platform
 import sys
 from typing import Sequence
 
-from experiments.information_market import _append, _load_study
+from experiments.information_market import _append, _load_study, _load_distribution
 from experiments.information_weight_teacher import _safe_private
 from experiments.v2_attention_market import OpenAITeacherProvider, TeacherCompletion
 from nmsim.config import Config
@@ -43,6 +44,8 @@ def parser():
     result.add_argument("--market-manifest-sha256")
     result.add_argument("--model-run", type=Path)
     result.add_argument("--model-manifest-sha256")
+    result.add_argument("--distribution-run", type=Path)
+    result.add_argument("--distribution-manifest-sha256")
     result.add_argument("--plan-run", type=Path)
     result.add_argument("--plan-manifest-sha256")
     result.add_argument("--max-states", type=int)
@@ -63,10 +66,16 @@ def _validate(args):
     if args.task == "acquire" and args.plan_run is None:
         raise ValueError("acquisition requires --plan-run")
     if args.task == "acquire" and any(value is not None for value in
-            (args.max_states, args.replicates, args.seed, args.market_run, args.model_run)):
+            (args.max_states, args.replicates, args.seed, args.market_run, args.model_run,
+             args.market_manifest_sha256, args.model_manifest_sha256,
+             args.distribution_run, args.distribution_manifest_sha256)):
         raise ValueError("selection and rollout/model inputs belong to --task plan; acquisition uses its frozen plan")
     if args.task == "plan" and args.plan_run is not None:
         raise ValueError("--plan-run belongs to acquisition")
+    if args.task == "plan" and args.plan_manifest_sha256 is not None:
+        raise ValueError("--plan-manifest-sha256 belongs to acquisition")
+    if args.distribution_manifest_sha256 is not None and args.distribution_run is None:
+        raise ValueError("--distribution-manifest-sha256 requires --distribution-run")
     args.max_states = 24 if args.max_states is None else args.max_states
     args.replicates = 5 if args.replicates is None else args.replicates
     args.seed = 20260909 if args.seed is None else args.seed
@@ -80,10 +89,54 @@ def _validate(args):
         raise ValueError("request confirmation is only valid for a live acquisition")
 
 
-def _candidates(market_run, market_receipt, model_receipt, study):
+def _same_numbers(expected, recorded):
+    return (isinstance(recorded, (list, tuple)) and len(expected) == len(recorded)
+            and all(not isinstance(b, bool) and isinstance(b, (int, float))
+                    and math.isfinite(b) and abs(a-b) <= 1e-12
+                    for a, b in zip(expected, recorded)))
+
+
+def _check_sizing_decision(decision, expected, metadata):
+    from nmsim.intensity_distribution import validate_distribution, distribution_mean, quantile_sample
+    from nmsim.information_market import _uniform
+    policy = metadata["config"]["sizing_policy"]
+    if decision.get("sizing_policy") != policy:
+        raise ValueError("recorded sizing policy differs from the source cell")
+    laws = decision.get("intensity_distributions")
+    if not isinstance(laws, dict) or set(laws) != {"buy", "sell"}:
+        raise ValueError("missing recorded sizing distributions")
+    for side in ("buy", "sell"):
+        law = validate_distribution(laws[side])
+        target = expected["intensity_distributions"][side]
+        if law["support"] != target["support"] or not _same_numbers(target["probabilities"], law["probabilities"]):
+            raise ValueError("recorded sizing distribution is not from the bound model")
+    if not _same_numbers(expected["intensity_means"], decision.get("intensity_means")):
+        raise ValueError("recorded sizing means differ from the bound model")
+    action = decision["action"]
+    if action not in ("buy", "hold", "sell"):
+        raise ValueError("unknown recorded action")
+    intensity = 0.0
+    if action != "hold":
+        law = expected["intensity_distributions"][action]
+        if policy == "distribution_mean":
+            if decision.get("sizing_uniform") is not None:
+                raise ValueError("mean sizing must not claim a sampled uniform")
+            intensity = distribution_mean(law)
+        else:
+            draw = _uniform(metadata["config"]["seed"], decision["decision_day"], decision["agent_id"], "sizing")
+            if not _same_numbers([draw], [decision.get("sizing_uniform")]):
+                raise ValueError("recorded sizing draw differs from the bound random stream")
+            intensity = quantile_sample(law, draw)
+    if not _same_numbers([intensity], [decision.get("intensity")]):
+        raise ValueError("recorded decision intensity differs from the sizing policy")
+
+
+def _candidates(market_run, market_receipt, model_receipt, study,
+                distribution_receipt=None, distribution_study=None):
     source = read_json(market_run/"summary.json")
-    predictor = make_predictor(study["models"][study["selected_model"]])
+    base_predictor = make_predictor(study["models"][study["selected_model"]])
     registered = set(market_receipt["registered_artifact_paths"])
+    used_distribution = False
     for cell in source.get("markets", []):
         if cell["policy"] != "selected":
             continue
@@ -91,10 +144,28 @@ def _candidates(market_run, market_receipt, model_receipt, study):
         if filename not in registered:
             raise ValueError("unregistered market metadata")
         metadata = read_json(market_run/filename)
-        if metadata["schema"] != "information-market/1.1.0" or metadata["config"].get("observation_policy") != "available_only":
+        if metadata["schema"] not in ("information-market/1.1.0", "information-market/1.2.0") or metadata["config"].get("observation_policy") != "available_only":
             raise ValueError("probe source must use available_only observations; legacy proxy is not observed data")
         if metadata["model_input_manifest_sha256"] != model_receipt["manifest_sha256"]:
             raise ValueError("rollout and model input manifests differ")
+        predictor = base_predictor
+        distributional = metadata["schema"] == "information-market/1.2.0"
+        if distributional:
+            from nmsim.intensity_distribution import make_distribution_predictor
+            if distribution_receipt is None or distribution_study is None:
+                raise ValueError("sizing rollout planning requires its verified --distribution-run")
+            if metadata.get("distribution_input_manifest_sha256") != distribution_receipt["manifest_sha256"]:
+                raise ValueError("rollout and sizing input manifests differ")
+            candidate = metadata.get("sizing_candidate")
+            sizing_policy = metadata["config"].get("sizing_policy")
+            if candidate != source.get("sizing_candidate") or sizing_policy != source.get("sizing_policy"):
+                raise ValueError("cell and summary sizing configuration differ")
+            if sizing_policy not in ("distribution_mean", "distribution_sampled"):
+                raise ValueError("invalid sizing rollout policy")
+            predictor = make_distribution_predictor(distribution_study, study, candidate=candidate)
+            used_distribution = True
+        elif distribution_receipt is not None or distribution_study is not None:
+            raise ValueError("legacy 1.1 rollout must not receive unused sizing input")
         ledger_name = metadata["ledger_artifact"]
         if ledger_name not in registered:
             raise ValueError("unregistered market ledger")
@@ -115,6 +186,8 @@ def _candidates(market_run, market_receipt, model_receipt, study):
                     for key in ("action_probs", "intensities"):
                         if any(abs(a-b) > 1e-12 for a, b in zip(expected[key], recorded[key])):
                             raise ValueError("recorded decision is not from the bound Student")
+                    if distributional:
+                        _check_sizing_decision({**decision, "decision_day": day}, expected, metadata)
                     yield {"source_run_id": market_receipt["run_id"], "cell": cell["cell"],
                            "agent_id": decision["agent_id"], "decision_day": day,
                            "rounds": metadata["config"]["rounds"], "quote_rule": cell["quote_rule"],
@@ -123,6 +196,8 @@ def _candidates(market_run, market_receipt, model_receipt, study):
                            "base_state": {**{key: row["market_effective"][key] for key in P8[:6]}, **account}}
         if observed_rounds != metadata["config"]["rounds"]:
             raise ValueError("incomplete market ledger")
+    if distribution_receipt is not None and not used_distribution:
+        raise ValueError("unused sizing input: no eligible sizing cells")
 
 
 class FakeNullTeacher:
@@ -301,6 +376,8 @@ def main(argv: Sequence[str] | None = None):
     except (ValueError, TypeError, OSError) as error:
         fail_cli(bootstrap, error)
     inputs = ({"market": args.market_run, "model": args.model_run} if args.task == "plan" else {"plan": args.plan_run})
+    if args.task == "plan" and args.distribution_run is not None:
+        inputs["distribution"] = args.distribution_run
     try:
         ensure_separate_output(Path(args.out), inputs.values())
     except ValueError:
@@ -318,7 +395,10 @@ def main(argv: Sequence[str] | None = None):
         receipts = {name: verify_run(path, getattr(args, name+"_manifest_sha256")) for name, path in inputs.items()}
         if args.task == "plan":
             study = _load_study(args.model_run, receipts["model"])
-            plan = build_plan(_candidates(args.market_run, receipts["market"], receipts["model"], study),
+            distribution_study = (_load_distribution(args.distribution_run, receipts["distribution"], study)
+                                  if "distribution" in receipts else None)
+            plan = build_plan(_candidates(args.market_run, receipts["market"], receipts["model"], study,
+                              receipts.get("distribution"), distribution_study),
                               max_states=args.max_states, replicates=args.replicates, seed=args.seed)
         else:
             if "probe_plan.json" not in receipts["plan"]["registered_artifact_paths"]:
@@ -333,6 +413,9 @@ def main(argv: Sequence[str] | None = None):
                       "nmsim/information_weight.py", "nmsim/v2_distillation.py"]
         scientific = {"schema": SCHEMA, "plan_hash": plan["plan_hash"],
                       "components": {name: file_sha256(ROOT/name) for name in components}}
+        if "distribution" in receipts:
+            scientific["distribution_study_semantic_hash"] = distribution_study["study_semantic_hash"]
+            scientific["components"]["nmsim/intensity_distribution.py"] = file_sha256(ROOT/"nmsim/intensity_distribution.py")
         model_request = {"schema": SCHEMA, "provider": args.provider,
                          "request": REQUEST if args.provider == "openai" else {"model": "fake-null-control", "behavior": "constant_hold"},
                          "required_reported_model": "HiggsAI" if args.provider == "openai" else "fake-null-control", "seed_sent": False,
@@ -351,6 +434,7 @@ def main(argv: Sequence[str] | None = None):
         write_json_exclusive(context.run_dir/"identities.json", {**identities, "scientific_config": scientific,
                              "model_request_config": model_request, "execution_config": execution})
         context.manifest["rollout_fidelity_identities"] = identities
+        context.manifest["legacy_config_scope"] = "lifecycle_only_not_rollout_fidelity_science"
         context.register_llm_runtime(provider="none", mode="probe_plan", network_access=False, provider_calls=0)
         context._write()
         if args.task == "acquire" and not args.dry_run:
