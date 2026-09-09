@@ -46,7 +46,7 @@ order book remain outside this implementation.
 | Empirical market validation | Matched time/institution/data, whole-market replicates, controls, uncertainty | pending |
 | Social mechanism | Public-only messages and no-social/sham controls, if needed after the basic loop | pending |
 | Scale and operation | 200/1,000-agent timings, progress, immutable outputs, failure evidence | 200 and 1,000 run timings recorded; durable progress/report available; always-open dashboard pending |
-| Shareable review | Current run report, model/data provenance, scientific changes, commands/tests, GitHub branch | report ready; publication receipt pending |
+| Shareable review | Current run report, model/data provenance, scientific changes, commands/tests, GitHub branch | code/report pushed; Draft PR #13 open against feat/v2-teacher-pilot |
 | Composition inference | Known-composition recovery under nuisance changes before real-market inference | deferred until identifiable |
 
 ## Implementation decisions
@@ -100,3 +100,7 @@ open until the requested research system and its evidence have been verified.
    comparisons, then add independently controlled social information.
 
 Actual results, hashes and boundaries: [2026-09-09 report](AGENT_MARKET_RESULTS_20260909.md).
+
+GitHub review: [PR #13](https://github.com/b25805634-cyber/Agent-based-simulation-of-financial-markets/pull/13).
+The new branch is `feat/agent-market-loop`. Main has not been merged. Local
+model/data/ledger files and private archives are not uploaded with this code PR.
