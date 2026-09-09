@@ -83,6 +83,25 @@ def _spec(
 
 ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
     _spec(
+        "nmsim.human_early_tasks", "nmsim/human_early_tasks.py",
+        "nmsim.human_early_tasks.build_early_tasks(...) / parse_joint_response(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("source histories", "pre-ranking task window", "strict six-asset joint choices"),
+        notes="Reconstructed early-window reference, not full original-UI replay; labels and source IDs stay outside prompts.",
+    ),
+    _spec(
+        "experiments.intensity_distribution", "experiments/intensity_distribution.py",
+        "python3 -m experiments.intensity_distribution", OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify source and frozen Student", "train sizing laws without test", "export"),
+        ("managed run directory", "intensity_study.json", "identities.json", "summary.json"), PROVIDER_NONE, True,
+        "Optional sizing-only distribution fit. Original action model, old test and rounding unchanged; no Provider path.",
+    ),
+    _spec(
+        "nmsim.intensity_distribution", "nmsim/intensity_distribution.py",
+        "nmsim.intensity_distribution.fit_intensity_distributions(...) / make_distribution_predictor(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("training exact support", "frozen representation", "conditional distribution", "validation CRPS"),
+        notes="Pure statistical library, no files/provider/run lifecycle; original test payloads excluded.",
+    ),
+    _spec(
         "experiments.information_diagnostics", "experiments/information_diagnostics.py",
         "python3 -m experiments.information_diagnostics",
         OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, ANALYSIS_MANAGED,

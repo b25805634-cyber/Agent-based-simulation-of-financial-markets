@@ -21,7 +21,7 @@ from typing import Any, Sequence
 from nmsim.config import Config
 from nmsim.information_artifacts import (
     assert_unchanged, canonical_hash, file_sha256, read_json, read_public_samples,
-    verify_run, write_json_exclusive, write_text_exclusive,
+    verify_run, write_json_exclusive, write_text_exclusive, ensure_separate_output, preflight_output_separation,
 )
 from nmsim.information_reporting import render_html, render_markdown
 from nmsim.managed_cli import (BootstrapCLIError, RaisingArgumentParser,
@@ -57,6 +57,10 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--source-manifest-sha256")
     parser.add_argument("--model-run", type=Path)
     parser.add_argument("--model-manifest-sha256")
+    parser.add_argument("--distribution-run", type=Path)
+    parser.add_argument("--distribution-manifest-sha256")
+    parser.add_argument("--sizing-policy", choices=("legacy_mean", "distribution_mean", "distribution_sampled"), default="legacy_mean")
+    parser.add_argument("--sizing-candidate", choices=("selected", "empirical", "conditional_softmax"), default="selected")
     parser.add_argument("--human-responses", type=Path)
     parser.add_argument("--seed", type=int, default=20260909)
     parser.add_argument("--epochs", type=int, default=120)
@@ -77,6 +81,11 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def _validate(args) -> None:
+    if args.sizing_policy != "legacy_mean":
+        if args.task != "simulate" or args.distribution_run is None or args.policies != ["selected"] or args.observation_policy != "available_only":
+            raise ValueError("new sizing requires --task simulate, --distribution-run, --policies selected, and --observation-policy available_only")
+    elif args.distribution_run is not None or args.distribution_manifest_sha256 is not None or args.sizing_candidate != "selected":
+        raise ValueError("distribution input/candidate requires an explicit sizing policy")
     if args.task == "train" and args.source_run is None:
         raise ValueError("--source-run is required for training")
     if args.task == "simulate" and args.model_run is None:
@@ -96,7 +105,7 @@ def _validate(args) -> None:
     if (any(not math.isfinite(x) or x < 0 for x in args.profile_weights) or
             not 0 < sum(args.profile_weights) < math.inf):
         raise ValueError("invalid --profile-weights")
-    for digest in (args.source_manifest_sha256, args.model_manifest_sha256):
+    for digest in (args.source_manifest_sha256, args.model_manifest_sha256, args.distribution_manifest_sha256):
         if digest is not None and (len(digest) != 64 or any(c not in "0123456789abcdef" for c in digest)):
             raise ValueError("invalid manifest SHA-256")
 
@@ -112,7 +121,7 @@ def _source_identity(receipt):
             "registered_artifacts_verified", "snapshot_hash")}
 
 
-def build_identities(args, receipt: dict) -> dict:
+def build_identities(args, receipt: dict, distribution_receipt=None) -> dict:
     from nmsim import information_market as market
     source_files = {name: file_sha256(ROOT/name) for name in SCIENTIFIC_FILES}
     if args.task == "train":
@@ -124,6 +133,11 @@ def build_identities(args, receipt: dict) -> dict:
                 for name in args.policies if name != "random"}
         input_identity = {"encoder": study["encoder"],
                           "models": {name: canonical_hash(study["models"][name]) for name in sorted(used)}}
+        if args.sizing_policy != "legacy_mean":
+            sizing = _load_distribution(args.distribution_run, distribution_receipt, study)
+            input_identity["intensity_study_semantic_hash"] = sizing["study_semantic_hash"]
+            input_identity["sizing_candidate"] = args.sizing_candidate
+            source_files["nmsim/intensity_distribution.py"] = file_sha256(ROOT/"nmsim/intensity_distribution.py")
     else:
         from nmsim.human_benchmark import build_tasks
         source_files["nmsim/human_benchmark.py"] = file_sha256(ROOT/"nmsim/human_benchmark.py")
@@ -142,7 +156,7 @@ def build_identities(args, receipt: dict) -> dict:
                   "market": {"agents": args.agents, "rounds": args.rounds, "seeds": args.seeds,
                              "profile_weights": args.profile_weights, "quote_rules": _quotes(args),
                              "policies": args.policies, "news_mode": args.news_mode,
-                             "contract": market.descriptor(args.observation_policy)} if args.task == "simulate" else None}
+                             "contract": market.descriptor(args.observation_policy, args.sizing_policy)} if args.task == "simulate" else None}
     model_request = {"schema_version": "information-market-model-request/1.0", "provider_access": "none",
                      "new_teacher_requests": 0}
     execution = {"schema_version": "information-market-execution-config/1.0", "dry_run": args.dry_run,
@@ -152,6 +166,9 @@ def build_identities(args, receipt: dict) -> dict:
                  "platform": platform.platform(), "entrypoint_sha256": file_sha256(Path(__file__)),
                  "artifact_io_sha256": file_sha256(ROOT/"nmsim/information_artifacts.py"),
                  "reporting_sha256": file_sha256(ROOT/"nmsim/information_reporting.py")}
+    if distribution_receipt is not None:
+        execution["distribution_input_manifest_sha256"] = distribution_receipt["manifest_sha256"]
+        execution["distribution_input_snapshot_hash"] = distribution_receipt["snapshot_hash"]
     try:
         import numpy
         execution["numpy_version"] = numpy.__version__
@@ -223,13 +240,27 @@ def _load_study(root, receipt):
     return study
 
 
-def _simulate(context, args, receipt, summary, progress):
+def _load_distribution(root, receipt, original_study):
+    from nmsim.intensity_distribution import make_distribution_predictor
+    if not receipt or "intensity_study.json" not in receipt["registered_artifact_paths"]:
+        raise ValueError("unregistered sizing study")
+    result = read_json(root/"intensity_study.json")
+    make_distribution_predictor(result, original_study)  # strict source/encoder/model/selection validation
+    return result
+
+
+def _simulate(context, args, receipt, summary, progress, distribution_receipt=None):
     from nmsim import information_market as market
     from nmsim.information_student import make_predictor, make_support_checker
     study = _load_study(args.model_run, receipt)
     selected = study["selected_model"]
     predictors = {"selected": make_predictor(study["models"][selected]),
                   "prior": make_predictor(study["models"]["prior"]), "random": market.random_policy}
+    if args.sizing_policy != "legacy_mean":
+        from nmsim.intensity_distribution import make_distribution_predictor
+        sizing = _load_distribution(args.distribution_run, distribution_receipt, study)
+        predictors["selected"] = make_distribution_predictor(sizing, study, candidate=args.sizing_candidate)
+        summary.update(sizing_policy=args.sizing_policy, sizing_candidate=args.sizing_candidate)
     summary["selected_model"] = selected
     from nmsim.information_weight import PROFILE_IDS, PROFILE_FIELDS
     check_support = make_support_checker(study["ood_reference"])
@@ -280,6 +311,7 @@ def _simulate(context, args, receipt, summary, progress):
                                            agents=args.agents, rounds=args.rounds,
                                            profile_weights=weights, quote_rule=quote,
                                            news_mode=args.news_mode, observation_policy=args.observation_policy,
+                                           sizing_policy=args.sizing_policy,
                                            on_round=on_round)
             except BaseException:
                 context.set_experiment_completion(planned_runs=planned, started_runs=index+1,
@@ -294,6 +326,10 @@ def _simulate(context, args, receipt, summary, progress):
             "joint_support_assessed": False, "not_teacher_fidelity_evidence": True}
         result["ledger_artifact"] = ledger_path.name
         result["model_input_manifest_sha256"] = receipt["manifest_sha256"]
+        if distribution_receipt is not None:
+            result["distribution_input_manifest_sha256"] = distribution_receipt["manifest_sha256"]
+            result["sizing_candidate"] = args.sizing_candidate
+            result["summary"]["sizing_audit"] = result["sizing_audit"]
         result["elapsed_seconds"] = time.monotonic()-start
         write_json_exclusive(context.run_dir/(name+".json"), result)
         artifacts.extend([name+".json", ledger_path.name])
@@ -343,6 +379,11 @@ def _benchmark(context, args, receipt, summary, progress):
 def main(argv: Sequence[str] | None = None) -> None:
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        preflight_output_separation(argv, DEFAULT_OUT)
+    except ValueError:
+        print("provenance_not_created_reason=output_overlaps_historical_input", file=sys.stderr)
+        raise SystemExit(2)
+    try:
         bootstrap = bootstrap_cli(argv, default_out=DEFAULT_OUT, command_identity=COMMAND)
     except BootstrapCLIError as error:
         fail_cli(None, error)
@@ -352,6 +393,11 @@ def main(argv: Sequence[str] | None = None) -> None:
         _validate(args)
     except (ValueError, TypeError, OSError) as error:
         fail_cli(bootstrap, error)
+    try:
+        ensure_separate_output(Path(args.out), (args.source_run, args.model_run, args.distribution_run))
+    except ValueError:
+        print("provenance_not_created_reason=output_overlaps_historical_input", file=sys.stderr)
+        raise SystemExit(2)
     cfg = Config(provider="mock", seed=args.seed, n_rounds=0, n_llm_agents=0, n_noise_agents=0,
                  cache_enabled=False, openai_base_url="", openai_api_key="", out_dir=args.out)
     source = args.source_run if args.task == "train" else args.model_run
@@ -360,6 +406,8 @@ def main(argv: Sequence[str] | None = None) -> None:
     inputs = {"historical_input_manifest": source/"run_manifest.json"} if source else {}
     if args.human_responses is not None:
         inputs["anonymous_human_responses"] = args.human_responses
+    if args.distribution_run is not None:
+        inputs["distribution_input_manifest"] = args.distribution_run/"run_manifest.json"
     try:
         context = ManagedRunContext.create(cfg, out_root=args.out, run_id=args.run_id,
                     scenario_id="information-market/1.0", repo_root=ROOT, command_identity=COMMAND,
@@ -376,11 +424,14 @@ def main(argv: Sequence[str] | None = None) -> None:
                                      cache_enabled=False, network_access=False, provider_calls=0)
         context.set_stage("config_validation")
         receipt = verify_run(source, pin) if source is not None else None
-        identities = build_identities(args, receipt)
+        distribution_receipt = verify_run(args.distribution_run, args.distribution_manifest_sha256) if args.distribution_run is not None else None
+        identities = build_identities(args, receipt, distribution_receipt)
         context.manifest["information_market_identities"] = identities
         context.manifest["legacy_config_scope"] = "lifecycle_only_not_information_market_science"
         context._write()
         write_json_exclusive(context.run_dir/"source_receipt.json", receipt)
+        if distribution_receipt is not None:
+            write_json_exclusive(context.run_dir/"distribution_source_receipt.json", distribution_receipt)
         write_json_exclusive(context.run_dir/"identities.json", identities)
         summary = _summary(context, args, identities, receipt)
         descriptor = os.open(context.run_dir/"progress.jsonl", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o644)
@@ -389,11 +440,16 @@ def main(argv: Sequence[str] | None = None) -> None:
                                "at": datetime.now(timezone.utc).isoformat()})
             artifacts = []
             if not args.dry_run:
-                execute = {"train": _train, "simulate": _simulate, "benchmark": _benchmark}[args.task]
-                artifacts = execute(context,args,receipt,summary,progress)
+                if args.task == "simulate":
+                    artifacts = _simulate(context,args,receipt,summary,progress,distribution_receipt)
+                else:
+                    execute = {"train": _train, "benchmark": _benchmark}[args.task]
+                    artifacts = execute(context,args,receipt,summary,progress)
             context.set_stage("result_export")
             if source is not None:
                 assert_unchanged(source, receipt)
+            if distribution_receipt is not None:
+                assert_unchanged(args.distribution_run, distribution_receipt)
             if args.human_responses is not None:
                 if file_sha256(args.human_responses) != identities["scientific_config"]["scientific_input"]["human_responses_sha256"]:
                     raise ValueError("human response input changed")

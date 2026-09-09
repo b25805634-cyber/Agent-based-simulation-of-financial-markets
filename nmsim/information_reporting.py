@@ -10,7 +10,7 @@ def public_report(summary: dict[str, Any]) -> dict[str, Any]:
     allowed = ("schema_version", "run_id", "task", "status", "honest_n",
                "identities", "source", "student_comparison", "selected_model",
                "selection_rule", "markets", "limitations", "elapsed_seconds",
-               "human_validation", "artifacts", "next_evidence_needed")
+               "human_validation", "artifacts", "next_evidence_needed", "sizing_policy", "sizing_candidate")
     return {key: summary[key] for key in allowed if key in summary}
 
 

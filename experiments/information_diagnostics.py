@@ -10,7 +10,7 @@ from typing import Sequence
 from experiments.information_market import _load_study
 from nmsim.config import Config
 from nmsim.information_artifacts import (canonical_hash, file_sha256, verify_run, assert_unchanged,
-    read_public_samples, write_json_exclusive, write_text_exclusive)
+    read_public_samples, write_json_exclusive, write_text_exclusive, ensure_separate_output, preflight_output_separation)
 from nmsim.managed_cli import RaisingArgumentParser, bootstrap_cli, fail_cli, BootstrapCLIError
 from nmsim.run_context import ManagedRunContext
 
@@ -22,7 +22,7 @@ ROOT = Path(__file__).resolve().parents[1]
 
 def parser():
     result = RaisingArgumentParser(description=__doc__, allow_abbrev=False)
-    result.add_argument("--task", choices=("learning-curves", "human-reference"), required=True)
+    result.add_argument("--task", choices=("learning-curves", "human-reference", "human-early"), required=True)
     result.add_argument("--source-run", type=Path)
     result.add_argument("--source-manifest-sha256")
     result.add_argument("--model-run", type=Path)
@@ -42,6 +42,11 @@ def parser():
 def main(argv: Sequence[str] | None = None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        preflight_output_separation(argv, "results_information_diagnostics")
+    except ValueError:
+        print("provenance_not_created_reason=output_overlaps_historical_input", file=sys.stderr)
+        raise SystemExit(2)
+    try:
         bootstrap = bootstrap_cli(argv, default_out="results_information_diagnostics", command_identity=COMMAND)
     except BootstrapCLIError as error:
         fail_cli(None, error)
@@ -56,6 +61,11 @@ def main(argv: Sequence[str] | None = None):
             raise ValueError("invalid training configuration")
     except (ValueError, TypeError, OSError) as error:
         fail_cli(bootstrap, error)
+    try:
+        ensure_separate_output(Path(args.out), (args.source_run, args.model_run))
+    except ValueError:
+        print("provenance_not_created_reason=output_overlaps_historical_input", file=sys.stderr)
+        raise SystemExit(2)
     inputs = ({"teacher": args.source_run/"run_manifest.json", "model": args.model_run/"run_manifest.json"}
               if args.task == "learning-curves" else {"published_csv": args.csv})
     cfg = Config(provider="mock", n_rounds=0, n_llm_agents=0, n_noise_agents=0, cache_enabled=False,
@@ -96,6 +106,11 @@ def main(argv: Sequence[str] | None = None):
                 raise ValueError("CSV does not match publisher's frozen source checksum")
             scientific = {"task": args.task, "source_doi": SOURCE_DOI, "source_csv_sha256": SOURCE_CSV_SHA256}
             sources = ["nmsim/human_reference.py"]
+            if args.task == "human-early":
+                from nmsim.human_early_tasks import PROTOCOL_ID
+                sources.append("nmsim/human_early_tasks.py")
+                scientific["task_protocol_id"] = PROTOCOL_ID
+                scientific["selection"] = "spt2 main rounds 1 through 5; before realized rankings"
         scientific["components"] = {name: file_sha256(ROOT/name) for name in sources}
         execution = {"python": platform.python_version(), "backend": args.backend, "dry_run": args.dry_run,
                      "input_manifest_hashes": {key: row["manifest_sha256"] for key, row in receipts.items()},
@@ -112,6 +127,7 @@ def main(argv: Sequence[str] | None = None):
         write_json_exclusive(context.run_dir/"identities.json", {**identity, "scientific_config": scientific, "execution_config": execution})
         write_json_exclusive(context.run_dir/"source_receipts.json", receipts)
         context.manifest["information_diagnostic_identities"] = identity
+        context.manifest["legacy_config_scope"] = "lifecycle_only_not_information_diagnostic_science"
         context._write()
         context.set_stage("simulation")
         if args.dry_run:
@@ -132,6 +148,35 @@ def main(argv: Sequence[str] | None = None):
             honest["historical_reference_humans"] = result["human_subjects"]
             honest["historical_main_joint_decisions"] = result["main_subject_periods"]
             honest["historical_main_stock_opportunities"] = result["main_stock_opportunities"]
+            if args.task == "human-early":
+                from nmsim.human_early_tasks import build_early_tasks, hold_baseline_predictions, evaluate_joint_predictions
+                tasks = build_early_tasks(records)
+                baseline = evaluate_joint_predictions(tasks, hold_baseline_predictions(tasks))
+                baseline["prediction_source"] = "synthetic_hold_null_not_Teacher"
+                source_audit = result
+                result = {"source_audit": source_audit, "task_bank_hash": canonical_hash(tasks),
+                          "task_protocol": tasks[0]["protocol"], "hold_null_baseline": baseline,
+                          "human_likeness_validated": False, "new_teacher_requests": 0}
+                write_json_exclusive(context.run_dir/"private_human_early_tasks.json", tasks, private=True)
+                prompt_tasks = [{key: task[key] for key in ("schema", "task_id", "protocol", "state", "prompt")} for task in tasks]
+                # A later task's legitimate own history contains earlier gold
+                # decisions. A prompt-only bank is therefore not label-blind.
+                write_json_exclusive(context.run_dir/"private_human_early_prompts.json", prompt_tasks, private=True)
+                write_json_exclusive(context.run_dir/"human_early_catalog.json", {
+                    "schema": "lieu-pelster-early-task-catalog/0.1",
+                    "task_bank_hash": result["task_bank_hash"],
+                    "task_protocol": tasks[0]["protocol"],
+                    "units": baseline["units"],
+                    "task_ids": [task["task_id"] for task in tasks],
+                    "acquisition_policy": (
+                        "Supply only the current task in an independent request context. "
+                        "Never supply the complete prompt bank or later task histories."
+                    ),
+                })
+                honest.update(historical_reference_humans=baseline["units"]["source_subjects"],
+                              historical_main_joint_decisions=len(tasks),
+                              historical_main_stock_opportunities=6*len(tasks),
+                              synthetic_null_predictions=len(tasks))
         context.set_stage("result_export")
         if args.task == "learning-curves":
             assert_unchanged(args.source_run, receipts["teacher"])

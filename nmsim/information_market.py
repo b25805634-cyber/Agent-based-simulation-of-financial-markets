@@ -31,7 +31,9 @@ from nmsim.v2_market_experiment import (
 
 SCHEMA_VERSION = "information-market/1.0.0"
 AVAILABLE_SCHEMA_VERSION = "information-market/1.1.0"
+SIZING_SCHEMA_VERSION = "information-market/1.2.0"
 OBSERVATION_POLICIES = ("legacy_proxy", "available_only")
+SIZING_POLICIES = ("legacy_mean", "distribution_mean", "distribution_sampled")
 WORLD_SCHEMA_VERSION = "synthetic-daily-company-news/1.0.0"
 PROJECTION_SCHEMA_VERSION = "information-market-explicit-domain-projection/1.0.0"
 QUOTE_SCHEMAS = {
@@ -57,10 +59,14 @@ def _uniform(seed: int, day: int, agent_id: str, purpose: str) -> float:
             + 0.5) / float(2**64)
 
 
-def descriptor(observation_policy: str = "legacy_proxy") -> dict[str, Any]:
+def descriptor(observation_policy: str = "legacy_proxy", sizing_policy: str = "legacy_mean") -> dict[str, Any]:
     """Fixed scientific assumptions that the managed entrypoint must identify."""
     if observation_policy not in OBSERVATION_POLICIES:
         raise ValueError("unknown observation policy")
+    if sizing_policy not in SIZING_POLICIES:
+        raise ValueError("unknown sizing policy")
+    if sizing_policy != "legacy_mean" and observation_policy != "available_only":
+        raise ValueError("distributional sizing requires available_only observations")
     result = {
         "schema": SCHEMA_VERSION,
         "world_schema": WORLD_SCHEMA_VERSION,
@@ -108,6 +114,12 @@ def descriptor(observation_policy: str = "legacy_proxy") -> dict[str, Any]:
                       intraday_range_approximation=None,
                       zero_turnover_reference="undefined turnover ratio omitted, including zero/zero",
                       missing_information_rule="unobserved field omitted; encoder mask=0, not observed zero")
+    if sizing_policy != "legacy_mean":
+        result.update(schema=SIZING_SCHEMA_VERSION, sizing_policy=sizing_policy,
+                      intensity_sampling_namespace="information-market/sizing/1",
+                      quantity_rounding="unchanged floor of feasible cash/share fraction",
+                      action_model="unchanged original action probabilities",
+                      sizing_control="conditional distribution mean versus draw from the same distribution")
     return result
 
 
@@ -286,6 +298,7 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
                quote_rule: str = "independent",
                news_mode: str = "eventful",
                observation_policy: str = "legacy_proxy",
+               sizing_policy: str = "legacy_mean",
                on_round: Callable[[Mapping[str, Any]], None] | None = None) -> dict[str, Any]:
     """Run finite-budget synchronous trading, preserving public replay evidence.
 
@@ -296,8 +309,11 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
     _integer("seed", seed)
     _integer("rounds", rounds, 1)
     counts = profile_allocation(agents, profile_counts, profile_weights)
-    effective_descriptor = descriptor(observation_policy)
+    effective_descriptor = descriptor(observation_policy, sizing_policy)
     available_only = observation_policy == "available_only"
+    use_distribution = sizing_policy != "legacy_mean"
+    if use_distribution:
+        from nmsim.intensity_distribution import validate_distribution, distribution_mean, quantile_sample
     if quote_rule not in QUOTE_SCHEMAS:
         raise ValueError("unknown quote rule")
     if not callable(policy):
@@ -326,6 +342,8 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
     ledger, probes = [], []
     clips, selected = Counter(), Counter()
     undefined_turnover_count = 0
+    sizing_counts = Counter()
+    closed_agents = set()
     for day in range(rounds):
         price = prices[-1]
         raw_market = _market_features(prices, volumes)
@@ -351,9 +369,24 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
             raw_account = _account_fields(account, metadata[account.agent_id], price, day)
             effective_account, account_projection = project_fields(raw_account)
             clips.update(item["field"] for item in account_projection)
-            prediction = _normalise_prediction(policy(dict(visible), dict(effective_account)))
+            raw_prediction = policy(dict(visible), dict(effective_account))
+            prediction = _normalise_prediction(raw_prediction)
+            sizing_detail = {}
+            if use_distribution:
+                laws = raw_prediction.get("intensity_distributions")
+                if not isinstance(laws, Mapping) or set(laws) != {"buy", "sell"}:
+                    raise ValueError("distributional sizing needs explicit buy/sell distributions")
+                laws = {side: validate_distribution(laws[side]) for side in ("buy", "sell")}
+                means = [distribution_mean(laws[side]) for side in ("buy", "sell")]
+                sizing_detail = {"intensity_distributions": laws, "intensity_means": means,
+                                 "sizing_policy": sizing_policy}
             action = _sample_action(prediction["action_probs"], _uniform(seed, day, account.agent_id, "decision"))
             intensity = prediction["intensities"][0 if action == "buy" else 1] if action != "hold" else 0.0
+            if use_distribution and action != "hold":
+                draw = _uniform(seed, day, account.agent_id, "sizing")
+                intensity = (distribution_mean(laws[action]) if sizing_policy == "distribution_mean"
+                             else quantile_sample(laws[action], draw))
+                sizing_detail["sizing_uniform"] = draw if sizing_policy == "distribution_sampled" else None
             selected[action] += 1
             quantity, status = 0, "sampled_hold"
             if action != "hold":
@@ -364,10 +397,14 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
                 if quantity:
                     intents.append(OrderIntent(f"d{day:06d}-{account.agent_id}", account.agent_id,
                                                action, quantity, limit))
+                    if use_distribution and intensity == 1:
+                        sizing_counts["full_"+action+"_intents"] += 1
+                elif use_distribution and action == "sell" and account.shares == 1 and intensity > 0:
+                    sizing_counts["one_share_positive_sell_without_order"] += 1
             decisions.append({"agent_id": account.agent_id, "profile_id": profile,
                               "account_state_raw": raw_account, "account_state": effective_account,
                               "account_projection": account_projection, **prediction,
-                              "action": action, "intensity": intensity, "order_status": status})
+                              "action": action, "intensity": intensity, "order_status": status, **sizing_detail})
             if available_only:
                 decisions[-1]["visible_fields"] = dict(visible)
             if profile not in probed_profiles:
@@ -378,6 +415,12 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
         constrained = constrain_orders(accounts, intents, financing="finite")
         clearing = clear_call_auction(constrained, last_price_cents=price)
         settled = settle(accounts, CreditFacility(0), clearing, financing="finite")
+        if use_distribution:
+            after = {account.agent_id: account for account in settled.accounts}
+            for account in accounts:
+                if account.shares > 0 and after[account.agent_id].shares == 0:
+                    sizing_counts["closed_position_events"] += 1
+                    closed_agents.add(account.agent_id)
         metadata = _update_metadata(metadata, accounts, settled.accounts, clearing.fills,
                                     round_index=day + 1)
         accounts = settled.accounts
@@ -405,12 +448,13 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
         peak = max(peak, price)
         max_drawdown = min(max_drawdown, price / peak - 1)
     return {
-        "schema": AVAILABLE_SCHEMA_VERSION if available_only else SCHEMA_VERSION,
+        "schema": SIZING_SCHEMA_VERSION if use_distribution else AVAILABLE_SCHEMA_VERSION if available_only else SCHEMA_VERSION,
         "config": {"seed": seed, "agents": agents, "rounds": rounds,
                    "profile_counts": counts, "quote_rule": quote_rule,
                    "news_mode": news_mode,
                    "quote_schema": QUOTE_SCHEMAS[quote_rule], "descriptor": effective_descriptor,
-                   **({"observation_policy": observation_policy} if available_only else {})},
+                   **({"observation_policy": observation_policy} if available_only else {}),
+                   **({"sizing_policy": sizing_policy} if use_distribution else {})},
         "world_hash": _hash({"schema": WORLD_SCHEMA_VERSION, "schedule": world}),
         "world_schedule": world, "warmup": warmup, "initial_accounts": initial_accounts,
         "profile_assignments": profiles, "ledger": ledger, "state_probes": probes,
@@ -433,10 +477,14 @@ def run_market(policy: Policy, *, seed: int = 0, agents: int = 40, rounds: int =
                     "structural_ood": (["unobserved intraday range omitted; new visibility pattern needs fidelity evidence"]
                                        if available_only else ["daily-close-range proxy replaces unobserved intraday range"]),
                     "evidence_scope": "exploratory synthetic simulation; human resemblance unvalidated"},
+        **({"sizing_audit": {"policy": sizing_policy, "counts": dict(sizing_counts),
+                             "agents_ever_closed_position": len(closed_agents),
+                             "quantity_rounding": "floor_unchanged", "new_teacher_requests": 0}}
+           if use_distribution else {}),
     }
 
 
-__all__ = ["SCHEMA_VERSION", "AVAILABLE_SCHEMA_VERSION", "OBSERVATION_POLICIES", "WORLD_SCHEMA_VERSION", "PROJECTION_SCHEMA_VERSION",
+__all__ = ["SCHEMA_VERSION", "AVAILABLE_SCHEMA_VERSION", "SIZING_SCHEMA_VERSION", "OBSERVATION_POLICIES", "SIZING_POLICIES", "WORLD_SCHEMA_VERSION", "PROJECTION_SCHEMA_VERSION",
            "QUOTE_SCHEMAS", "descriptor", "build_world", "fundamental_fields",
            "project_fields", "profile_allocation", "quote_price", "prior_policy",
            "random_policy", "run_market"]

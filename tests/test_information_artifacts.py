@@ -7,7 +7,7 @@ import tempfile
 import unittest
 
 from nmsim.information_artifacts import (
-    archive_verified_run, assert_unchanged, verify_run, write_json_exclusive,
+    archive_verified_run, assert_unchanged, verify_run, write_json_exclusive, ensure_separate_output,
 )
 from nmsim.run_context import NullRunContext
 
@@ -59,6 +59,16 @@ class ArtifactInputTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             archive_verified_run(self.root, target, receipt)
         self.assertFalse(target.exists())
+
+    def test_analysis_output_root_and_symlink_cannot_enter_input(self):
+        with self.assertRaises(ValueError):
+            ensure_separate_output(self.root/"subdir", [self.root])
+        outer = Path(self.temp.name)/"outer"
+        outer.mkdir()
+        (outer/"runs").symlink_to(self.root, target_is_directory=True)
+        with self.assertRaises(ValueError):
+            ensure_separate_output(outer, [self.root])
+        ensure_separate_output(Path(self.temp.name), [self.root])
 
     def test_symlink_and_path_escape_rejected(self):
         (self.root / "escape").symlink_to(Path(self.temp.name))

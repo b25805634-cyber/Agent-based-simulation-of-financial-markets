@@ -64,3 +64,54 @@ class ManagedInformationDiagnosticsTests(unittest.TestCase):
         self.assertNotIn("engineering-fixture-subject", (run/"diagnostic_result.json").read_text())
         self.assertFalse(read_json(run/"summary.json")["human_likeness_validated"])
         verify_run(run)
+
+    def test_human_early_export_prevents_cross_task_label_leakage(self):
+        path = self.root/"synthetic_only.csv"
+        with path.open("w", newline="") as stream:
+            writer = csv.DictWriter(stream, fieldnames=SOURCE_COLUMNS)
+            writer.writeheader()
+            writer.writerows(fixture_records())
+        with patch("nmsim.human_reference.SOURCE_CSV_SHA256", file_sha256(path)), redirect_stdout(io.StringIO()), \
+                patch("socket.socket", side_effect=AssertionError("network")):
+            entry.main(["--task", "human-early", "--csv", str(path), "--out", str(self.root), "--run-id", "early"])
+        run = self.root/"runs/early"
+        prompt_path = run/"private_human_early_prompts.json"
+        private_prompts = read_json(prompt_path)
+        self.assertEqual(len(private_prompts), 5)
+        for row in private_prompts:
+            self.assertNotIn("human_action", row)
+            self.assertNotIn("source_origin", row)
+        self.assertEqual(prompt_path.stat().st_mode & 0o777, 0o600)
+        self.assertEqual((run/"private_human_early_tasks.json").stat().st_mode & 0o777, 0o600)
+        private_tasks = read_json(run/"private_human_early_tasks.json")
+        # Per-row omission of human_action does not protect the entire bank:
+        # the following prompt legitimately includes the earlier human choice.
+        for index in range(4):
+            self.assertEqual(
+                private_tasks[index]["human_action"]["signed_quantities"],
+                private_prompts[index+1]["state"]["own_prior_trades"][-1]["signed_quantities"],
+            )
+        self.assertFalse((run/"human_early_prompts.json").exists())
+        catalog_path = run/"human_early_catalog.json"
+        catalog = read_json(catalog_path)
+        self.assertEqual(catalog["task_ids"], [task["task_id"] for task in private_tasks])
+        self.assertEqual(catalog["units"]["joint_decision_tasks"], 5)
+        self.assertEqual(catalog["units"]["source_subjects"], 1)
+        self.assertEqual(catalog["units"]["stock_opportunities"], 30)
+        self.assertEqual(set(catalog), {"schema", "task_bank_hash", "task_protocol", "units",
+                                        "task_ids", "acquisition_policy"})
+        for forbidden in ("human_action", "source_origin", "own_prior_trades", "signed_quantities",
+                          "observed_price_history", "engineering-fixture-subject",
+                          "engineering-fixture-session"):
+            self.assertNotIn(forbidden, catalog_path.read_text())
+        self.assertIn("independent request context", catalog["acquisition_policy"])
+        result = read_json(run/"diagnostic_result.json")
+        self.assertEqual(result["hold_null_baseline"]["prediction_source"], "synthetic_hold_null_not_Teacher")
+        self.assertFalse(result["human_likeness_validated"])
+        honest = read_json(run/"summary.json")["honest_n"]
+        self.assertEqual(honest["new_teacher_requests"], 0)
+        self.assertEqual(honest["new_human_participants"], 0)
+        self.assertEqual(honest["historical_main_joint_decisions"], 5)
+        self.assertEqual(honest["historical_main_stock_opportunities"], 30)
+        self.assertEqual(honest["synthetic_null_predictions"], 5)
+        verify_run(run)

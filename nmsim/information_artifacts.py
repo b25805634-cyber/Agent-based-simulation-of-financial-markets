@@ -145,6 +145,41 @@ def assert_unchanged(root: Path, receipt: dict) -> None:
         raise ValueError("historical source bytes/modes/mtimes changed")
 
 
+def ensure_separate_output(out_root: Path, input_runs) -> None:
+    """Reject an output tree inside an immutable input before reserving a run.
+
+    An output parent containing old sibling runs is allowed; an output root or
+    its runs symlink resolving into an input is not. Callers must not try to
+    write failed-attempt provenance to a rejected output location.
+    """
+    destinations = [Path(out_root).resolve(), (Path(out_root)/"runs").resolve()]
+    for source in input_runs:
+        if source is None:
+            continue
+        original = Path(source).resolve()
+        if any(path == original or original in path.parents for path in destinations):
+            raise ValueError("output overlaps an immutable input run")
+
+
+def preflight_output_separation(argv, default_out: str) -> None:
+    """Protect named immutable inputs even if later full CLI parsing fails."""
+    if any(arg in ("--help", "-h", "--version") for arg in argv):
+        return
+    names = ("--out", "--source-run", "--model-run", "--student-run",
+             "--distribution-run", "--market-run", "--plan-run")
+    values = {}
+    for index, arg in enumerate(argv):
+        if arg == "--":
+            break
+        for name in names:
+            if arg.startswith(name + "="):
+                values[name] = arg[len(name)+1:]
+            elif arg == name and index+1 < len(argv) and not argv[index+1].startswith("--"):
+                values[name] = argv[index+1]
+    ensure_separate_output(Path(values.get("--out") or default_out),
+                           [values[name] for name in names[1:] if values.get(name) is not None])
+
+
 def read_public_samples(root: Path, receipt: dict) -> list[dict]:
     name = "information_weight_scale_samples.jsonl"
     if name not in receipt["registered_artifact_paths"]:
@@ -249,4 +284,5 @@ def archive_verified_run(source: Path, destination: Path, receipt: dict) -> dict
 
 __all__ = ["canonical_hash", "file_sha256", "read_json", "snapshot_run",
            "verify_run", "assert_unchanged", "read_public_samples",
-           "write_json_exclusive", "write_text_exclusive", "archive_verified_run"]
+           "write_json_exclusive", "write_text_exclusive", "archive_verified_run",
+           "ensure_separate_output", "preflight_output_separation"]

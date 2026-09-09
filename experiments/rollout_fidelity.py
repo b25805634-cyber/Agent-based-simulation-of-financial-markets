@@ -17,7 +17,7 @@ from experiments.information_weight_teacher import _safe_private
 from experiments.v2_attention_market import OpenAITeacherProvider, TeacherCompletion
 from nmsim.config import Config
 from nmsim.information_artifacts import (canonical_hash, file_sha256, read_json, verify_run,
-    assert_unchanged, write_json_exclusive)
+    assert_unchanged, write_json_exclusive, ensure_separate_output, preflight_output_separation)
 from nmsim.information_student import make_predictor
 from nmsim.information_weight import P8
 from nmsim.managed_cli import RaisingArgumentParser, bootstrap_cli, fail_cli, BootstrapCLIError
@@ -205,6 +205,7 @@ async def acquire(context, args, plan):
                     raise ValueError("duplicate logical request")
                 attempted.add(sample["sample_id"])
                 context.network_access = real
+                context.register_llm_runtime(network_access=real)
                 context.events.emit("LLMRequestRecorded", data={"sample_id": sample["sample_id"],
                                     "prompt_hash": sample["prompt_hash"]})
 
@@ -286,6 +287,11 @@ async def acquire(context, args, plan):
 def main(argv: Sequence[str] | None = None):
     argv = list(sys.argv[1:] if argv is None else argv)
     try:
+        preflight_output_separation(argv, "results_rollout_fidelity")
+    except ValueError:
+        print("provenance_not_created_reason=output_overlaps_historical_input", file=sys.stderr)
+        raise SystemExit(2)
+    try:
         bootstrap = bootstrap_cli(argv, default_out="results_rollout_fidelity", command_identity=COMMAND)
     except BootstrapCLIError as error:
         fail_cli(None, error)
@@ -295,6 +301,11 @@ def main(argv: Sequence[str] | None = None):
     except (ValueError, TypeError, OSError) as error:
         fail_cli(bootstrap, error)
     inputs = ({"market": args.market_run, "model": args.model_run} if args.task == "plan" else {"plan": args.plan_run})
+    try:
+        ensure_separate_output(Path(args.out), inputs.values())
+    except ValueError:
+        print("provenance_not_created_reason=output_overlaps_historical_input", file=sys.stderr)
+        raise SystemExit(2)
     cfg = Config(provider="mock", seed=args.seed, n_rounds=0, n_llm_agents=0, n_noise_agents=0,
                  cache_enabled=False, openai_base_url="", openai_api_key="", out_dir=args.out)
     context = ManagedRunContext.create(cfg, out_root=args.out, run_id=args.run_id, command_identity=COMMAND,

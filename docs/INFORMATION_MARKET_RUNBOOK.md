@@ -99,3 +99,59 @@ An older a10 copy had byte-identical contents but second-resolution mtimes; it
 was retained untouched and not represented as a complete metadata-preserving
 backup. `V2_A10_ARCHIVE_DEST` was unset, so a second independent medium remains
 to be configured. No backup belongs in Git.
+
+## Optional exact-support sizing (new development protocol)
+
+Fit only new sizing heads; original action selection, representation, original
+test and original mean heads are frozen. See
+[INTENSITY_DISTRIBUTION.md](INTENSITY_DISTRIBUTION.md) for controls and scores.
+
+```sh
+python3 -m experiments.intensity_distribution \
+  --source-run ../v2-teacher-pilot/results_information_weight_scale_10k/runs/information-weight-scale-10k-live-20260825-a1 \
+  --source-manifest-sha256 3a8297416e2f0d5b9959be94a76d6f93a05e443ef4f24761302f270c3ed6c3c4 \
+  --student-run results_information_market/runs/information-student-10k-20260909-a1 \
+  --student-manifest-sha256 a836bc8bb18e04bcc190afdb299aaf1583ea2242b0f0503e80d4864e94adf5af \
+  --epochs 120 --backend numpy --run-id intensity-distribution-20260909-a1
+
+python3 -m experiments.information_market --task simulate \
+  --model-run results_information_market/runs/information-student-10k-20260909-a1 \
+  --distribution-run results_intensity_distribution/runs/intensity-distribution-20260909-a1 \
+  --sizing-policy distribution_mean --sizing-candidate selected \
+  --observation-policy available_only --policies selected \
+  --quote-rule independent --agents 200 --rounds 60 --seeds 3 \
+  --run-id information-market-sizing-mean-20260909-a1
+
+python3 -m experiments.information_market --task simulate \
+  --model-run results_information_market/runs/information-student-10k-20260909-a1 \
+  --distribution-run results_intensity_distribution/runs/intensity-distribution-20260909-a1 \
+  --sizing-policy distribution_sampled --sizing-candidate selected \
+  --observation-policy available_only --policies selected \
+  --quote-rule independent --agents 200 --rounds 60 --seeds 3 \
+  --run-id information-market-sizing-sampled-20260909-a1
+```
+
+Use `--sizing-candidate empirical` as the feature-blind distribution control.
+Compare mean vs sampled with the same candidate. Intensity-linked quoting is
+a compound quantity-and-price treatment, not a clean sizing comparison.
+These are new run IDs: an existing directory is never overwritten. Only
+registered public model artifacts are consumed; source hashes and snapshots
+are verified before and after each run.
+
+## Published human task reconstruction (no model calls)
+
+```sh
+python3 -m experiments.information_diagnostics --task human-early \
+  --csv results_human_reference_inputs/lieu_pelster_v1/327f7c512733fffe0efb8ee83944cefb4320ab538a930b920b5cdd25595ac333/data_de_scopic.csv \
+  --run-id human-early-tasks-20260909-a1
+```
+
+This exports 195 joint six-asset tasks from 39 published participants before
+the first realized peer ranking, not 195 independent people. The exact UI is
+not recovered; chart retention and net-budget interpretation are explicit
+assumptions. Both the labelled task bank and prompt-only bank stay private
+(0600): later prompts contain legitimate own-history information that could
+reveal earlier task labels if the bank were supplied together. Public output
+contains only a trajectory-free catalog. Future prediction sessions receive
+one task each, never the complete bank. The no-trade baseline is synthetic,
+not a Teacher result. See [HUMAN_TASK_ALIGNMENT.md](HUMAN_TASK_ALIGNMENT.md).
