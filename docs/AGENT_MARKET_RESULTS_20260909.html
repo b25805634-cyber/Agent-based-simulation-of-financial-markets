@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Agent 模拟市场 · 2026-09-09 实际结果</title>
+<style>
+body{font:16px/1.75 system-ui,sans-serif;color:#182a3a;background:#f3f5f7;max-width:1020px;margin:40px auto;padding:0 22px}h1{font-size:32px;line-height:1.3}h2{font-size:23px}section{background:white;border:1px solid #dae1e7;padding:24px;border-radius:12px;margin:22px 0}.eyebrow{color:#536878;font-size:14px}.lead{font-size:20px}.cards{display:flex;flex-wrap:wrap;gap:14px}.card{flex:1;min-width:150px;border:1px solid #dce5ed;padding:18px;border-radius:9px}.number{display:block;font-size:30px;font-weight:700}.note{padding:16px;border-left:4px solid #c08729;background:#fff4dd}table{border-collapse:collapse;width:100%;font-size:15px}th,td{text-align:left;border-bottom:1px solid #e3e7ec;padding:12px 8px}th{background:#f4f7fa}.scroll{overflow-x:auto}a{color:#11629b}code{overflow-wrap:anywhere}footer{color:#536878;font-size:14px;padding-bottom:35px}@media(max-width:600px){body{margin-top:24px}h1{font-size:26px}section{padding:16px}}
+</style>
+<p class="eyebrow">2026-09-09 · 开发实验记录 · 代码 68dc3c6</p>
+<h1>一万条回答，已经接进模拟市场</h1>
+<p class="lead">新 Student 已训练完成，代理能够连续决策、交易、结算。现在需要解决的，是这些行为与市场结果能否得到真人证据支持。</p>
+<div class="cards"><div class="card"><span class="number">9,918</span>有效 Teacher 回答用于分组训练/验证/测试</div><div class="card"><span class="number">997</span>选中 MLP 的参数量</div><div class="card"><span class="number">384,000</span>28 个市场中的代理决策</div></div>
+<p class="note">本轮新增 Teacher 请求 0 次；真人参与者 0 人。所有市场的账务守恒通过，但“像真人”尚未验证。</p>
+<section><h2>小模型学得怎么样？</h2><p>验证集选中 MLP；测试集不参与选模。输入包括实际可见的数值、可见性标记和账户状态。隐藏信息及私人推理不进入模型。</p><div class="scroll"><table><tr><th>模型</th><th>参数/存储系数</th><th>测试动作损失 ↓</th><th>交易强度误差 ↓</th></tr><tr><td>先验基线</td><td>5</td><td>0.578710</td><td>0.160904</td></tr><tr><td>线性模型</td><td>285</td><td>0.399413</td><td>0.133603</td></tr><tr><td>MLP</td><td>997</td><td>0.382743</td><td>0.138328</td></tr></table></div><p>MLP 的动作预测优于两种基线；线性模型的交易规模误差略低。这说明模型选择还要关注不同目标，不能只看一个“准确率”。</p></section>
+<section><h2>市场跑出了什么？</h2><p>200 个代理 × 60 日 × 三个种子，三种策略与两种报价规则，共 18 个主对照市场，约 26 秒完成。另完成信息构成、中性事件与 1,000 代理运行；1,000 人 × 60 日约 9.3 秒。</p><div class="scroll"><table><tr><th>主对照</th><th>报价与交易强度分离</th><th>报价随强度变化</th></tr><tr><td>MLP：三种子平均期末涨跌</td><td>−50.41%</td><td>−69.48%</td></tr><tr><td>训练先验</td><td>−60.26%</td><td>−60.83%</td></tr><tr><td>随机方向</td><td>+23.05%</td><td>+23.05%</td></tr></table></div><p class="note">这张表暴露了问题：不看状态的先验也能大跌，改变报价规则又会明显改变 MLP 市场。价格曲线本身不能证明模型复现了真人心理。</p><p>MLP 主对照约 18%–22% 的代理轮次落在至少一个训练字段范围之外；另有日收盘变动代替日内振幅的结构性输入差异。每臂只有三个种子，结果仅作探索性诊断。</p></section>
+<section><h2>信息不同，行为与市场已经会不同</h2><p>同样的市场和初始账户下，量价偏重视图的人数提高至 70%，平均期末跌幅约 43.74%；基本面偏重视图的人数提高至 70%，约 45.30%。这些是当前模型的敏感性结果，还不能解释成真实人群比例的影响。</p><p>中性事件臂全部被边际范围检查标记，主要因为“事件影响营收比例 = 0”这个精确端点未被原 LHS 训练集覆盖。比例 100% 不代表每行都远离训练数据，但下一批数据需要补上这类锚点。</p></section>
+<section><h2>后面继续做什么？</h2><ol><li>从闭环实际访问的状态中挑选重复 Teacher 测试，确认 Student 在这些新状态上是否仍然忠实。</li><li>补齐无事件等边界状态，解决日内振幅与每日集合竞价的输入语义差异。</li><li>使用同任务真人交易选择，比较动作分布、交易规模和前后行为；现已备好 24 个中性情景和评分工具。</li><li>再验证公开消息传播、真实市场统计特征与人群构成反推。</li></ol></section>
+<section><h2>核查与使用</h2><p><a href="AGENT_MARKET_RESULTS_20260909.md">完整结果、运行编号与哈希</a> · <a href="INFORMATION_MARKET_RUNBOOK.md">实际命令与使用说明</a> · <a href="AGENT_MARKET_DELIVERY.md">全部交付项与剩余工作</a></p><p>历史 a10 与一万条原始数据保持不变；已建立保留字节、文件权限和时间戳的新备份，并通过恢复演练。新模型和市场账本存放在新工作区的 <code>results_information_market/runs/</code>。</p></section>
+<footer>本页是对已完成开发实验的摘要。涨跌幅不是投资预测，也不是真人相似性评分；数据、算法与市场规则的局限均保留在完整报告中。</footer>
+</html>

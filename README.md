@@ -1,5 +1,24 @@
 # Narrative Market Sim
 
+## Current information-market work (2026-09-09)
+
+The new `feat/agent-market-loop` path connects the existing 10k public Teacher
+observations to a 56-input masked Student and a conserving daily call market.
+An actual offline run selected a 997-parameter MLP by validation CE; frozen-test
+CE was 0.382743 (linear 0.399413; prior 0.578710). The completed market checks
+include 200-agent controls and a 1,000-agent scale run. **Human resemblance has
+not been established**: a 24-task human benchmark is ready, but no human
+responses have been collected through it.
+
+- [Actual results and remaining gaps](docs/AGENT_MARKET_RESULTS_20260909.md)
+- [Readable HTML report](docs/AGENT_MARKET_RESULTS_20260909.html)
+- [Commands and runbook](docs/INFORMATION_MARKET_RUNBOOK.md)
+- [Full delivery/evidence ledger](docs/AGENT_MARKET_DELIVERY.md)
+
+The legacy V1 overview below is retained as historical architecture. Its
+persona/pressure-market claims do not describe the new information-market
+protocol. Existing a10 and 10k run directories remain unchanged.
+
 An agent-based market sandbox for studying how **narratives / sentiment
 propagate** through a population and turn into price dynamics — bubbles, panics,
 herding cascades. This is a **behavioral-finance research sandbox**, NOT a price

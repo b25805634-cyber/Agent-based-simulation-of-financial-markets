@@ -36,17 +36,17 @@ order book remain outside this implementation.
 
 | Requirement | Evidence required | Status |
 |---|---|---|
-| Preserve historical evidence | Original manifests, artifact hashes, modes and mtimes unchanged; verified backup | in progress |
-| Train from 10k public data | Verified input, grouped split, masked input, prior/linear/MLP, validation-only selection, final test report | implementing |
-| Continuous information world | Coherent company ratios, timestamped news, endogenous price/volume, public information views | implementing |
-| Interacting agents | Private account/trade history, finite resources, order/fill distinction, atomic conserving settlement | existing core; new integration pending |
-| Separate order-rule effects | Independent vs intensity-linked quote treatment plus no-state controls under the same accounting | implementing |
+| Preserve historical evidence | Original manifests, artifact hashes, modes and mtimes unchanged; verified backup | local archives and restore verified; second medium pending |
+| Train from 10k public data | Verified input, grouped split, masked input, prior/linear/MLP, validation-only selection, final test report | completed development run; MLP selected, test CE 0.382743 |
+| Continuous information world | Coherent company ratios, timestamped news, endogenous price/volume, public information views | implemented; intraday-range proxy remains a semantic gap |
+| Interacting agents | Private account/trade history, finite resources, order/fill distinction, atomic conserving settlement | 28 markets, 1,680 rounds, 384,000 decisions; conservation passed |
+| Separate order-rule effects | Independent vs intensity-linked quote treatment plus no-state controls under the same accounting | implemented and run; large rule sensitivity observed |
 | Closed-loop fidelity | Rollout coverage and audited Teacher probes; unchanged held-out evaluation | pending |
-| Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | task/scoring work pending; human evidence absent |
+| Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | 24 tasks and scoring implemented; actual human evidence absent |
 | Empirical market validation | Matched time/institution/data, whole-market replicates, controls, uncertainty | pending |
 | Social mechanism | Public-only messages and no-social/sham controls, if needed after the basic loop | pending |
-| Scale and operation | 200/1,000-agent timings, progress, immutable outputs, failure evidence | pending |
-| Shareable review | Current run report, model/data provenance, scientific changes, commands/tests, GitHub branch | pending |
+| Scale and operation | 200/1,000-agent timings, progress, immutable outputs, failure evidence | 200 and 1,000 run timings recorded; durable progress/report available; always-open dashboard pending |
+| Shareable review | Current run report, model/data provenance, scientific changes, commands/tests, GitHub branch | report ready; publication receipt pending |
 | Composition inference | Known-composition recovery under nuisance changes before real-market inference | deferred until identifiable |
 
 ## Implementation decisions
@@ -84,3 +84,19 @@ software does not change their status.
 Every implementation stage must record exact commands, observed results,
 scientific changes, compatibility, and remaining work. This ledger must remain
 open until the requested research system and its evidence have been verified.
+
+## Next continuation priorities
+
+1. Audit actual rollout states and prepare repeated Teacher probes; investigate
+   the 18–22% marginal range flags and the structural intraday-range mismatch.
+   Do not compensate by forcing a preferred price trajectory.
+2. Validate and ingest same-task human evidence. A public candidate catalogue
+   is Liêu/Pelster v1, DOI 10.17632/jfg8s32xdm.1 (CC BY 4.0); dataset contents
+   and task compatibility have not yet been inspected. Human N remains zero.
+3. Add training-only/validation-only learning curves without reusing the
+   already-observed test for model selection. New confirmation needs fresh
+   evidence; more random labels alone do not establish human validity.
+4. Improve researcher-facing monitoring and compile empirical market
+   comparisons, then add independently controlled social information.
+
+Actual results, hashes and boundaries: [2026-09-09 report](AGENT_MARKET_RESULTS_20260909.md).

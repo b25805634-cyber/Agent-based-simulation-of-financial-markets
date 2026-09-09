@@ -443,7 +443,7 @@ Important remaining risks:
   evidence only.
 # Information-market successor (2026-09-09)
 
-`python3 -m experiments.information_market --task train|simulate` is a new
+`python3 -m experiments.information_market --task train|simulate|benchmark` is a new
 provider-free official managed entrypoint. It validates a finished historical
 source and all registered artifact hashes, uses that source as a hashed analysis
 input (never resume), and emits a new managed run, four named config identities,
