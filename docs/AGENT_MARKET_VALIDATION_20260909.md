@@ -116,6 +116,11 @@ PYTHONPYCACHEPREFIX=/private/tmp/agent-market-pycache python3 -m experiments.rol
 # finished; 120/120 fake responses; real_endpoint=false; valid_endpoint_responses=0
 ```
 
+随后补充“采集阶段不得用命令行覆盖已冻结选样参数”的输入检查，执行
+`PYTHONPYCACHEPREFIX=/private/tmp/agent-market-pycache python3 -m unittest tests.test_rollout_probes -v`：
+11 tests / 0.389s / OK。它只拒绝此前会被忽略的选样参数，不改变已执行计划、
+请求或历史结果。
+
 | 运行 | Manifest SHA-256 | 注册 artifacts |
 |---|---|---:|
 | information-market-available-20260909-a1 | 4dbd81829b1c3477a2212dc499308c513724b88017c4253bc026c1c6384ce51d | 20/20 |

@@ -136,6 +136,13 @@ class ProbeAcquisitionTests(unittest.TestCase):
         self.assertEqual(manifest["status"], "failed")
         self.assertEqual(manifest["failure_stage"], "config_validation")
 
+    def test_acquisition_cannot_silently_ignore_selection_overrides(self):
+        with self.assertRaises(SystemExit):
+            self.invoke("--replicates", "3")
+        manifest = read_json(self.root/"out/runs/probe-test/run_manifest.json")
+        self.assertEqual(manifest["status"], "failed")
+        self.assertEqual(manifest["honest_n"], 0)
+
     def test_unexpected_parser_failure_preserves_received_private_response(self):
         with patch.object(entry, "parse_teacher_response", side_effect=RecursionError("test parser")):
             with self.assertRaises(RecursionError):

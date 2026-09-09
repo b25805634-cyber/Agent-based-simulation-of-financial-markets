@@ -39,7 +39,7 @@ order book remain outside this implementation.
 | Preserve historical evidence | Original manifests, artifact hashes, modes and mtimes unchanged; verified backup | local archives and restore verified; second medium pending |
 | Train from 10k public data | Verified input, grouped split, masked input, prior/linear/MLP, validation-only selection, final test report | completed development run; MLP selected, test CE 0.382743 |
 | Continuous information world | Coherent company ratios, timestamped news, endogenous price/volume, public information views | available_only successor removes unobserved range/undefined turnover; new mask patterns still need fidelity checks |
-| Interacting agents | Private account/trade history, finite resources, order/fill distinction, atomic conserving settlement | 28 markets, 1,680 rounds, 384,000 decisions; conservation passed |
+| Interacting agents | Private account/trade history, finite resources, order/fill distinction, atomic conserving settlement | 34 market runs, 2,040 rounds, 456,000 decisions including available-only successor; conservation passed |
 | Separate order-rule effects | Independent vs intensity-linked quote treatment plus no-state controls under the same accounting | implemented and run; large rule sensitivity observed |
 | Closed-loop fidelity | Rollout coverage and audited Teacher probes; unchanged held-out evaluation | 24-state/K=5 plan frozen from 72,000 agent-rounds; 120 fake checks passed; real endpoint TCP timed out |
 | Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | 81 published humans audited in a different six-asset task; own 24-task responses still absent |

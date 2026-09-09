@@ -45,9 +45,9 @@ def parser():
     result.add_argument("--model-manifest-sha256")
     result.add_argument("--plan-run", type=Path)
     result.add_argument("--plan-manifest-sha256")
-    result.add_argument("--max-states", type=int, default=24)
-    result.add_argument("--replicates", type=int, default=5)
-    result.add_argument("--seed", type=int, default=20260909)
+    result.add_argument("--max-states", type=int)
+    result.add_argument("--replicates", type=int)
+    result.add_argument("--seed", type=int)
     result.add_argument("--provider", choices=("fake_test_teacher", "openai"), default="fake_test_teacher")
     result.add_argument("--live", action="store_true")
     result.add_argument("--confirm-request-count", type=int)
@@ -62,6 +62,14 @@ def _validate(args):
         raise ValueError("planning requires --market-run and --model-run")
     if args.task == "acquire" and args.plan_run is None:
         raise ValueError("acquisition requires --plan-run")
+    if args.task == "acquire" and any(value is not None for value in
+            (args.max_states, args.replicates, args.seed, args.market_run, args.model_run)):
+        raise ValueError("selection and rollout/model inputs belong to --task plan; acquisition uses its frozen plan")
+    if args.task == "plan" and args.plan_run is not None:
+        raise ValueError("--plan-run belongs to acquisition")
+    args.max_states = 24 if args.max_states is None else args.max_states
+    args.replicates = 5 if args.replicates is None else args.replicates
+    args.seed = 20260909 if args.seed is None else args.seed
     if args.seed < 0 or args.max_states < 1 or args.replicates < 2 or not 1 <= args.workers <= 4:
         raise ValueError("invalid probe plan or worker count")
     if args.live and (args.task != "acquire" or args.provider != "openai" or args.dry_run):
