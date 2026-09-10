@@ -1,5 +1,11 @@
 # Entrypoint inventory and management policy
 
+Additional 2026-09-09 successors: `experiments.information_diagnostics` is a
+provider-free managed learning-curve/reference audit; `experiments.rollout_fidelity`
+is a managed plan/acquisition diagnostic with explicit live/count guards.
+See [ROLLOUT_FIDELITY.md](ROLLOUT_FIDELITY.md). Their pure libraries and the
+human-reference/learning-curve adapters are separately registered.
+
 This document records the executable surfaces found through the additive V2
 attention-distillation prototype and their current lifecycle and result-reuse policy. The machine-readable source is
 [nmsim/entrypoints.py](../nmsim/entrypoints.py). Importing that registry has no
@@ -441,3 +447,67 @@ Important remaining risks:
   expose the fixture's numeric fundamental value, the corresponding diagnostic
   is machine-readably `not_scored`; raw actions/sentiments remain descriptive
   evidence only.
+# Information-market successor (2026-09-09)
+
+`python3 -m experiments.information_market --task train|simulate|benchmark` is a new
+provider-free official managed entrypoint. It validates a finished historical
+source and all registered artifact hashes, uses that source as a hashed analysis
+input (never resume), and emits a new managed run, four named config identities,
+progress JSONL, public model/market outputs and reports. `--help`/`--version`
+create no run; `--dry-run` verifies and describes inputs without fitting or
+simulating. There is deliberately no `--live` option. The pure libraries are
+`nmsim.information_student` and `nmsim.information_market`; local preservation
+uses the dedicated, non-research `nmsim.information_artifacts` audit API.
+See [AGENT_MARKET_DELIVERY.md](AGENT_MARKET_DELIVERY.md) for the complete goal,
+implementation status and still-missing human evidence.
+
+`python3 -m experiments.intensity_distribution` is an official managed,
+provider-free fit over verified historical public observations and a frozen
+Student. It selects optional exact-support sizing heads on validation only,
+never reopens original test payloads, and creates a new immutable run. Its
+pure library is `nmsim.intensity_distribution`. `information_market simulate`
+can explicitly consume the verified fit using `distribution_mean` or
+`distribution_sampled`; old defaults are unchanged.
+
+`python3 -m experiments.information_diagnostics --task human-early` verifies
+the pinned public human CSV and exports a reconstructed six-asset task bank
+plus an explicitly synthetic hold-null score. Original human labels and source
+identifiers are private (0600). The prompt-only bank also remains private:
+later own-history prompts can disclose earlier task labels. Public output is
+a trajectory-free catalog; future acquisition must pass one task at a time
+in separate sessions. There are zero Teacher calls.
+`nmsim.human_early_tasks` is the corresponding pure library.
+
+These entrypoints, information diagnostics and rollout fidelity reject output
+roots inside their historical input runs before creating even failed-run
+provenance, including malformed command lines and symlink-resolved overlap.
+Use a separate output root; siblings beneath a common results root are valid.
+
+## Frozen follow-up comparisons
+
+`python3 -m experiments.rollout_sizing_scores` is an offline managed analysis
+of a completed, verified probe acquisition. It binds the original action
+Student and the frozen sizing study, scores four fixed candidates with no
+refitting or reselection, and retains per-case/response denominators. It never
+opens a running acquisition as a completed source, and never calls a Provider.
+The pure library `nmsim.rollout_sizing_scores` owns numerical validation and
+scoring, not filesystem or run lifecycle. See
+[ROLLOUT_SIZING_SCORES.md](ROLLOUT_SIZING_SCORES.md).
+
+The existing rollout planner also accepts verified `information-market/1.2.0`
+outputs, but only with their explicit originating `--distribution-run`.
+Recorded laws, means and sizing draws must match that source. The Teacher
+receives only observed state/account variables, never the model's answers.
+Old 1.1 plans and acquisition defaults remain unchanged; these extra input
+flags are rejected for acquisition of an already frozen plan.
+
+`python3 -m experiments.human_early_teacher --task plan|acquire` is a separate
+managed six-asset comparison. It freezes 195 task requests, one per task, with
+SHA-shuffled order and isolated request contexts. The private labelled task
+bank must not enter any model request. Real acquisition requires the explicit
+Provider, live gate, exact count and a pinned completed plan; fake tests are
+not human or endpoint evidence. Public artifacts contain only aggregate
+comparisons and hashes; per-task histories, answers and rationale are private.
+The pure plan functions are `nmsim.human_early_acquisition`. See
+[HUMAN_EARLY_TEACHER.md](HUMAN_EARLY_TEACHER.md) for the new frozen scope and
+known original-display assumptions. This is not the single-asset market task.

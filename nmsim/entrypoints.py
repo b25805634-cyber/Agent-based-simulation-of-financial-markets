@@ -82,6 +82,123 @@ def _spec(
 
 
 ENTRYPOINTS: tuple[EntrypointSpec, ...] = (
+    _spec(
+        "experiments.rollout_sizing_scores", "experiments/rollout_sizing_scores.py",
+        "python3 -m experiments.rollout_sizing_scores", OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, ANALYSIS_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify completed probes and frozen models", "fixed-candidate distribution scores", "export"),
+        ("managed run directory", "identities.json", "source_receipts.json", "summary.json"), PROVIDER_NONE, True,
+        "Offline scores only; no fitting, selection or new Teacher calls. Scores apply only to supplied frozen states, not unprobed trajectories.",
+    ),
+    _spec(
+        "nmsim.rollout_sizing_scores", "nmsim/rollout_sizing_scores.py",
+        "nmsim.rollout_sizing_scores.score_rollout_sizing(...)", LIBRARY_API, LIBRARY_UNMANAGED,
+        ("validate plan and response roster", "authenticate frozen predictions", "per-case and weighted scores"),
+        notes="Pure fixed-candidate diagnostic; failures and missing rows never become hold observations.",
+    ),
+    _spec(
+        "experiments.human_early_teacher", "experiments/human_early_teacher.py",
+        "python3 -m experiments.human_early_teacher", OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify private task bank", "freeze plan or guarded independent requests", "aggregate comparison"),
+        ("managed run directory", "private task and response artifacts", "public plan hashes and aggregate summary"),
+        PROVIDER_DIRECT, True,
+        "Reconstructed six-asset comparison, not original-UI identity. Explicit live/exact-count guards; no human-validity pass flag.",
+    ),
+    _spec(
+        "nmsim.human_early_acquisition", "nmsim/human_early_acquisition.py",
+        "nmsim.human_early_acquisition", LIBRARY_API, LIBRARY_UNMANAGED,
+        ("validate reconstructed task bank", "freeze independent request order", "private task/public plan boundary"),
+        notes="Pure protocol functions; no Provider or file lifecycle. Later own histories must never be supplied with earlier tasks.",
+    ),
+    _spec(
+        "nmsim.human_early_tasks", "nmsim/human_early_tasks.py",
+        "nmsim.human_early_tasks.build_early_tasks(...) / parse_joint_response(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("source histories", "pre-ranking task window", "strict six-asset joint choices"),
+        notes="Reconstructed early-window reference, not full original-UI replay; labels and source IDs stay outside prompts.",
+    ),
+    _spec(
+        "experiments.intensity_distribution", "experiments/intensity_distribution.py",
+        "python3 -m experiments.intensity_distribution", OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify source and frozen Student", "train sizing laws without test", "export"),
+        ("managed run directory", "intensity_study.json", "identities.json", "summary.json"), PROVIDER_NONE, True,
+        "Optional sizing-only distribution fit. Original action model, old test and rounding unchanged; no Provider path.",
+    ),
+    _spec(
+        "nmsim.intensity_distribution", "nmsim/intensity_distribution.py",
+        "nmsim.intensity_distribution.fit_intensity_distributions(...) / make_distribution_predictor(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("training exact support", "frozen representation", "conditional distribution", "validation CRPS"),
+        notes="Pure statistical library, no files/provider/run lifecycle; original test payloads excluded.",
+    ),
+    _spec(
+        "experiments.information_diagnostics", "experiments/information_diagnostics.py",
+        "python3 -m experiments.information_diagnostics",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, ANALYSIS_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify historical sources", "learning curves or human input audit", "export"),
+        ("managed run directory", "diagnostic_result.json", "identities.json", "summary.json"),
+        PROVIDER_NONE, True,
+        "Offline only; learning curves exclude original test payloads; published human references retain their original task and timing.",
+    ),
+    _spec(
+        "experiments.rollout_fidelity", "experiments/rollout_fidelity.py",
+        "python3 -m experiments.rollout_fidelity",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify sources and frozen plan", "plan or guarded repeated probes", "export"),
+        ("managed run directory", "probe_plan.json", "probe_samples.jsonl", "private_probe_records.jsonl", "fidelity_summary.json"),
+        PROVIDER_DIRECT, True,
+        "Real probes require explicit openai, --live and exact planned request count. Private raw response precedes parsing. Fake null control has zero endpoint/human evidence.",
+    ),
+    _spec(
+        "nmsim.information_learning_curve", "nmsim/information_learning_curve.py",
+        "nmsim.information_learning_curve.learning_curves(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("original identity roster", "exclude test payloads", "nested training groups", "validation only"),
+        notes="Pure offline analysis; caller owns source-byte verification and managed output.",
+    ),
+    _spec(
+        "nmsim.human_reference", "nmsim/human_reference.py", "nmsim.human_reference.audit_records(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("published schema", "joint decision reconstruction", "timing/accounting audit"),
+        notes="Pure CSV/text analysis; future portfolio outcome never enters predecision state.",
+    ),
+    _spec(
+        "nmsim.rollout_probes", "nmsim/rollout_probes.py", "nmsim.rollout_probes.build_plan(...) / summarize(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("observed state selection", "neutral prompts", "replicated fidelity metrics"),
+        notes="Pure selection and scoring; no provider or file side effects.",
+    ),
+    _spec(
+        "experiments.information_market", "experiments/information_market.py",
+        "python3 -m experiments.information_market",
+        OFFICIAL_MANAGED_RESEARCH_ENTRYPOINT, DIRECT_MANAGED,
+        ("bootstrap", "ManagedRunContext", "verify historical input",
+        "masked Student training, synchronous information market or human task benchmark", "source integrity recheck", "export"),
+        ("managed run directory", "source_receipt.json", "identities.json",
+         "summary.json", "report.html", "progress.jsonl"),
+        PROVIDER_NONE, True,
+        "New offline development protocol; no live/provider option; historical inputs are not resumed children; human validity remains unestablished.",
+    ),
+    _spec(
+        "nmsim.information_student", "nmsim/information_student.py",
+        "nmsim.information_student.train_models(...) / make_predictor(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("validate public observations", "group split", "train/evaluate"),
+        notes="Pure library; official outputs are owned by experiments.information_market.",
+    ),
+    _spec(
+        "nmsim.information_market", "nmsim/information_market.py",
+        "nmsim.information_market.run_market(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("world", "visible state", "policy", "constrain", "clear", "settle"),
+        notes="Pure synchronous simulation; no provider, filesystem or implied managed provenance.",
+    ),
+    _spec(
+        "nmsim.human_benchmark", "nmsim/human_benchmark.py",
+        "nmsim.human_benchmark.build_tasks(...) / score_responses(...)",
+        LIBRARY_API, LIBRARY_UNMANAGED, ("neutral tasks", "anonymous same-task comparison"),
+        notes="Pure task/scoring library; synthetic fixtures never count as human evidence.",
+    ),
+    _spec(
+        "nmsim.information_artifacts", "nmsim/information_artifacts.py",
+        "nmsim.information_artifacts.verify_run(...) / archive_verified_run(...)",
+        TEST_OR_DIAGNOSTIC_ENTRYPOINT, DEDICATED_AUDIT,
+        ("hash and inspect immutable input", "optional explicit exclusive backup and restore drill"),
+        ("optional local private backup receipt",), PROVIDER_NONE, False,
+        "Artifact audit only, never a research market or reusable child-run declaration.",
+    ),
     # Direct managed leaves.  Only the simulation leaves construct a Provider
     # for a market run; qualification and stochasticity use direct Providers
     # inside their own explicitly non-market managed protocols.
