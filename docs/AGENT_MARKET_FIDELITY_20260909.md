@@ -6,9 +6,10 @@
 偏向卖出；新的买卖量分布改善了分布评分，但没有解决动作方向偏差。
 这批数据不是人类数据，也不能证明模拟市场像真人。
 
-下一项已经从冻结协议启动：用 195 个重建的六资产任务比较 Teacher 与
-39 位公开研究参与者的历史选择。它与当前单资产市场分开解释，不会把
-两种任务的成绩混在一起。该采集仍在运行，尚无完整的真人比较结论。
+下一项已经按冻结协议完成：用 195 个重建的六资产任务比较 Teacher 与
+39 位公开研究参与者的历史选择。它与当前单资产市场分开解释，没有把
+两种任务的成绩混在一起。完整负结果见
+[AGENT_MARKET_HUMAN_RESULT_20260910.md](AGENT_MARKET_HUMAN_RESULT_20260910.md)。
 
 ## 1. 已完成的真实端点对照
 
@@ -84,9 +85,9 @@ fake 的 56.923% 行动匹配只是“一律不交易”基线，macro recall �
 
 真实采集 `human-early-teacher-live-20260909-a1` 从新的独立、干净
 `.worktrees/human-early-live`、提交 `b763c0c2c0f3a7b2d1f96968bc62599cabcba9fb`
-启动，workers=2，计划上限恰为 195 个逻辑请求。原 120 请求进程已正常退出，
-没有重启或拼接。已有的 Higgs watchdog 仅增加对此确切 run ID 的识别，
-仍每 20 秒检查活动实验、每 15 分钟记录心跳，尊重 PAUSED 和冷却规则。
+启动，workers=2，计划上限恰为 195 个逻辑请求，已完整收尾。原 120 请求
+进程也正常退出，没有重启或拼接。已有的 Higgs watchdog 只识别这两个确切
+run ID，仍每 20 秒检查活动实验、每 15 分钟记录心跳，尊重 PAUSED 和冷却规则。
 
 公开输出包括 Teacher-valid 同子集的 hold-null、3×3 混淆表、每类 recall、
 缺类 null 与 macro recall。失败仍计入 coverage，不当成 hold。
@@ -98,8 +99,8 @@ fake 的 56.923% 行动匹配只是“一律不交易”基线，macro recall �
 
 ## 4. 产物与精确身份
 
-以下路径相对 `.worktrees/agent-market-loop`。除仍在运行的真人任务采集外，
-均已完成、验证注册 artifacts，并核验输入未变。新的离线评分和计划从干净
+以下路径相对 `.worktrees/agent-market-loop`。列出的运行均已完成、验证注册
+artifacts，并核验输入未变。新的离线评分和计划从干净
 `b763c0c2c0f3a7b2d1f96968bc62599cabcba9fb` 执行。
 
 | 目录前缀 / run ID | manifest byte SHA-256 | 验证 |
@@ -110,6 +111,7 @@ fake 的 56.923% 行动匹配只是“一律不交易”基线，macro recall �
 | `results_human_early_teacher/runs/human-early-teacher-plan-20260909-a1` | `eb0785c1c5346db72ee17da137aa9bc410a3f8140f27fecb80cb387d98a252cc` | 7/7 |
 | `results_human_early_teacher/runs/human-early-teacher-fake-20260909-a1` | `e366f10a021d75e0febb389712bdb415e9783a904617c6d31bea562fae96c4de` | 11/11 |
 | `results_human_early_teacher/runs/human-early-teacher-live-dry-20260909-a1` | `71d5da39abb04c1a487eae5b3ab80bd3608c50a6ed486d9bcb17677d25e23c64` | 7/7 |
+| `results_human_early_teacher/runs/human-early-teacher-live-20260909-a1` | `e892a0b4b20daab229ffde9ed22db4bfea97c2aeea12527a55ed049317253007` | 11/11 |
 
 ```text
 Completed real probe — rollout-fidelity-identities/1.0
@@ -144,7 +146,7 @@ plan_hash: 77e49bd86cf89aa019b04c9d98bc413fb1f369a7455da1892336f731f8a90ae1
 Fake、dry 和 real 共用 human scientific_config_hash，但其请求/执行身份
 不同；不能把 fake 的零请求身份或 dry 的 full hash 当作 real 的身份。
 全部具体配置和四类身份在各自 `identities.json`；真实 human run 的 manifest
-仍在更新，这里不把其中间 byte SHA 当成最终认证。
+已完成并由 `verify_run` 和内容寻址备份认证。
 
 真实 120 回答的内容寻址备份已保存到工作区根目录：
 `private_backups/agent_market/rollout_fidelity/85ca26d2baaf0817aecc9f5dd4fbe6cc011dd21d561ce94266dafc5a3089f003/`。
@@ -180,7 +182,8 @@ python3 -m experiments.human_early_teacher --task acquire --plan-run /Users/aldr
 ```
 
 前三条 exit 0，real 0.23s / 0.98s / 0.19s，均为零实际端点请求；最后一条
-是真实采集，尚未结束，不能报告为“195 条已完成”。
+exit 0，195/195 requests resolved，194 responses received，193 valid，
+1 provider failure、1 invalid response。
 
 ```sh
 PYTHONPYCACHEPREFIX=/private/tmp/agent-market-pycache MPLCONFIGDIR=/private/tmp/agent-market-mpl python3 -m unittest discover -s tests -p 'test_*.py' -v > /private/tmp/agent-market-tests-20260909-fidelity-human.log 2>&1
@@ -233,7 +236,8 @@ clearing、融资、默认 CLI 或历史 schema。原 probe plan/1.0 不变；�
 sizing 输入必须显式绑定，不能覆盖已冻结的 acquisition 参数。所有正式
 入口走 registry 和 ManagedRunContext；测试用 fake/纯函数而非真实 Provider。
 
-下一步仍是完成真人比较、针对已发现的方向/边界误差做明确的新协议和新
-验证，而不是继续使用已看的诊断选一个最好看的版本。真实市场制度匹配、
-社会信息控制、长期监控界面、组成可识别性及第二独立备份仍未完成。
+下一步是针对已发现的方向/边界误差设计明确的新协议和新验证，而不是
+继续使用已看的诊断选一个最好看的版本。当前 Teacher–human 结果是有限
+重建任务上的负证据，不是全项目终止结论。真实市场制度匹配、社会信息、
+长期监控界面、组成可识别性及第二独立备份仍未完成。
 项目目标没有完成，也不因代码或测试全绿而自动完成。

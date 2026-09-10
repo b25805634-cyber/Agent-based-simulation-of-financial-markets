@@ -42,7 +42,7 @@ order book remain outside this implementation.
 | Interacting agents | Private account/trade history, finite resources, order/fill distinction, atomic conserving settlement | 46 market runs, 2,760 rounds, 600,000 decisions including sizing controls; conservation passed |
 | Separate order-rule effects | Independent vs intensity-linked quote treatment plus no-state controls under the same accounting | implemented and run; large rule sensitivity observed |
 | Closed-loop fidelity | Rollout coverage and audited Teacher probes; unchanged held-out evaluation | 120/120 real responses finished; selected-state MLP CE 0.774145, TV 0.233477, clear sell-bias diagnostic; new 11-empty/13-interior sizing-state plan frozen but not acquired |
-| Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | 195-task reconstructed six-asset Teacher comparison now running from frozen b763c0c; 39 published people, not newly recruited humans; full result pending |
+| Human benchmark | Neutral tasks, anonymous response schema, scoring, actual same-task human choices | 195-task reconstructed six-asset Teacher comparison finished: 193 valid, 1 provider failure, 1 invalid response; joint agreement 4/193 and stock-action agreement 48.446%; explicit negative evidence, not a human-likeness pass |
 | Sizing fidelity | Frozen action model, exact-support laws, validation-only selection and paired mean/sample controls | completed offline fit and 12 paired markets; 63 actual closed-position events in conditional sampled arm vs 0 for its mean; no human-validity claim |
 | Empirical market validation | Matched time/institution/data, whole-market replicates, controls, uncertainty | pending |
 | Social mechanism | Public-only messages and no-social/sham controls, if needed after the basic loop | pending |
@@ -88,21 +88,21 @@ open until the requested research system and its evidence have been verified.
 
 ## Next continuation priorities
 
-1. Continue the exact `human-early-teacher-live-20260909-a1` process; never
-   restart on a polling timeout or infer termination from a lagging counter.
-   It runs from isolated `.worktrees/human-early-live`, frozen `b763c0c`, with
-   the existing scoped Higgs watchdog. The old 120-request process finished
-   normally; its 9/9 artifacts and content-addressed restore were verified.
-2. Interpret the human comparison with matched valid-subset nulls, class-wise
-   counts/recall and coverage, without a post-hoc acceptance threshold. Keep
-   whole histories private and independent across requests. Known display
-   assumptions and the six-asset/single-asset mismatch remain explicit.
+1. Preserve and cite the completed `human-early-teacher-live-20260909-a1`
+   evidence; its 11/11 registered artifacts and private 0600 files are backed
+   up. It ran from isolated `.worktrees/human-early-live`, frozen `b763c0c`,
+   under the scoped Higgs watchdog. Do not merge its two failed tasks into a
+   hold baseline or present its 193 valid tasks as 195.
+2. Treat the human result as a bounded negative finding: Teacher stock-action
+   agreement 48.446% versus same-subset hold-null 57.081%, joint agreement
+   4/193 versus 25/193, and Teacher sell actions 363 versus human 114. Keep
+   display assumptions, six-asset/single-asset mismatch and no universal
+   threshold explicit.
 3. Develop a new protocol for action-direction and feasibility errors rather
-   than optimizing the already viewed 120-response diagnostic. Sizing CRPS
-   improves (0.097566 vs point mean 0.189859 on 92 non-hold responses), but
-   direction bias persists. The new 24-case sizing plan includes 11 empty
-   portfolios; some still receive nonzero sell probability. The plan has not
-   been acquired, and raw intent is not an actual short sale or execution.
+   than tuning against this seen diagnostic. Sizing CRPS improves (0.097566 vs
+   point mean 0.189859 on 92 non-hold responses), but direction bias persists.
+   The new 24-case sizing plan includes 11 empty portfolios and has not been
+   acquired; raw intent is not an actual short sale or execution.
 4. Improve researcher-facing monitoring and compile empirical market
    comparisons, then add independently controlled social information.
 
@@ -110,6 +110,7 @@ Actual results, hashes and boundaries: [2026-09-09 report](AGENT_MARKET_RESULTS_
 Second-stage evidence: [validation continuation](AGENT_MARKET_VALIDATION_20260909.md).
 Sizing and matched-task preparation: [2026-09-09 sizing report](AGENT_MARKET_SIZING_20260909.md).
 Completed real fidelity and ongoing human comparison: [2026-09-09 fidelity report](AGENT_MARKET_FIDELITY_20260909.md).
+Final Teacher–human comparison: [2026-09-10 human result](AGENT_MARKET_HUMAN_RESULT_20260910.md).
 
 GitHub review: [PR #13](https://github.com/b25805634-cyber/Agent-based-simulation-of-financial-markets/pull/13).
 The new branch is `feat/agent-market-loop`. Main has not been merged. Local
